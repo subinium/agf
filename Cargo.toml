@@ -1,6 +1,6 @@
 [package]
 name = "agf"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "AI Agent Session Finder TUI — unified launcher for Claude Code, Codex, and Cursor sessions"
 license = "MIT"

@@ -2,80 +2,36 @@
 
 **One TUI to find, resume, and manage all your AI coding agent sessions.**
 
-Stop remembering session IDs. Stop `cd`-ing to project directories. Just type `agf`.
-
 [![CI](https://github.com/subinium/agf/actions/workflows/ci.yml/badge.svg)](https://github.com/subinium/agf/actions)
 [![Release](https://img.shields.io/github/v/release/subinium/agf)](https://github.com/subinium/agf/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
-**Supports:** Claude Code · Codex · Cursor
 
 <!-- Uncomment after adding a demo recording:
 ![agf demo](./assets/demo.gif)
 -->
 
----
-
-## Install
-
-### Homebrew
+## Quick Start
 
 ```bash
 brew install subinium/tap/agf
-```
-
-### Cargo
-
-```bash
-cargo install agf
-```
-
-### From source
-
-```bash
-git clone https://github.com/subinium/agf.git
-cd agf
-cargo install --path .
-```
-
-### Pre-built binaries
-
-Grab the latest from [Releases](https://github.com/subinium/agf/releases).
-
-## Setup
-
-Add the shell wrapper so `cd` and `exec` work correctly:
-
-```bash
 agf setup
 ```
 
-This auto-detects your shell and appends the init line to your rc file (`.zshrc`, `.bashrc`, or `config.fish`).
+That's it. Restart your shell and run `agf`.
 
-<details>
-<summary>Manual setup</summary>
+## What it does
 
-```bash
-# Zsh (~/.zshrc)
-eval "$(agf init zsh)"
+`agf` scans sessions from **Claude Code**, **Codex**, and **Cursor**, then lets you:
 
-# Bash (~/.bashrc)
-eval "$(agf init bash)"
+- **Resume** any session with one keystroke
+- **Fuzzy search** across all projects and summaries
+- **Filter by agent** with Tab
+- **cd** into project directories
+- **Delete** old sessions
 
-# Fish (~/.config/fish/config.fish)
-agf init fish | source
-```
+No more remembering session IDs or `cd`-ing to project directories.
 
-</details>
-
-## Usage
-
-```bash
-agf                # open session finder
-agf my-project     # open with pre-applied filter
-```
-
-### Keybindings
+## Keybindings
 
 | Key | Action |
 |:---|:---|
@@ -83,52 +39,72 @@ agf my-project     # open with pre-applied filter
 | `↑` `↓` | Navigate |
 | `Enter` | Open action menu |
 | `→` | Preview session details |
-| `Tab` | Cycle agent filter |
+| `Tab` / `Shift+Tab` | Cycle agent filter |
 | `Ctrl+S` | Cycle sort (time / name / agent) |
 | `Esc` | Quit |
 
-### Actions
-
-| Action | Description |
-|:---|:---|
-| **Resume** | Launch agent with saved session ID |
-| **New session** | Start fresh with any installed agent |
-| **cd** | Navigate to project directory |
-| **Delete** | Remove session data (with confirmation) |
-
 ## Config
 
-`~/.config/agf/config.toml`
+Optional. `~/.config/agf/config.toml`
 
 ```toml
-sort_by = "time"       # "time", "name", "agent"
-max_sessions = 200     # limit loaded sessions
+sort_by = "time"       # "time" | "name" | "agent"
+max_sessions = 200
 ```
+
+## Alternative Install
+
+<details>
+<summary>From source</summary>
+
+```bash
+git clone https://github.com/subinium/agf.git
+cd agf
+cargo install --path .
+agf setup
+```
+
+</details>
+
+<details>
+<summary>Pre-built binaries</summary>
+
+Download from [Releases](https://github.com/subinium/agf/releases) and place in your `$PATH`.
+
+</details>
+
+<details>
+<summary>Manual shell setup</summary>
+
+If `agf setup` doesn't work for your environment:
+
+```bash
+# Zsh — add to ~/.zshrc
+eval "$(agf init zsh)"
+
+# Bash — add to ~/.bashrc
+eval "$(agf init bash)"
+
+# Fish — add to ~/.config/fish/config.fish
+agf init fish | source
+```
+
+</details>
 
 ## Supported Agents
 
-| Agent | Resume Command | Data Source |
+| Agent | Data Source | Detected via |
 |:---|:---|:---|
-| Claude Code | `claude --resume <id>` | `~/.claude/` |
-| Codex | `codex resume <id>` | `~/.codex/` |
-| Cursor | `cursor .` | `~/.cursor/` |
+| Claude Code | `~/.claude/` | `which claude` |
+| Codex | `~/.codex/` | `which codex` |
+| Cursor | `~/.cursor/` | `which cursor` |
 
-Only agents installed on your system are shown. `agf` auto-detects via `which`.
+Only installed agents are shown.
 
 ## Requirements
 
 - macOS or Linux
 - One or more of: `claude`, `codex`, `cursor`
-
-## Contributing
-
-PRs and issues welcome. See [CONTRIBUTING](#) or just:
-
-```bash
-git clone https://github.com/subinium/agf.git
-cd agf
-cargo run
-```
 
 ## License
 
