@@ -10,8 +10,6 @@ mod settings;
 mod shell;
 mod tui;
 
-use std::os::unix::process::CommandExt;
-
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -75,20 +73,8 @@ fn main() -> anyhow::Result<()> {
         app.apply_sort();
     }
     if let Some(cmd) = app.run()? {
-        // All commands go through exec — cd is wrapped with a new shell
-        let exec_cmd = if cmd.starts_with("cd ") && !cmd.contains("&&") {
-            // cd-only: chdir then spawn user's shell so they land in the directory
-            let user_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            format!("{cmd} && exec {user_shell}")
-        } else {
-            cmd
-        };
-        let err = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&exec_cmd)
-            .exec();
-        eprintln!("Failed to execute: {err}");
-        std::process::exit(1);
+        // Print command to stdout — the shell wrapper evals it in the real terminal
+        println!("{cmd}");
     }
 
     Ok(())
