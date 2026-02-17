@@ -1,10 +1,10 @@
 # agf
-
-**One TUI to find, resume, and manage all your AI coding agent sessions.**
-
 [![CI](https://github.com/subinium/agf/actions/workflows/ci.yml/badge.svg)](https://github.com/subinium/agf/actions)
 [![Release](https://img.shields.io/github/v/release/subinium/agf)](https://github.com/subinium/agf/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+> A fast TUI to find, resume, and manage your AI coding agent sessions.
+> Supports **Claude Code**, **Codex**, and **Cursor** — all in one place.
 
 <!-- Uncomment after adding a demo recording:
 ![agf demo](./assets/demo.gif)
@@ -17,19 +17,28 @@ brew install subinium/tap/agf
 agf setup
 ```
 
-That's it. Restart your shell and run `agf`.
+Restart your shell. Then just type `agf`.
 
-## What it does
+## Why agf?
 
-`agf` scans sessions from **Claude Code**, **Codex**, and **Cursor**, then lets you:
+If you use AI coding agents, you've probably done this:
 
-- **Resume** any session with one keystroke
-- **Fuzzy search** across all projects and summaries
-- **Filter by agent** with Tab
-- **cd** into project directories
-- **Delete** old sessions
+1. Forget which project you were working on
+2. `cd` into the wrong directory
+3. Try to remember the session ID
+4. Give up and start a new session
 
-No more remembering session IDs or `cd`-ing to project directories.
+`agf` fixes that. It scans all your agent sessions, shows them in a searchable list, and lets you resume with one keystroke.
+
+## Features
+
+- **Unified view** — Claude Code, Codex, and Cursor sessions in one list
+- **Fuzzy search** — find any session by project name or summary
+- **One-key resume** — select a session and hit Enter
+- **Agent filter** — Tab to cycle through agents
+- **Smart cd** — jump to any project directory
+- **Session cleanup** — delete old sessions with confirmation
+- **Auto-detection** — only shows agents installed on your system
 
 ## Keybindings
 
@@ -45,14 +54,22 @@ No more remembering session IDs or `cd`-ing to project directories.
 
 ## Config
 
-Optional. `~/.config/agf/config.toml`
+Optional. Create `~/.config/agf/config.toml`:
 
 ```toml
 sort_by = "time"       # "time" | "name" | "agent"
 max_sessions = 200
 ```
 
-## Alternative Install
+## Supported Agents
+
+| Agent | Resume | Data Source |
+|:---|:---|:---|
+| Claude Code | `claude --resume <id>` | `~/.claude/` |
+| Codex | `codex resume <id>` | `~/.codex/` |
+| Cursor | `cursor .` | `~/.cursor/` |
+
+## Install (other methods)
 
 <details>
 <summary>From source</summary>
@@ -66,45 +83,14 @@ agf setup
 
 </details>
 
-<details>
-<summary>Pre-built binaries</summary>
-
-Download from [Releases](https://github.com/subinium/agf/releases) and place in your `$PATH`.
-
-</details>
-
-<details>
-<summary>Manual shell setup</summary>
-
-If `agf setup` doesn't work for your environment:
-
-```bash
-# Zsh — add to ~/.zshrc
-eval "$(agf init zsh)"
-
-# Bash — add to ~/.bashrc
-eval "$(agf init bash)"
-
-# Fish — add to ~/.config/fish/config.fish
-agf init fish | source
-```
-
-</details>
-
-## Supported Agents
-
-| Agent | Data Source | Detected via |
-|:---|:---|:---|
-| Claude Code | `~/.claude/` | `which claude` |
-| Codex | `~/.codex/` | `which codex` |
-| Cursor | `~/.cursor/` | `which cursor` |
-
-Only installed agents are shown.
-
 ## Requirements
 
 - macOS or Linux
 - One or more of: `claude`, `codex`, `cursor`
+
+## Contributing
+
+Issues and PRs are welcome.
 
 ## License
 
