@@ -41,8 +41,8 @@ pub fn setup() -> anyhow::Result<()> {
     if rc_file.exists() {
         let content = fs::read_to_string(&rc_file)?;
         if content.contains("agf init") {
-            println!("Already configured in {}", rc_file.display());
-            println!("Restart your shell or run: source {}", rc_file.display());
+            eprintln!("Already configured in {}", rc_file.display());
+            eprintln!("Restart your shell or run: source {}", rc_file.display());
             return Ok(());
         }
     }
@@ -65,8 +65,8 @@ pub fn setup() -> anyhow::Result<()> {
     content.push_str(&format!("\n# agf - AI Agent Session Finder\n{init_line}\n"));
     fs::write(&rc_file, content)?;
 
-    println!("Added to {}", rc_file.display());
-    println!("Restart your shell or run: source {}", rc_file.display());
+    eprintln!("Added to {}", rc_file.display());
+    eprintln!("Restart your shell or run: source {}", rc_file.display());
     Ok(())
 }
 
