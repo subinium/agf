@@ -1,0 +1,33 @@
+[package]
+name = "agf"
+version = "0.1.0"
+edition = "2021"
+description = "AI Agent Session Finder TUI — unified launcher for Claude Code, Codex, and Cursor sessions"
+license = "MIT"
+repository = "https://github.com/subinium/agf"
+keywords = ["tui", "cli", "ai", "agent", "claude"]
+categories = ["command-line-utilities"]
+readme = "README.md"
+
+[dependencies]
+ratatui = { version = "0.29", features = ["crossterm"] }
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+hex = "0.4"
+nucleo = "0.5"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+dirs = "6"
+chrono = { version = "0.4", features = ["serde"] }
+md5 = "0.7"
+walkdir = "2"
+unicode-width = "0.2"
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
