@@ -1,15 +1,8 @@
-<div align="center">
-
 # agf
 
 **One TUI to find, resume, and manage all your AI coding agent sessions.**
 
-Stop remembering session IDs. Stop `cd`-ing to project directories.\
-Just type `agf`.
-
-<!-- Uncomment after adding a demo recording:
-<img src="./assets/demo.gif" alt="agf demo" width="740">
--->
+Stop remembering session IDs. Stop `cd`-ing to project directories. Just type `agf`.
 
 [![CI](https://github.com/subinium/agf/actions/workflows/ci.yml/badge.svg)](https://github.com/subinium/agf/actions)
 [![Release](https://img.shields.io/github/v/release/subinium/agf)](https://github.com/subinium/agf/releases)
@@ -17,7 +10,9 @@ Just type `agf`.
 
 **Supports:** Claude Code · Codex · Cursor
 
-</div>
+<!-- Uncomment after adding a demo recording:
+![agf demo](./assets/demo.gif)
+-->
 
 ---
 
@@ -39,7 +34,7 @@ cargo install agf
 
 ```bash
 git clone https://github.com/subinium/agf.git
-cd agent-tui-finder
+cd agf
 cargo install --path .
 ```
 
@@ -120,7 +115,7 @@ PRs and issues welcome. See [CONTRIBUTING](#) or just:
 
 ```bash
 git clone https://github.com/subinium/agf.git
-cd agent-tui-finder
+cd agf
 cargo run
 ```
 
