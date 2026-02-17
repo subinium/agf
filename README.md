@@ -47,6 +47,15 @@ Grab the latest from [Releases](https://github.com/subinium/agf/releases).
 Add the shell wrapper so `cd` and `exec` work correctly:
 
 ```bash
+agf setup
+```
+
+This auto-detects your shell and appends the init line to your rc file (`.zshrc`, `.bashrc`, or `config.fish`).
+
+<details>
+<summary>Manual setup</summary>
+
+```bash
 # Zsh (~/.zshrc)
 eval "$(agf init zsh)"
 
@@ -56,6 +65,8 @@ eval "$(agf init bash)"
 # Fish (~/.config/fish/config.fish)
 agf init fish | source
 ```
+
+</details>
 
 ## Usage
 

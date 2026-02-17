@@ -31,14 +31,23 @@ enum Commands {
         /// Shell type: zsh, bash, or fish
         shell: String,
     },
+    /// Auto-detect shell and add agf to your shell config
+    Setup,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(Commands::Init { shell }) = cli.command {
-        print!("{}", shell::shell_init(&shell));
-        return Ok(());
+    match cli.command {
+        Some(Commands::Init { shell }) => {
+            print!("{}", shell::shell_init(&shell));
+            return Ok(());
+        }
+        Some(Commands::Setup) => {
+            shell::setup()?;
+            return Ok(());
+        }
+        None => {}
     }
 
     let config = settings::Settings::load();
