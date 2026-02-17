@@ -1,5 +1,7 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 use crate::action;
 use crate::model::{Action, Agent};
@@ -28,7 +30,7 @@ pub fn render_browse(f: &mut Frame, app: &App) {
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // header / filter bar
-        Constraint::Min(1),   // session list
+        Constraint::Min(1),    // session list
         Constraint::Length(1), // footer
     ])
     .split(area);
@@ -106,7 +108,11 @@ fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
         let is_selected = vi == app.selected;
         let match_positions = app.match_positions.get(vi).cloned().unwrap_or_default();
 
-        let bg = if is_selected { HIGHLIGHT_BG } else { Color::Reset };
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            Color::Reset
+        };
         let indicator = if is_selected { "> " } else { "  " };
 
         // Build right side first to know how much space is left
@@ -120,7 +126,10 @@ fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
 
         // Build left side
         let mut spans: Vec<Span> = Vec::new();
-        spans.push(Span::styled(indicator, Style::new().fg(Color::White).bg(bg)));
+        spans.push(Span::styled(
+            indicator,
+            Style::new().fg(Color::White).bg(bg),
+        ));
 
         let agent_label = format!("{:<12}", session.agent.to_string());
         spans.push(Span::styled(
@@ -199,10 +208,10 @@ fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
 
     // Scrollbar
     if app.filtered_indices.len() > visible_count {
-        let mut scrollbar_state = ScrollbarState::new(app.filtered_indices.len())
-            .position(app.selected);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .style(Style::new().fg(GRAY_500));
+        let mut scrollbar_state =
+            ScrollbarState::new(app.filtered_indices.len()).position(app.selected);
+        let scrollbar =
+            Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::new().fg(GRAY_500));
         f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
@@ -219,11 +228,18 @@ fn render_session_list_compact(f: &mut Frame, area: Rect, app: &App) {
         let session = &app.sessions[session_idx];
         let is_selected = vi == app.selected;
 
-        let bg = if is_selected { HIGHLIGHT_BG } else { Color::Reset };
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            Color::Reset
+        };
         let indicator = if is_selected { "> " } else { "  " };
 
         let mut spans: Vec<Span> = Vec::new();
-        spans.push(Span::styled(indicator, Style::new().fg(Color::White).bg(bg)));
+        spans.push(Span::styled(
+            indicator,
+            Style::new().fg(Color::White).bg(bg),
+        ));
         spans.push(Span::styled(
             format!("{:<12}", session.agent.to_string()),
             Style::new().fg(agent_color(session.agent)).bold().bg(bg),
@@ -256,12 +272,10 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let total = app.sessions.len();
     let filtered = app.filtered_indices.len();
 
-    let mut parts = vec![
-        Span::styled(
-            format!(" {filtered} of {total} sessions"),
-            Style::new().fg(GRAY_500),
-        ),
-    ];
+    let mut parts = vec![Span::styled(
+        format!(" {filtered} of {total} sessions"),
+        Style::new().fg(GRAY_500),
+    )];
 
     if let Some(agent) = app.agent_filter {
         parts.push(Span::styled(
@@ -294,7 +308,7 @@ pub fn render_action_select(f: &mut Frame, app: &App) {
         Constraint::Length(1), // session info
         Constraint::Length(1), // separator
         Constraint::Length(1), // blank
-        Constraint::Min(4),   // actions
+        Constraint::Min(4),    // actions
         Constraint::Length(1), // blank
         Constraint::Length(1), // separator
         Constraint::Length(1), // footer
@@ -310,7 +324,10 @@ pub fn render_action_select(f: &mut Frame, app: &App) {
 
     // Session info line
     let info_spans = vec![
-        Span::styled(format!(" {} ", session.agent), Style::new().fg(agent_color(session.agent)).bold()),
+        Span::styled(
+            format!(" {} ", session.agent),
+            Style::new().fg(agent_color(session.agent)).bold(),
+        ),
         Span::styled("│ ", Style::new().fg(SEPARATOR)),
         Span::styled(&session.project_name, Style::new().fg(BRIGHT_WHITE).bold()),
         Span::styled(" │ ", Style::new().fg(SEPARATOR)),
@@ -322,7 +339,10 @@ pub fn render_action_select(f: &mut Frame, app: &App) {
         info.push(Span::styled(branch.as_str(), Style::new().fg(GREEN_400)));
     }
     info.push(Span::styled(" │ ", Style::new().fg(SEPARATOR)));
-    info.push(Span::styled(session.time_display(), Style::new().fg(VIOLET)));
+    info.push(Span::styled(
+        session.time_display(),
+        Style::new().fg(VIOLET),
+    ));
     f.render_widget(Paragraph::new(Line::from(info)), chunks[1]);
 
     f.render_widget(
@@ -336,7 +356,11 @@ pub fn render_action_select(f: &mut Frame, app: &App) {
 
     for (i, &act) in actions.iter().enumerate() {
         let is_selected = i == app.action_index;
-        let bg = if is_selected { HIGHLIGHT_BG } else { Color::Reset };
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            Color::Reset
+        };
         let indicator = if is_selected { " > " } else { "   " };
 
         let label = act.to_string();
@@ -393,7 +417,7 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
         Constraint::Length(1), // header
         Constraint::Length(1), // separator
         Constraint::Length(1), // blank
-        Constraint::Min(3),   // agents
+        Constraint::Min(3),    // agents
         Constraint::Length(1), // blank
         Constraint::Length(1), // separator
         Constraint::Length(1), // footer
@@ -423,7 +447,11 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
     let mut agent_lines: Vec<Line> = Vec::new();
     for (i, &agent) in app.installed_agents.iter().enumerate() {
         let is_selected = i == app.agent_index;
-        let bg = if is_selected { HIGHLIGHT_BG } else { Color::Reset };
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            Color::Reset
+        };
         let indicator = if is_selected { " > " } else { "   " };
 
         let preview = action::new_session_preview(agent);
@@ -498,7 +526,10 @@ pub fn render_delete_confirm(f: &mut Frame, app: &App) {
     // Session info
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!("  {} ", session.agent), Style::new().fg(agent_color(session.agent)).bold()),
+            Span::styled(
+                format!("  {} ", session.agent),
+                Style::new().fg(agent_color(session.agent)).bold(),
+            ),
             Span::styled("│ ", Style::new().fg(SEPARATOR)),
             Span::styled(&session.project_name, Style::new().fg(BRIGHT_WHITE)),
             Span::styled(" │ ", Style::new().fg(SEPARATOR)),
@@ -531,7 +562,11 @@ pub fn render_delete_confirm(f: &mut Frame, app: &App) {
     let mut opt_lines: Vec<Line> = Vec::new();
     for (i, &opt) in options.iter().enumerate() {
         let is_selected = i == app.delete_index;
-        let bg = if is_selected { HIGHLIGHT_BG } else { Color::Reset };
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            Color::Reset
+        };
         let indicator = if is_selected { " > " } else { "   " };
 
         let label_style = if i == 0 {
@@ -561,7 +596,13 @@ pub fn render_delete_confirm(f: &mut Frame, app: &App) {
     );
 }
 
-fn highlight_text(text: &str, positions: &[u32], offset: usize, _is_selected: bool, bg: Color) -> Vec<Span<'static>> {
+fn highlight_text(
+    text: &str,
+    positions: &[u32],
+    offset: usize,
+    _is_selected: bool,
+    bg: Color,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let chars: Vec<char> = text.chars().collect();
 
@@ -582,7 +623,10 @@ fn highlight_text(text: &str, positions: &[u32], offset: usize, _is_selected: bo
                 i += 1;
             }
             let normal: String = chars[start..i].iter().collect();
-            spans.push(Span::styled(normal, Style::new().fg(BRIGHT_WHITE).bold().bg(bg)));
+            spans.push(Span::styled(
+                normal,
+                Style::new().fg(BRIGHT_WHITE).bold().bg(bg),
+            ));
         }
     }
     spans
@@ -600,7 +644,7 @@ pub fn render_preview(f: &mut Frame, app: &App) {
         Constraint::Length(1), // header
         Constraint::Length(1), // separator
         Constraint::Length(1), // blank
-        Constraint::Min(6),   // detail lines
+        Constraint::Min(6),    // detail lines
         Constraint::Length(1), // blank
         Constraint::Length(1), // separator
         Constraint::Length(1), // footer
@@ -614,9 +658,10 @@ pub fn render_preview(f: &mut Frame, app: &App) {
     );
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" Session Detail", Style::new().fg(BRIGHT_WHITE).bold()),
-        ])),
+        Paragraph::new(Line::from(vec![Span::styled(
+            " Session Detail",
+            Style::new().fg(BRIGHT_WHITE).bold(),
+        )])),
         chunks[1],
     );
 
@@ -630,7 +675,10 @@ pub fn render_preview(f: &mut Frame, app: &App) {
 
     lines.push(Line::from(vec![
         Span::styled("  Agent:    ", Style::new().fg(GRAY_500)),
-        Span::styled(session.agent.to_string(), Style::new().fg(agent_color(session.agent)).bold()),
+        Span::styled(
+            session.agent.to_string(),
+            Style::new().fg(agent_color(session.agent)).bold(),
+        ),
     ]));
 
     lines.push(Line::from(vec![
@@ -654,10 +702,17 @@ pub fn render_preview(f: &mut Frame, app: &App) {
     ]));
 
     if let Some(ref branch) = session.git_branch {
-        let dirty_marker = if session.git_dirty == Some(true) { " *" } else { "" };
+        let dirty_marker = if session.git_dirty == Some(true) {
+            " *"
+        } else {
+            ""
+        };
         lines.push(Line::from(vec![
             Span::styled("  Branch:   ", Style::new().fg(GRAY_500)),
-            Span::styled(format!("{branch}{dirty_marker}"), Style::new().fg(GREEN_400)),
+            Span::styled(
+                format!("{branch}{dirty_marker}"),
+                Style::new().fg(GREEN_400),
+            ),
         ]));
     }
 

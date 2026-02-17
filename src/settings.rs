@@ -1,18 +1,18 @@
-use std::path::PathBuf;
-use std::fs;
 use serde::Deserialize;
+use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug, Deserialize, Default)]
 #[allow(dead_code)]
 pub struct Settings {
     #[serde(default)]
-    pub default_agent: Option<String>,  // "claude", "codex", "cursor"
+    pub default_agent: Option<String>, // "claude", "codex", "cursor"
     #[serde(default)]
-    pub sort_by: Option<String>,        // "time", "name", "agent"
+    pub sort_by: Option<String>, // "time", "name", "agent"
     #[serde(default)]
-    pub show_preview: Option<bool>,     // show detail preview by default
+    pub show_preview: Option<bool>, // show detail preview by default
     #[serde(default)]
-    pub max_sessions: Option<usize>,    // limit number of sessions loaded
+    pub max_sessions: Option<usize>, // limit number of sessions loaded
 }
 
 impl Settings {

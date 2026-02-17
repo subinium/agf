@@ -37,7 +37,12 @@ impl FuzzyMatcher {
                 .collect();
         }
 
-        let pattern = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
+        let pattern = Pattern::new(
+            query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
 
         let mut results: Vec<MatchResult> = sessions
             .iter()

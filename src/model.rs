@@ -20,9 +20,9 @@ impl fmt::Display for Agent {
 impl Agent {
     pub fn color(&self) -> (u8, u8, u8) {
         match self {
-            Agent::ClaudeCode => (217, 119, 6),   // #D97706 amber
-            Agent::Codex => (16, 185, 129),        // #10B981 emerald
-            Agent::Cursor => (99, 102, 241),       // #6366F1 indigo
+            Agent::ClaudeCode => (217, 119, 6), // #D97706 amber
+            Agent::Codex => (16, 185, 129),     // #10B981 emerald
+            Agent::Cursor => (99, 102, 241),    // #6366F1 indigo
         }
     }
 
@@ -89,7 +89,7 @@ impl Session {
 
     /// Absolute date: `MM/DD` or `MM/DD/YY` if different year
     pub fn date_str(&self) -> String {
-        use chrono::{TimeZone, Local};
+        use chrono::{Local, TimeZone};
         let dt = match Local.timestamp_millis_opt(self.timestamp) {
             chrono::LocalResult::Single(dt) => dt,
             _ => return String::new(),

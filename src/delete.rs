@@ -249,7 +249,8 @@ fn encode_path_as_dashes(path: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn home_dir() -> Result<std::path::PathBuf, io::Error> {
-    dirs::home_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No home directory found"))
+    dirs::home_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No home directory found"))
 }
 
 fn claude_dir() -> Result<std::path::PathBuf, io::Error> {

@@ -167,11 +167,7 @@ fn try_reconstruct(path_with_dashes: &str) -> String {
     best_path
 }
 
-fn read_chat_meta(
-    cursor_dir: &Path,
-    path_md5: &str,
-    session_id: &str,
-) -> Option<CursorChatMeta> {
+fn read_chat_meta(cursor_dir: &Path, path_md5: &str, session_id: &str) -> Option<CursorChatMeta> {
     let db_path = cursor_dir
         .join("chats")
         .join(path_md5)
@@ -184,11 +180,9 @@ fn read_chat_meta(
 
     let conn = Connection::open(&db_path).ok()?;
     let hex_value: String = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = '0'",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT value FROM meta WHERE key = '0'", [], |row| {
+            row.get(0)
+        })
         .ok()?;
 
     let decoded = hex::decode(&hex_value).ok()?;

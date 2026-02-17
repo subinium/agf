@@ -125,7 +125,8 @@ pub fn handle_action_select(app: &mut App, key: KeyEvent) -> InputResult {
                 }
                 _ => {
                     if let Some(session) = app.selected_session().cloned() {
-                        if let Some(cmd) = action::generate_command(&session, selected_action, None) {
+                        if let Some(cmd) = action::generate_command(&session, selected_action, None)
+                        {
                             return InputResult::Execute(cmd);
                         }
                     }
@@ -153,8 +154,7 @@ pub fn handle_agent_select(app: &mut App, key: KeyEvent) -> InputResult {
         }
 
         (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-            if !app.installed_agents.is_empty()
-                && app.agent_index < app.installed_agents.len() - 1
+            if !app.installed_agents.is_empty() && app.agent_index < app.installed_agents.len() - 1
             {
                 app.agent_index += 1;
             }
@@ -164,7 +164,9 @@ pub fn handle_agent_select(app: &mut App, key: KeyEvent) -> InputResult {
         (KeyCode::Enter, _) => {
             if let Some(&agent) = app.installed_agents.get(app.agent_index) {
                 if let Some(session) = app.selected_session().cloned() {
-                    if let Some(cmd) = action::generate_command(&session, Action::NewSession, Some(agent)) {
+                    if let Some(cmd) =
+                        action::generate_command(&session, Action::NewSession, Some(agent))
+                    {
                         return InputResult::Execute(cmd);
                     }
                 }

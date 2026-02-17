@@ -73,9 +73,15 @@ impl App {
     pub fn apply_sort(&mut self) {
         match self.sort_mode {
             SortMode::Time => self.sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)),
-            SortMode::Name => self.sessions.sort_by(|a, b| a.project_name.to_lowercase().cmp(&b.project_name.to_lowercase())),
+            SortMode::Name => self.sessions.sort_by(|a, b| {
+                a.project_name
+                    .to_lowercase()
+                    .cmp(&b.project_name.to_lowercase())
+            }),
             SortMode::Agent => self.sessions.sort_by(|a, b| {
-                a.agent.to_string().cmp(&b.agent.to_string())
+                a.agent
+                    .to_string()
+                    .cmp(&b.agent.to_string())
                     .then(b.timestamp.cmp(&a.timestamp))
             }),
         }
@@ -105,10 +111,7 @@ impl App {
 
             let results = self.fuzzy.filter(&subset, &self.query);
 
-            self.filtered_indices = results
-                .iter()
-                .map(|r| agent_filtered[r.index])
-                .collect();
+            self.filtered_indices = results.iter().map(|r| agent_filtered[r.index]).collect();
             self.match_positions = results.iter().map(|r| r.positions.clone()).collect();
         }
 
