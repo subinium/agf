@@ -361,16 +361,21 @@ pub fn render_action_select(f: &mut Frame, app: &App) {
         } else {
             Color::Reset
         };
-        let indicator = if is_selected { " > " } else { "   " };
+        let indicator = format!(" {}) ", i + 1);
 
         let label = act.to_string();
 
-        let label_style = if act == Action::Delete {
-            Style::new().fg(RED).bold().bg(bg)
+        let base_style = if act == Action::Delete {
+            Style::new().fg(RED).bg(bg)
         } else if act == Action::Back {
             Style::new().fg(GRAY_500).bg(bg)
         } else {
-            Style::new().fg(BRIGHT_WHITE).bold().bg(bg)
+            Style::new().fg(BRIGHT_WHITE).bg(bg)
+        };
+        let label_style = if is_selected {
+            base_style.bold()
+        } else {
+            base_style
         };
 
         let preview = action::action_preview(session, act);
@@ -443,25 +448,29 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
         chunks[2],
     );
 
-    // Agent list
+    // Option list (default agents + mode-select variants)
     let mut agent_lines: Vec<Line> = Vec::new();
-    for (i, &agent) in app.installed_agents.iter().enumerate() {
+    for (i, opt) in app.new_session_options.iter().enumerate() {
         let is_selected = i == app.agent_index;
         let bg = if is_selected {
             HIGHLIGHT_BG
         } else {
             Color::Reset
         };
-        let indicator = if is_selected { " > " } else { "   " };
-
-        let preview = action::new_session_preview(agent);
-        let label = format!("{agent}");
-        let padding_len = (area.width as usize).saturating_sub(3 + label.len() + 4 + preview.len());
+        let indicator = format!(" {}) ", i + 1);
+        let label = &opt.label;
+        let padding_len = (area.width as usize).saturating_sub(indicator.len() + label.len());
 
         agent_lines.push(Line::from(vec![
-            Span::styled(indicator, Style::new().fg(Color::White).bg(bg)),
-            Span::styled(label, Style::new().fg(agent_color(agent)).bold().bg(bg)),
-            Span::styled(format!("    {preview}"), Style::new().fg(GRAY_500).bg(bg)),
+            Span::styled(indicator, Style::new().fg(GRAY_400).bg(bg)),
+            Span::styled(label.clone(), {
+                let s = Style::new().fg(agent_color(opt.agent)).bg(bg);
+                if is_selected {
+                    s.bold()
+                } else {
+                    s
+                }
+            }),
             Span::styled(" ".repeat(padding_len), Style::new().bg(bg)),
         ]));
     }
@@ -475,7 +484,98 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            " enter confirm │ esc back to actions",
+            " 1-9 select │ enter confirm │ esc back",
+            Style::new().fg(GRAY_500),
+        )),
+        chunks[7],
+    );
+}
+
+pub fn render_mode_select(f: &mut Frame, app: &App) {
+    let area = f.area();
+    if app.selected_session().is_none() {
+        return;
+    }
+
+    let agent_label = app
+        .new_session_options
+        .get(app.agent_index)
+        .map(|o| o.label.as_str())
+        .unwrap_or("agent");
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // header
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // blank
+        Constraint::Min(3),    // mode options
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    let sep = "─".repeat(area.width as usize);
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Select mode for ", Style::new().fg(BRIGHT_WHITE)),
+            Span::styled(agent_label, Style::new().fg(YELLOW).bold()),
+        ])),
+        chunks[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[2],
+    );
+
+    let mut mode_lines: Vec<Line> = Vec::new();
+    for (i, &(label, flags)) in app.mode_options.iter().enumerate() {
+        let is_selected = i == app.mode_index;
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            Color::Reset
+        };
+        let indicator = format!(" {}) ", i + 1);
+        let flag_preview = if flags.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", flags.trim())
+        };
+        let padding_len = (area.width as usize)
+            .saturating_sub(indicator.len() + label.len() + flag_preview.len());
+
+        mode_lines.push(Line::from(vec![
+            Span::styled(indicator, Style::new().fg(GRAY_400).bg(bg)),
+            Span::styled(label, {
+                let s = Style::new().fg(BRIGHT_WHITE).bg(bg);
+                if is_selected {
+                    s.bold()
+                } else {
+                    s
+                }
+            }),
+            Span::styled(flag_preview, Style::new().fg(GRAY_500).bg(bg)),
+            Span::styled(" ".repeat(padding_len), Style::new().bg(bg)),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(mode_lines), chunks[4]);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[6],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " 1-9 select │ enter confirm │ esc back",
             Style::new().fg(GRAY_500),
         )),
         chunks[7],

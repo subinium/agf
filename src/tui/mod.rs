@@ -19,8 +19,17 @@ pub enum Mode {
     Browse,
     ActionSelect,
     AgentSelect,
+    PermissionSelect, // permission/approval mode picker
     DeleteConfirm,
     Preview,
+}
+
+/// An option in the "New Session" agent picker.
+#[derive(Debug, Clone)]
+pub struct NewSessionOption {
+    pub agent: Agent,
+    pub label: String,
+    pub command_suffix: &'static str, // extra flags appended to the base command
 }
 
 pub struct App {
@@ -35,6 +44,9 @@ pub struct App {
     pub agent_index: usize,
     pub delete_index: usize, // 0 = Yes, 1 = Cancel
     pub installed_agents: Vec<Agent>,
+    pub new_session_options: Vec<NewSessionOption>,
+    pub mode_index: usize,
+    pub mode_options: Vec<(&'static str, &'static str)>, // (label, flag)
     pub scroll_offset: usize,
     pub viewport_height: usize, // actual visible item count, set during render
     pub sort_mode: SortMode,
@@ -44,6 +56,28 @@ pub struct App {
 impl App {
     pub fn new(sessions: Vec<Session>, initial_query: Option<String>) -> Self {
         let agents = installed_agents();
+
+        // Build new-session options: default for each agent, then mode-select variants
+        let mut new_session_options = Vec::new();
+        for &agent in &agents {
+            new_session_options.push(NewSessionOption {
+                agent,
+                label: format!("{agent}"),
+                command_suffix: "",
+            });
+        }
+        for &agent in &agents {
+            let (label, suffix) = match agent {
+                Agent::ClaudeCode => ("Claude Code (select mode)", " --permission-mode"),
+                Agent::Codex => ("Codex (select mode)", " --approval-mode"),
+            };
+            new_session_options.push(NewSessionOption {
+                agent,
+                label: label.to_string(),
+                command_suffix: suffix,
+            });
+        }
+
         let filtered_indices: Vec<usize> = (0..sessions.len()).collect();
         let match_positions: Vec<Vec<u32>> = vec![Vec::new(); sessions.len()];
         let query = initial_query.unwrap_or_default();
@@ -59,6 +93,9 @@ impl App {
             agent_index: 0,
             delete_index: 1,
             installed_agents: agents,
+            new_session_options,
+            mode_index: 0,
+            mode_options: Vec::new(),
             scroll_offset: 0,
             viewport_height: 4,
             sort_mode: SortMode::Time,
@@ -223,6 +260,7 @@ impl App {
                     Mode::Browse => render::render_browse(f, self),
                     Mode::ActionSelect => render::render_action_select(f, self),
                     Mode::AgentSelect => render::render_agent_select(f, self),
+                    Mode::PermissionSelect => render::render_mode_select(f, self),
                     Mode::DeleteConfirm => render::render_delete_confirm(f, self),
                     Mode::Preview => render::render_preview(f, self),
                 }
@@ -233,6 +271,7 @@ impl App {
                     Mode::Browse => input::handle_browse(self, key),
                     Mode::ActionSelect => input::handle_action_select(self, key),
                     Mode::AgentSelect => input::handle_agent_select(self, key),
+                    Mode::PermissionSelect => input::handle_mode_select(self, key),
                     Mode::DeleteConfirm => input::handle_delete_confirm(self, key),
                     Mode::Preview => input::handle_preview(self, key),
                 };

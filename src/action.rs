@@ -41,11 +41,13 @@ pub fn action_preview(session: &Session, action: Action) -> String {
     }
 }
 
-pub fn new_session_preview(agent: Agent) -> &'static str {
-    match agent {
+pub fn new_session_with_flags(session: &Session, agent: Agent, flags: &str) -> Option<String> {
+    let escaped_path = shell_escape(&session.project_path);
+    let base = match agent {
         Agent::ClaudeCode => "claude",
         Agent::Codex => "codex",
-    }
+    };
+    Some(format!("cd {escaped_path} && {base}{flags}"))
 }
 
 fn shell_escape(s: &str) -> String {
