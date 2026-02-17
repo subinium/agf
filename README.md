@@ -1,6 +1,6 @@
 # agf
 [![CI](https://github.com/subinium/agf/actions/workflows/ci.yml/badge.svg)](https://github.com/subinium/agf/actions)
-[![Release](https://img.shields.io/github/v/release/subinium/agf)](https://github.com/subinium/agf/releases)
+[![Release](https://img.shields.io/github/v/release/subinium/agf?include_prereleases&sort=semver)](https://github.com/subinium/agf/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > A fast TUI to find, resume, and manage your AI coding agent sessions.
