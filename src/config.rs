@@ -16,15 +16,10 @@ pub fn codex_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".codex"))
 }
 
-pub fn cursor_dir() -> Result<PathBuf, AgfError> {
-    Ok(home_dir()?.join(".cursor"))
-}
-
 pub fn is_agent_installed(agent: Agent) -> bool {
     let cmd = match agent {
         Agent::ClaudeCode => "claude",
         Agent::Codex => "codex",
-        Agent::Cursor => "cursor",
     };
     Command::new("which")
         .arg(cmd)

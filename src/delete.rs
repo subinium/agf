@@ -13,7 +13,6 @@ pub fn delete_session(session: &Session) -> Result<(), io::Error> {
     match session.agent {
         Agent::ClaudeCode => delete_claude_session(session),
         Agent::Codex => delete_codex_session(session),
-        Agent::Cursor => delete_cursor_session(session),
     }
 }
 
@@ -205,46 +204,6 @@ fn line_has_codex_session_id(line: &str, session_id: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Cursor
-// ---------------------------------------------------------------------------
-
-/// Cursor stores session data in two places:
-/// 1. `~/.cursor/chats/<md5_of_project_path>/<sessionId>/` (contains store.db)
-/// 2. `~/.cursor/projects/<dash_encoded_path>/agent-transcripts/<sessionId>.txt`
-fn delete_cursor_session(session: &Session) -> Result<(), io::Error> {
-    let cursor_dir = cursor_dir()?;
-    let path_md5 = format!("{:x}", md5::compute(&session.project_path));
-
-    // 1. Delete the chat directory: ~/.cursor/chats/<md5>/<sessionId>/
-    let chat_dir = cursor_dir
-        .join("chats")
-        .join(&path_md5)
-        .join(&session.session_id);
-    if chat_dir.exists() {
-        fs::remove_dir_all(&chat_dir)?;
-    }
-
-    // 2. Delete the transcript file
-    let dash_encoded = encode_path_as_dashes(&session.project_path);
-    let transcript_path = cursor_dir
-        .join("projects")
-        .join(&dash_encoded)
-        .join("agent-transcripts")
-        .join(format!("{}.txt", &session.session_id));
-    if transcript_path.exists() {
-        fs::remove_file(&transcript_path)?;
-    }
-
-    Ok(())
-}
-
-/// Encode an absolute path into Cursor's dash-separated directory name.
-/// `/Users/foo/project` becomes `-Users-foo-project`.
-fn encode_path_as_dashes(path: &str) -> String {
-    path.replace('/', "-")
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -259,8 +218,4 @@ fn claude_dir() -> Result<std::path::PathBuf, io::Error> {
 
 fn codex_dir() -> Result<std::path::PathBuf, io::Error> {
     Ok(home_dir()?.join(".codex"))
-}
-
-fn cursor_dir() -> Result<std::path::PathBuf, io::Error> {
-    Ok(home_dir()?.join(".cursor"))
 }

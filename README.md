@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > A fast TUI to find, resume, and manage your AI coding agent sessions.
-> Supports **Claude Code**, **Codex**, and **Cursor** — all in one place.
+> Supports **Claude Code** and **Codex** — all in one place.
 
 ![agf demo](./assets/demo.gif)
 
@@ -30,7 +30,7 @@ If you use AI coding agents, you've probably done this:
 
 ## Features
 
-- **Unified view** — Claude Code, Codex, and Cursor sessions in one list
+- **Unified view** — Claude Code and Codex sessions in one list
 - **Fuzzy search** — find any session by project name or summary
 - **One-key resume** — select a session and hit Enter
 - **Agent filter** — Tab to cycle through agents
@@ -65,7 +65,6 @@ max_sessions = 200
 |:---|:---|:---|
 | Claude Code | `claude --resume <id>` | `~/.claude/` |
 | Codex | `codex resume <id>` | `~/.codex/` |
-| Cursor | `cursor .` | `~/.cursor/` |
 
 ## Install (other methods)
 
@@ -84,7 +83,7 @@ agf setup
 ## Requirements
 
 - macOS or Linux
-- One or more of: `claude`, `codex`, `cursor`
+- One or more of: `claude`, `codex`
 
 ## Contributing
 

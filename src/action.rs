@@ -12,7 +12,6 @@ pub fn generate_command(
             let cmd = match session.agent {
                 Agent::ClaudeCode => format!("claude --resume '{}'", session.session_id),
                 Agent::Codex => format!("codex resume '{}'", session.session_id),
-                Agent::Cursor => "cursor .".to_string(),
             };
             Some(format!("cd {escaped_path} && {cmd}"))
         }
@@ -21,7 +20,6 @@ pub fn generate_command(
             let cmd = match agent {
                 Agent::ClaudeCode => "claude".to_string(),
                 Agent::Codex => "codex".to_string(),
-                Agent::Cursor => "cursor .".to_string(),
             };
             Some(format!("cd {escaped_path} && {cmd}"))
         }
@@ -35,7 +33,6 @@ pub fn action_preview(session: &Session, action: Action) -> String {
         Action::Resume => match session.agent {
             Agent::ClaudeCode => format!("claude --resume '{}'", session.session_id),
             Agent::Codex => format!("codex resume '{}'", session.session_id),
-            Agent::Cursor => "cursor .".to_string(),
         },
         Action::NewSession => "choose agent CLI...".to_string(),
         Action::Cd => format!("cd {}", session.display_path()),
@@ -48,7 +45,6 @@ pub fn new_session_preview(agent: Agent) -> &'static str {
     match agent {
         Agent::ClaudeCode => "claude",
         Agent::Codex => "codex",
-        Agent::Cursor => "cursor .",
     }
 }
 

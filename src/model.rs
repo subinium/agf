@@ -4,7 +4,6 @@ use std::fmt;
 pub enum Agent {
     ClaudeCode,
     Codex,
-    Cursor,
 }
 
 impl fmt::Display for Agent {
@@ -12,7 +11,6 @@ impl fmt::Display for Agent {
         match self {
             Agent::ClaudeCode => write!(f, "Claude Code"),
             Agent::Codex => write!(f, "Codex"),
-            Agent::Cursor => write!(f, "Cursor"),
         }
     }
 }
@@ -22,12 +20,11 @@ impl Agent {
         match self {
             Agent::ClaudeCode => (217, 119, 6), // #D97706 amber
             Agent::Codex => (16, 185, 129),     // #10B981 emerald
-            Agent::Cursor => (99, 102, 241),    // #6366F1 indigo
         }
     }
 
     pub fn all() -> &'static [Agent] {
-        &[Agent::ClaudeCode, Agent::Codex, Agent::Cursor]
+        &[Agent::ClaudeCode, Agent::Codex]
     }
 }
 
