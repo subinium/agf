@@ -11,12 +11,9 @@ Just type `agf`.
 <img src="./assets/demo.gif" alt="agf demo" width="740">
 -->
 
-<!--
 [![CI](https://github.com/subinium/agf/actions/workflows/ci.yml/badge.svg)](https://github.com/subinium/agf/actions)
-[![Crates.io](https://img.shields.io/crates/v/agf)](https://crates.io/crates/agf)
-[![Release](https://img.shields.io/github/v/release/subinium/agent-tui-finder)](https://github.com/subinium/agf/releases)
+[![Release](https://img.shields.io/github/v/release/subinium/agf)](https://github.com/subinium/agf/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
--->
 
 **Supports:** Claude Code · Codex · Cursor
 
