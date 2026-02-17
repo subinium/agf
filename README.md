@@ -6,9 +6,7 @@
 > A fast TUI to find, resume, and manage your AI coding agent sessions.
 > Supports **Claude Code**, **Codex**, and **Cursor** — all in one place.
 
-<!-- Uncomment after adding a demo recording:
 ![agf demo](./assets/demo.gif)
--->
 
 ## Quick Start
 
