@@ -75,16 +75,3 @@ jobs:
           files: |
             artifacts/**/*.tar.gz
             artifacts/checksums.txt
-
-  homebrew:
-    name: Update Homebrew
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Update Homebrew formula
-        uses: dawidd6/action-homebrew-bump-formula@v4
-        with:
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          tap: subinium/tap
-          formula: agf
-          tag: ${{ github.ref_name }}
