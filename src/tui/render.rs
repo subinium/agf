@@ -671,35 +671,31 @@ pub fn render_preview(f: &mut Frame, app: &App) {
     );
 
     // Detail lines
-    let mut lines: Vec<Line> = Vec::new();
-
-    lines.push(Line::from(vec![
-        Span::styled("  Agent:    ", Style::new().fg(GRAY_500)),
-        Span::styled(
-            session.agent.to_string(),
-            Style::new().fg(agent_color(session.agent)).bold(),
-        ),
-    ]));
-
-    lines.push(Line::from(vec![
-        Span::styled("  Project:  ", Style::new().fg(GRAY_500)),
-        Span::styled(&session.project_name, Style::new().fg(BRIGHT_WHITE).bold()),
-    ]));
-
-    lines.push(Line::from(vec![
-        Span::styled("  Path:     ", Style::new().fg(GRAY_500)),
-        Span::styled(session.display_path(), Style::new().fg(GRAY_400)),
-    ]));
-
-    lines.push(Line::from(vec![
-        Span::styled("  Session:  ", Style::new().fg(GRAY_500)),
-        Span::styled(&session.session_id, Style::new().fg(GRAY_400)),
-    ]));
-
-    lines.push(Line::from(vec![
-        Span::styled("  Time:     ", Style::new().fg(GRAY_500)),
-        Span::styled(session.time_display(), Style::new().fg(VIOLET)),
-    ]));
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("  Agent:    ", Style::new().fg(GRAY_500)),
+            Span::styled(
+                session.agent.to_string(),
+                Style::new().fg(agent_color(session.agent)).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Project:  ", Style::new().fg(GRAY_500)),
+            Span::styled(&session.project_name, Style::new().fg(BRIGHT_WHITE).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Path:     ", Style::new().fg(GRAY_500)),
+            Span::styled(session.display_path(), Style::new().fg(GRAY_400)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Session:  ", Style::new().fg(GRAY_500)),
+            Span::styled(&session.session_id, Style::new().fg(GRAY_400)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Time:     ", Style::new().fg(GRAY_500)),
+            Span::styled(session.time_display(), Style::new().fg(VIOLET)),
+        ]),
+    ];
 
     if let Some(ref branch) = session.git_branch {
         let dirty_marker = if session.git_dirty == Some(true) {
