@@ -200,9 +200,9 @@ fn dispatch_agent_option(app: &mut App) -> InputResult {
                 ],
                 crate::model::Agent::Codex => vec![
                     ("suggest (default)", ""),
-                    ("auto-edit", " --approval-mode auto-edit"),
+                    ("auto-edit", " -a untrusted"),
                     ("full-auto", " --full-auto"),
-                    ("yolo", " --yolo"),
+                    ("bypass sandbox", " --dangerously-bypass-approvals-and-sandbox"),
                 ],
             };
             app.mode_index = 0;
