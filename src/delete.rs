@@ -5,6 +5,7 @@ use std::path::Path;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
+use crate::config;
 use crate::model::{Agent, Session};
 
 /// Delete a session's data files. Returns Ok(()) on success.
@@ -25,7 +26,7 @@ pub fn delete_session(session: &Session) -> Result<(), io::Error> {
 /// We also remove any project-specific session data under
 /// `~/.claude/projects/<project>/sessions/<sessionId>/`.
 fn delete_claude_session(session: &Session) -> Result<(), io::Error> {
-    let claude_dir = claude_dir()?;
+    let claude_dir = config::claude_dir().map_err(io::Error::other)?;
 
     // 1. Rewrite history.jsonl without this session's lines
     let history_path = claude_dir.join("history.jsonl");
@@ -117,7 +118,7 @@ struct CodexPayload {
 /// We find the file whose first line's `payload.id` matches and delete it.
 /// We also rewrite `~/.codex/history.jsonl` excluding matching `session_id` entries.
 fn delete_codex_session(session: &Session) -> Result<(), io::Error> {
-    let codex_dir = codex_dir()?;
+    let codex_dir = config::codex_dir().map_err(io::Error::other)?;
 
     // 1. Find and delete the session rollout file
     let sessions_dir = codex_dir.join("sessions");
@@ -203,19 +204,3 @@ fn line_has_codex_session_id(line: &str, session_id: &str) -> bool {
     false
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn home_dir() -> Result<std::path::PathBuf, io::Error> {
-    dirs::home_dir()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No home directory found"))
-}
-
-fn claude_dir() -> Result<std::path::PathBuf, io::Error> {
-    Ok(home_dir()?.join(".claude"))
-}
-
-fn codex_dir() -> Result<std::path::PathBuf, io::Error> {
-    Ok(home_dir()?.join(".codex"))
-}
