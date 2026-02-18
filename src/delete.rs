@@ -2,7 +2,6 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use rusqlite;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
@@ -240,14 +239,11 @@ fn delete_opencode_session(session: &Session) -> Result<(), io::Error> {
         return Ok(());
     }
 
-    let conn = rusqlite::Connection::open(&db_path).map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("SQLite open error: {e}"))
-    })?;
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| io::Error::other(format!("SQLite open error: {e}")))?;
 
     conn.execute("DELETE FROM session WHERE id = ?1", [&session.session_id])
-        .map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("SQLite delete error: {e}"))
-        })?;
+        .map_err(|e| io::Error::other(format!("SQLite delete error: {e}")))?;
 
     // Also remove JSON storage mirror if it exists
     let storage_dir = opencode_data_dir()?;
@@ -260,10 +256,7 @@ fn delete_opencode_session(session: &Session) -> Result<(), io::Error> {
         {
             let path = entry.path();
             if path.is_file()
-                && path
-                    .file_stem()
-                    .and_then(|n| n.to_str())
-                    == Some(&session.session_id)
+                && path.file_stem().and_then(|n| n.to_str()) == Some(&session.session_id)
             {
                 let _ = fs::remove_file(path);
             }

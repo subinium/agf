@@ -202,9 +202,7 @@ pub fn handle_agent_select(app: &mut App, key: KeyEvent) -> InputResult {
                             " --dangerously-bypass-approvals-and-sandbox",
                         ),
                     ],
-                    crate::model::Agent::OpenCode => vec![
-                        ("default", ""),
-                    ],
+                    crate::model::Agent::OpenCode => vec![("default", "")],
                 };
                 app.mode_index = 0;
                 app.mode = super::Mode::PermissionSelect;

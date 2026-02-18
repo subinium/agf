@@ -22,7 +22,7 @@ impl Agent {
         match self {
             Agent::ClaudeCode => (217, 119, 6), // #D97706 amber
             Agent::Codex => (16, 185, 129),     // #10B981 emerald
-            Agent::OpenCode => (59, 130, 246),   // #3B82F6 blue
+            Agent::OpenCode => (59, 130, 246),  // #3B82F6 blue
         }
     }
 
