@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 
 use crossterm::event::{self, Event};
@@ -21,6 +22,7 @@ pub enum Mode {
     AgentSelect,
     PermissionSelect, // permission/approval mode picker
     DeleteConfirm,
+    BulkDelete,
     Preview,
 }
 
@@ -50,6 +52,7 @@ pub struct App {
     pub scroll_offset: usize,
     pub viewport_height: usize, // actual visible item count, set during render
     pub sort_mode: SortMode,
+    pub selected_set: HashSet<usize>,
     fuzzy: FuzzyMatcher,
 }
 
@@ -57,24 +60,13 @@ impl App {
     pub fn new(sessions: Vec<Session>, initial_query: Option<String>) -> Self {
         let agents = installed_agents();
 
-        // Build new-session options: default for each agent, then mode-select variants
+        // Build new-session options: one per installed agent
         let mut new_session_options = Vec::new();
         for &agent in &agents {
             new_session_options.push(NewSessionOption {
                 agent,
                 label: format!("{agent}"),
                 command_suffix: "",
-            });
-        }
-        for &agent in &agents {
-            let (label, suffix) = match agent {
-                Agent::ClaudeCode => ("Claude Code (select mode)", " --permission-mode"),
-                Agent::Codex => ("Codex (select mode)", " --approval-mode"),
-            };
-            new_session_options.push(NewSessionOption {
-                agent,
-                label: label.to_string(),
-                command_suffix: suffix,
             });
         }
 
@@ -99,6 +91,7 @@ impl App {
             scroll_offset: 0,
             viewport_height: 4,
             sort_mode: SortMode::Time,
+            selected_set: HashSet::new(),
             fuzzy: FuzzyMatcher::new(),
         };
         if !app.query.is_empty() {
@@ -262,6 +255,7 @@ impl App {
                     Mode::AgentSelect => render::render_agent_select(f, self),
                     Mode::PermissionSelect => render::render_mode_select(f, self),
                     Mode::DeleteConfirm => render::render_delete_confirm(f, self),
+                    Mode::BulkDelete => render::render_bulk_delete(f, self),
                     Mode::Preview => render::render_preview(f, self),
                 }
             })?;
@@ -273,6 +267,7 @@ impl App {
                     Mode::AgentSelect => input::handle_agent_select(self, key),
                     Mode::PermissionSelect => input::handle_mode_select(self, key),
                     Mode::DeleteConfirm => input::handle_delete_confirm(self, key),
+                    Mode::BulkDelete => input::handle_bulk_delete(self, key),
                     Mode::Preview => input::handle_preview(self, key),
                 };
 

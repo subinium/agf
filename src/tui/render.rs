@@ -439,6 +439,7 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
         Paragraph::new(Line::from(vec![
             Span::styled(" New session in ", Style::new().fg(BRIGHT_WHITE)),
             Span::styled(session.display_path(), Style::new().fg(GRAY_500)),
+            Span::styled("  (tab → permission mode)", Style::new().fg(GRAY_500)),
         ])),
         chunks[1],
     );
@@ -448,7 +449,7 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
         chunks[2],
     );
 
-    // Option list (default agents + mode-select variants)
+    // Option list
     let mut agent_lines: Vec<Line> = Vec::new();
     for (i, opt) in app.new_session_options.iter().enumerate() {
         let is_selected = i == app.agent_index;
@@ -459,7 +460,21 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
         };
         let indicator = format!(" {}) ", i + 1);
         let label = &opt.label;
-        let padding_len = (area.width as usize).saturating_sub(indicator.len() + label.len());
+
+        // Command preview
+        let preview = if let Some(s) = app.selected_session() {
+            let base = match opt.agent {
+                Agent::ClaudeCode => "claude",
+                Agent::Codex => "codex",
+            };
+            format!("cd {} && {base}", s.display_path())
+        } else {
+            String::new()
+        };
+
+        let used = indicator.len() + label.len() + 4;
+        let preview_width = (area.width as usize).saturating_sub(used);
+        let padding = " ".repeat(preview_width.saturating_sub(preview.len()));
 
         agent_lines.push(Line::from(vec![
             Span::styled(indicator, Style::new().fg(GRAY_400).bg(bg)),
@@ -471,7 +486,8 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
                     s
                 }
             }),
-            Span::styled(" ".repeat(padding_len), Style::new().bg(bg)),
+            Span::styled(format!("    {preview}"), Style::new().fg(GRAY_500).bg(bg)),
+            Span::styled(padding, Style::new().bg(bg)),
         ]));
     }
 
@@ -484,7 +500,7 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            " 1-9 select │ enter confirm │ esc back",
+            " 1-9 select │ tab mode │ enter confirm │ esc back",
             Style::new().fg(GRAY_500),
         )),
         chunks[7],
@@ -582,7 +598,208 @@ pub fn render_mode_select(f: &mut Frame, app: &App) {
     );
 }
 
+pub fn render_bulk_delete(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    let chunks = Layout::vertical([
+        Constraint::Length(3), // header
+        Constraint::Min(1),    // session list
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    // Header: DELETE MODE
+    render_bulk_delete_header(f, chunks[0], app);
+
+    // Session list with checkboxes
+    render_bulk_delete_list(f, chunks[1], app);
+
+    // Footer
+    render_bulk_delete_footer(f, chunks[2], app);
+}
+
+fn render_bulk_delete_header(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(RED));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let count = app.selected_set.len();
+    let mut spans = vec![Span::styled(
+        " DELETE MODE",
+        Style::new().fg(RED).bold(),
+    )];
+    if count > 0 {
+        spans.push(Span::styled(
+            format!("  ({count} selected)"),
+            Style::new().fg(RED),
+        ));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+fn render_bulk_delete_list(f: &mut Frame, area: Rect, app: &App) {
+    use unicode_width::UnicodeWidthStr;
+
+    let visible_count = area.height as usize;
+    let max_lines = area.height as usize;
+    let scroll_offset = app.scroll_offset;
+    let total_width = area.width as usize;
+    let right_margin = 2usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    let end = (scroll_offset + visible_count).min(app.filtered_indices.len());
+    for vi in scroll_offset..end {
+        let session_idx = app.filtered_indices[vi];
+        let session = &app.sessions[session_idx];
+        let is_cursor = vi == app.selected;
+        let is_checked = app.selected_set.contains(&session_idx);
+
+        let bg = if is_cursor {
+            HIGHLIGHT_BG
+        } else {
+            Color::Reset
+        };
+
+        let indicator = match (is_cursor, is_checked) {
+            (true, true) => ">[x]",
+            (true, false) => ">[ ]",
+            (false, true) => " [x]",
+            (false, false) => " [ ]",
+        };
+
+        let indicator_style = if is_checked {
+            Style::new().fg(RED).bold().bg(bg)
+        } else {
+            Style::new().fg(Color::White).bg(bg)
+        };
+
+        // Build right side first to know how much space is left
+        let time_str = session.time_display();
+        let mut right_text = String::new();
+        if let Some(ref branch) = session.git_branch {
+            right_text.push_str(&format!("  {branch}"));
+        }
+        right_text.push_str(&format!("  {time_str}"));
+        let right_display_width = UnicodeWidthStr::width(right_text.as_str()) + right_margin;
+
+        // Build left side
+        let mut spans: Vec<Span> = Vec::new();
+        spans.push(Span::styled(indicator, indicator_style));
+
+        let agent_label = format!("{:<12}", session.agent.to_string());
+        spans.push(Span::styled(
+            agent_label,
+            Style::new().fg(agent_color(session.agent)).bold().bg(bg),
+        ));
+
+        // Truncate project name if it alone would overflow
+        let fixed_left = 4 + 12; // indicator(4) + agent(12)
+        let max_proj = total_width.saturating_sub(fixed_left + right_display_width + 4);
+        let proj_display = if session.project_name.width() > max_proj && max_proj > 3 {
+            truncate_str(&session.project_name, max_proj)
+        } else {
+            session.project_name.clone()
+        };
+
+        spans.push(Span::styled(
+            proj_display,
+            Style::new().fg(BRIGHT_WHITE).bold().bg(bg),
+        ));
+
+        // Git dirty indicator
+        if session.git_dirty == Some(true) {
+            spans.push(Span::styled("*", Style::new().fg(YELLOW).bold().bg(bg)));
+        }
+
+        let left_used: usize = spans.iter().map(|s| s.width()).sum();
+
+        // Guard: if left+right already exceed total, skip summary and clamp
+        let available = total_width.saturating_sub(left_used + right_display_width);
+
+        // Summary (fills remaining middle space, dimmed)
+        if available > 7 {
+            if let Some(ref summary) = session.summary {
+                let sep = "  ";
+                let max_summary = available.saturating_sub(sep.len());
+                if max_summary > 5 {
+                    let truncated = truncate_str(summary, max_summary);
+                    spans.push(Span::styled(sep, Style::new().bg(bg)));
+                    spans.push(Span::styled(truncated, Style::new().fg(GRAY_400).bg(bg)));
+                }
+            }
+        }
+
+        // Padding + right parts
+        let left_width: usize = spans.iter().map(|s| s.width()).sum();
+        let padding = total_width.saturating_sub(left_width + right_display_width);
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), Style::new().bg(bg)));
+        }
+
+        // Right parts
+        if let Some(ref branch) = session.git_branch {
+            spans.push(Span::styled(
+                format!("  {branch}"),
+                Style::new().fg(GREEN_400).bg(bg),
+            ));
+        }
+        spans.push(Span::styled(
+            format!("  {time_str}"),
+            Style::new().fg(VIOLET).bg(bg),
+        ));
+        if right_margin > 0 {
+            spans.push(Span::styled(" ".repeat(right_margin), Style::new().bg(bg)));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    // Pad remaining area
+    while lines.len() < max_lines {
+        lines.push(Line::from(""));
+    }
+    lines.truncate(max_lines);
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, area);
+
+    // Scrollbar
+    if app.filtered_indices.len() > visible_count {
+        let mut scrollbar_state =
+            ScrollbarState::new(app.filtered_indices.len()).position(app.selected);
+        let scrollbar =
+            Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::new().fg(GRAY_500));
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
+}
+
+fn render_bulk_delete_footer(f: &mut Frame, area: Rect, app: &App) {
+    let count = app.selected_set.len();
+    let parts = vec![
+        Span::styled(
+            format!(" {count} selected"),
+            Style::new().fg(RED).bold(),
+        ),
+        Span::styled(
+            " │ space toggle │ enter delete │ esc cancel",
+            Style::new().fg(GRAY_500),
+        ),
+    ];
+
+    f.render_widget(Paragraph::new(Line::from(parts)), area);
+}
+
 pub fn render_delete_confirm(f: &mut Frame, app: &App) {
+    if !app.selected_set.is_empty() {
+        render_bulk_delete_confirm(f, app);
+        return;
+    }
+
     let area = f.area();
     let session = match app.selected_session() {
         Some(s) => s,
@@ -693,6 +910,113 @@ pub fn render_delete_confirm(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
         chunks[10],
+    );
+}
+
+fn render_bulk_delete_confirm(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let count = app.selected_set.len();
+
+    // Collect selected session names
+    let mut names: Vec<String> = app
+        .selected_set
+        .iter()
+        .filter_map(|&idx| app.sessions.get(idx))
+        .map(|s| s.project_name.clone())
+        .collect();
+    names.sort();
+
+    let show_count = names.len().min(5);
+    let list_height = if names.len() > 5 {
+        show_count + 1 // +1 for "… and N more"
+    } else {
+        show_count
+    };
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1),                  // separator
+        Constraint::Length(1),                  // header
+        Constraint::Length(1),                  // separator
+        Constraint::Length(1),                  // blank
+        Constraint::Length(list_height as u16), // session list
+        Constraint::Length(1),                  // blank
+        Constraint::Length(2),                  // options
+        Constraint::Min(0),                    // spacer
+        Constraint::Length(1),                  // separator
+    ])
+    .split(area);
+
+    let sep = "─".repeat(area.width as usize);
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" Delete {count} sessions?"),
+            Style::new().fg(RED).bold(),
+        )),
+        chunks[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[2],
+    );
+
+    // Session name list (max 5)
+    let mut session_lines: Vec<Line> = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        if i >= 5 {
+            session_lines.push(Line::from(Span::styled(
+                format!("  … and {} more", count - 5),
+                Style::new().fg(GRAY_500),
+            )));
+            break;
+        }
+        session_lines.push(Line::from(Span::styled(
+            format!("  • {name}"),
+            Style::new().fg(BRIGHT_WHITE),
+        )));
+    }
+    f.render_widget(Paragraph::new(session_lines), chunks[4]);
+
+    // Options
+    let options = ["Yes, delete all", "Cancel"];
+    let mut opt_lines: Vec<Line> = Vec::new();
+    for (i, &opt) in options.iter().enumerate() {
+        let is_selected = i == app.delete_index;
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            Color::Reset
+        };
+        let indicator = if is_selected { " > " } else { "   " };
+
+        let label_style = if i == 0 {
+            Style::new().fg(RED).bold().bg(bg)
+        } else {
+            Style::new().fg(BRIGHT_WHITE).bg(bg)
+        };
+
+        let desc = if i == 0 {
+            "removes session data only"
+        } else {
+            "go back"
+        };
+
+        opt_lines.push(Line::from(vec![
+            Span::styled(indicator, Style::new().fg(Color::White).bg(bg)),
+            Span::styled(opt, label_style),
+            Span::styled(format!("    {desc}"), Style::new().fg(GRAY_500).bg(bg)),
+        ]));
+    }
+    f.render_widget(Paragraph::new(opt_lines), chunks[6]);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[8],
     );
 }
 
