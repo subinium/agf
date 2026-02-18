@@ -4,11 +4,13 @@ use crate::model::Session;
 
 pub mod claude;
 pub mod codex;
+pub mod opencode;
 
 pub fn scan_all() -> Vec<Session> {
     let handles = vec![
         thread::spawn(|| claude::scan().unwrap_or_default()),
         thread::spawn(|| codex::scan().unwrap_or_default()),
+        thread::spawn(|| opencode::scan().unwrap_or_default()),
     ];
     let mut sessions: Vec<Session> = handles
         .into_iter()

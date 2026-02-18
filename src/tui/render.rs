@@ -466,6 +466,7 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
             let base = match opt.agent {
                 Agent::ClaudeCode => "claude",
                 Agent::Codex => "codex",
+                Agent::OpenCode => "opencode",
             };
             format!("cd {} && {base}", s.display_path())
         } else {
@@ -663,10 +664,10 @@ fn render_bulk_delete_list(f: &mut Frame, area: Rect, app: &App) {
         };
 
         let indicator = match (is_cursor, is_checked) {
-            (true, true) => ">[x]",
-            (true, false) => ">[ ]",
-            (false, true) => " [x]",
-            (false, false) => " [ ]",
+            (true, true) => ">[x] ",
+            (true, false) => ">[ ] ",
+            (false, true) => " [x] ",
+            (false, false) => " [ ] ",
         };
 
         let indicator_style = if is_checked {
@@ -695,7 +696,7 @@ fn render_bulk_delete_list(f: &mut Frame, area: Rect, app: &App) {
         ));
 
         // Truncate project name if it alone would overflow
-        let fixed_left = 4 + 12; // indicator(4) + agent(12)
+        let fixed_left = 5 + 12; // indicator(5) + agent(12)
         let max_proj = total_width.saturating_sub(fixed_left + right_display_width + 4);
         let proj_display = if session.project_name.width() > max_proj && max_proj > 3 {
             truncate_str(&session.project_name, max_proj)

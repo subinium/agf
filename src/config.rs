@@ -16,10 +16,15 @@ pub fn codex_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".codex"))
 }
 
+pub fn opencode_data_dir() -> Result<PathBuf, AgfError> {
+    Ok(home_dir()?.join(".local/share/opencode"))
+}
+
 pub fn is_agent_installed(agent: Agent) -> bool {
     let cmd = match agent {
         Agent::ClaudeCode => "claude",
         Agent::Codex => "codex",
+        Agent::OpenCode => "opencode",
     };
     Command::new("which")
         .arg(cmd)

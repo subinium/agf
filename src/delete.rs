@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use rusqlite;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
@@ -13,6 +14,7 @@ pub fn delete_session(session: &Session) -> Result<(), io::Error> {
     match session.agent {
         Agent::ClaudeCode => delete_claude_session(session),
         Agent::Codex => delete_codex_session(session),
+        Agent::OpenCode => delete_opencode_session(session),
     }
 }
 
@@ -218,4 +220,55 @@ fn claude_dir() -> Result<std::path::PathBuf, io::Error> {
 
 fn codex_dir() -> Result<std::path::PathBuf, io::Error> {
     Ok(home_dir()?.join(".codex"))
+}
+
+fn opencode_data_dir() -> Result<std::path::PathBuf, io::Error> {
+    Ok(home_dir()?.join(".local/share/opencode"))
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode
+// ---------------------------------------------------------------------------
+
+/// OpenCode sessions are stored in a SQLite database at
+/// `~/.local/share/opencode/opencode.db`.
+/// We delete the row from the `session` table; foreign-key cascades
+/// remove related `message` and `part` rows automatically.
+fn delete_opencode_session(session: &Session) -> Result<(), io::Error> {
+    let db_path = opencode_data_dir()?.join("opencode.db");
+    if !db_path.exists() {
+        return Ok(());
+    }
+
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| {
+        io::Error::new(io::ErrorKind::Other, format!("SQLite open error: {e}"))
+    })?;
+
+    conn.execute("DELETE FROM session WHERE id = ?1", [&session.session_id])
+        .map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("SQLite delete error: {e}"))
+        })?;
+
+    // Also remove JSON storage mirror if it exists
+    let storage_dir = opencode_data_dir()?;
+    let session_storage = storage_dir.join("storage/session");
+    if session_storage.exists() {
+        // Walk looking for <projectId>/<sessionId>.json
+        for entry in WalkDir::new(&session_storage)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    == Some(&session.session_id)
+            {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    Ok(())
 }
