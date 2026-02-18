@@ -7,16 +7,16 @@ class Agf < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/subinium/agf/releases/download/v#{version}/agf-aarch64-apple-darwin.tar.gz"
-      sha256 "8585545aeada2942a846afcea32c3ee4dcedae3d5d48e2b3ab16de2dba2217ac"
+      sha256 "3c9a39625fb3002b2a9ed8ff25104a217ef18fd9b06b24d40f4f59f836e35393"
     else
       url "https://github.com/subinium/agf/releases/download/v#{version}/agf-x86_64-apple-darwin.tar.gz"
-      sha256 "cf811990a8c0a4569bcf709861463db12a078aae3cc9047529bd3fdedbb66259"
+      sha256 "ad7f0fef516aa96cb4907272dd468f8a849110ee010d9821a1f4eb8af0c61009"
     end
   end
 
   on_linux do
     url "https://github.com/subinium/agf/releases/download/v#{version}/agf-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "4ada6ff7eae209bcea85c2af089539ab11e1b03620aafb1be4c16d7a824c8a5d"
+    sha256 "994a66f98c66b60ed76f960e0c295955bfa6c1be68b513db03e8fbfbe5f876bf"
   end
 
   def install
