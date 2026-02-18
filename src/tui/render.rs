@@ -627,10 +627,7 @@ fn render_bulk_delete_header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(block, area);
 
     let count = app.selected_set.len();
-    let mut spans = vec![Span::styled(
-        " DELETE MODE",
-        Style::new().fg(RED).bold(),
-    )];
+    let mut spans = vec![Span::styled(" DELETE MODE", Style::new().fg(RED).bold())];
     if count > 0 {
         spans.push(Span::styled(
             format!("  ({count} selected)"),
@@ -781,10 +778,7 @@ fn render_bulk_delete_list(f: &mut Frame, area: Rect, app: &App) {
 fn render_bulk_delete_footer(f: &mut Frame, area: Rect, app: &App) {
     let count = app.selected_set.len();
     let parts = vec![
-        Span::styled(
-            format!(" {count} selected"),
-            Style::new().fg(RED).bold(),
-        ),
+        Span::styled(format!(" {count} selected"), Style::new().fg(RED).bold()),
         Span::styled(
             " │ space toggle │ enter delete │ esc cancel",
             Style::new().fg(GRAY_500),
@@ -941,7 +935,7 @@ fn render_bulk_delete_confirm(f: &mut Frame, app: &App) {
         Constraint::Length(list_height as u16), // session list
         Constraint::Length(1),                  // blank
         Constraint::Length(2),                  // options
-        Constraint::Min(0),                    // spacer
+        Constraint::Min(0),                     // spacer
         Constraint::Length(1),                  // separator
     ])
     .split(area);

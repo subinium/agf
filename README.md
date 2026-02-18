@@ -35,10 +35,13 @@ If you use AI coding agents, you've probably done this:
 - **One-key resume** — select a session and hit Enter
 - **Agent filter** — Tab to cycle through agents
 - **Smart cd** — jump to any project directory
-- **Session cleanup** — delete old sessions with confirmation
+- **Bulk delete** — `Ctrl+D` to multi-select and batch-delete sessions
+- **New session** — launch a new agent session with optional permission mode
 - **Auto-detection** — only shows agents installed on your system
 
 ## Keybindings
+
+### Browse
 
 | Key | Action |
 |:---|:---|
@@ -48,7 +51,26 @@ If you use AI coding agents, you've probably done this:
 | `→` | Preview session details |
 | `Tab` / `Shift+Tab` | Cycle agent filter |
 | `Ctrl+S` | Cycle sort (time / name / agent) |
+| `Ctrl+D` | Enter bulk delete mode |
 | `Esc` | Quit |
+
+### Bulk Delete (`Ctrl+D`)
+
+| Key | Action |
+|:---|:---|
+| `Space` | Toggle selection + move down |
+| `↑` `↓` | Navigate |
+| `Enter` | Confirm deletion (when items selected) |
+| `Esc` | Cancel and return to browse |
+
+### New Session (Agent Select)
+
+| Key | Action |
+|:---|:---|
+| `1`-`9` | Quick select agent |
+| `Tab` | Open permission/approval mode picker |
+| `Enter` | Launch with default mode |
+| `Esc` | Back |
 
 ## Config
 

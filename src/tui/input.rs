@@ -197,7 +197,10 @@ pub fn handle_agent_select(app: &mut App, key: KeyEvent) -> InputResult {
                         ("suggest (default)", ""),
                         ("auto-edit", " -a untrusted"),
                         ("full-auto", " --full-auto"),
-                        ("bypass sandbox", " --dangerously-bypass-approvals-and-sandbox"),
+                        (
+                            "bypass sandbox",
+                            " --dangerously-bypass-approvals-and-sandbox",
+                        ),
                     ],
                 };
                 app.mode_index = 0;
