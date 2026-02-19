@@ -332,7 +332,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 
     parts.push(Span::styled(
         format!(
-            " │ sort:{} │ tab agent │ ↑↓ nav │ → detail │ enter select │ ^s sort │ esc quit",
+            " │ sort:{} │ tab agent │ ↑↓ nav │ → detail │ enter select │ ^s sort │ ^d bulk del │ esc quit",
             app.sort_mode.label()
         ),
         Style::new().fg(GRAY_500),
