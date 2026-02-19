@@ -5,6 +5,8 @@ pub enum Agent {
     ClaudeCode,
     Codex,
     OpenCode,
+    Pi,
+    Kiro,
 }
 
 impl fmt::Display for Agent {
@@ -13,6 +15,8 @@ impl fmt::Display for Agent {
             Agent::ClaudeCode => write!(f, "Claude Code"),
             Agent::Codex => write!(f, "Codex"),
             Agent::OpenCode => write!(f, "OpenCode"),
+            Agent::Pi => write!(f, "pi"),
+            Agent::Kiro => write!(f, "Kiro"),
         }
     }
 }
@@ -20,14 +24,55 @@ impl fmt::Display for Agent {
 impl Agent {
     pub fn color(&self) -> (u8, u8, u8) {
         match self {
-            Agent::ClaudeCode => (217, 119, 6), // #D97706 amber
-            Agent::Codex => (16, 185, 129),     // #10B981 emerald
-            Agent::OpenCode => (59, 130, 246),  // #3B82F6 blue
+            Agent::ClaudeCode => (217, 119, 87), // #D97757 terra cotta (Anthropic)
+            Agent::Codex => (0, 166, 126),       // #00A67E teal green (OpenAI)
+            Agent::OpenCode => (59, 130, 246),   // #3B82F6 blue
+            Agent::Pi => (236, 72, 153),         // #EC4899 pink
+            Agent::Kiro => (136, 69, 244),       // #8845F4 deep purple (AWS Kiro)
         }
     }
 
     pub fn all() -> &'static [Agent] {
-        &[Agent::ClaudeCode, Agent::Codex, Agent::OpenCode]
+        &[
+            Agent::ClaudeCode,
+            Agent::Codex,
+            Agent::OpenCode,
+            Agent::Pi,
+            Agent::Kiro,
+        ]
+    }
+
+    /// CLI executable name used for launching and detection.
+    pub fn cli_name(&self) -> &'static str {
+        match self {
+            Agent::ClaudeCode => "claude",
+            Agent::Codex => "codex",
+            Agent::OpenCode => "opencode",
+            Agent::Pi => "pi",
+            Agent::Kiro => "kiro-cli",
+        }
+    }
+
+    /// Shell command to resume the most recent session.
+    pub fn resume_cmd(&self, session_id: &str) -> String {
+        match self {
+            Agent::ClaudeCode => format!("claude --resume '{session_id}'"),
+            Agent::Codex => format!("codex resume '{session_id}'"),
+            Agent::OpenCode => format!("opencode -s '{session_id}'"),
+            Agent::Pi => "pi --resume".to_string(),
+            Agent::Kiro => "kiro-cli chat --resume".to_string(),
+        }
+    }
+
+    /// Shell command to start a new session (base, without flags).
+    pub fn new_session_cmd(&self) -> &'static str {
+        match self {
+            Agent::ClaudeCode => "claude",
+            Agent::Codex => "codex",
+            Agent::OpenCode => "opencode",
+            Agent::Pi => "pi",
+            Agent::Kiro => "kiro-cli chat",
+        }
     }
 }
 

@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > A fast TUI to find, resume, and manage your AI coding agent sessions.
-> Supports **Claude Code**, **Codex**, and **OpenCode** — all in one place.
+> Supports **Claude Code**, **Codex**, **OpenCode**, **pi**, and **Kiro** — all in one place.
 
 ![agf demo](./assets/demo.gif)
 
@@ -30,7 +30,7 @@ If you use AI coding agents, you've probably done this:
 
 ## Features
 
-- **Unified view** — Claude Code, Codex, and OpenCode sessions in one list
+- **Unified view** — Claude Code, Codex, OpenCode, pi, and Kiro sessions in one list
 - **Fuzzy search** — find any session by project name or summary
 - **One-key resume** — select a session and hit Enter
 - **Agent filter** — Tab to cycle through agents
@@ -83,11 +83,23 @@ max_sessions = 200
 
 ## Supported Agents
 
-| Agent | Resume | Data Source |
+| Agent | Resume Command | Data Source |
 |:---|:---|:---|
-| Claude Code | `claude --resume <id>` | `~/.claude/` |
-| Codex | `codex resume <id>` | `~/.codex/` |
-| OpenCode | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
+| [Claude Code](https://github.com/anthropics/claude-code) | `claude --resume <id>` | `~/.claude/history.jsonl` |
+| [Codex](https://github.com/openai/codex) | `codex resume <id>` | `~/.codex/sessions/**/*.jsonl` |
+| [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
+| [pi](https://github.com/badlogic/pi-mono) | `pi --resume` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
+| [Kiro](https://kiro.dev) | `kiro-cli chat --resume` | `~/Library/Application Support/kiro-cli/data.sqlite3` |
+
+### Session Storage Paths
+
+| Agent | Format | Default Path |
+|:---|:---|:---|
+| Claude Code | JSONL | `~/.claude/history.jsonl` |
+| Codex | JSONL | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| OpenCode | SQLite | `~/.local/share/opencode/opencode.db` |
+| pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |
+| Kiro | SQLite | macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`<br>Linux: `~/.local/share/kiro-cli/data.sqlite3` |
 
 ## Install (other methods)
 
@@ -106,7 +118,7 @@ agf setup
 ## Requirements
 
 - macOS or Linux
-- One or more of: `claude`, `codex`, `opencode`
+- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`
 
 ## Contributing
 
@@ -120,4 +132,4 @@ Issues and PRs are welcome.
 
 ### Agent Support Roadmap
 
-**Gemini CLI** and **Amp** are not yet supported. Both tools store session data without a direct mapping between session files and project directories, making it difficult to reliably resolve project paths from session metadata. We are monitoring upstream changes and will add support when feasible.
+**Gemini CLI** and **Amp** are not yet supported. Both tools store session data without a direct mapping between session files and project directories (Gemini uses SHA-256 hashed directory names; Amp stores sessions on a remote server), making it difficult to reliably resolve project paths from session metadata. We are monitoring upstream changes and will add support when feasible.

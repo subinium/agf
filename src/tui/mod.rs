@@ -45,7 +45,6 @@ pub struct App {
     pub action_index: usize,
     pub agent_index: usize,
     pub delete_index: usize, // 0 = Yes, 1 = Cancel
-    pub installed_agents: Vec<Agent>,
     pub new_session_options: Vec<NewSessionOption>,
     pub mode_index: usize,
     pub mode_options: Vec<(&'static str, &'static str)>, // (label, flag)
@@ -84,7 +83,6 @@ impl App {
             action_index: 0,
             agent_index: 0,
             delete_index: 1,
-            installed_agents: agents,
             new_session_options,
             mode_index: 0,
             mode_options: Vec::new(),
@@ -178,24 +176,29 @@ impl App {
         }
     }
 
+    /// Returns agents that have at least one session in the current list.
+    fn agents_with_sessions(&self) -> Vec<Agent> {
+        let mut seen = HashSet::new();
+        for s in &self.sessions {
+            seen.insert(s.agent);
+        }
+        // Preserve ordering from Agent::all()
+        Agent::all()
+            .iter()
+            .copied()
+            .filter(|a| seen.contains(a))
+            .collect()
+    }
+
     pub fn cycle_agent_filter(&mut self, forward: bool) {
+        let available = self.agents_with_sessions();
         if forward {
             self.agent_filter = match self.agent_filter {
-                None => {
-                    if self.installed_agents.is_empty() {
-                        None
-                    } else {
-                        Some(self.installed_agents[0])
-                    }
-                }
+                None => available.first().copied(),
                 Some(current) => {
-                    let pos = self
-                        .installed_agents
-                        .iter()
-                        .position(|a| *a == current)
-                        .unwrap_or(0);
-                    if pos + 1 < self.installed_agents.len() {
-                        Some(self.installed_agents[pos + 1])
+                    let pos = available.iter().position(|a| *a == current).unwrap_or(0);
+                    if pos + 1 < available.len() {
+                        Some(available[pos + 1])
                     } else {
                         None
                     }
@@ -203,15 +206,11 @@ impl App {
             };
         } else {
             self.agent_filter = match self.agent_filter {
-                None => self.installed_agents.last().copied(),
+                None => available.last().copied(),
                 Some(current) => {
-                    let pos = self
-                        .installed_agents
-                        .iter()
-                        .position(|a| *a == current)
-                        .unwrap_or(0);
+                    let pos = available.iter().position(|a| *a == current).unwrap_or(0);
                     if pos > 0 {
-                        Some(self.installed_agents[pos - 1])
+                        Some(available[pos - 1])
                     } else {
                         None
                     }

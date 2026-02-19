@@ -90,14 +90,138 @@ fn render_filter_bar(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
+type ProjSpansFn<'a> = dyn Fn(&str, Color) -> Vec<Span<'a>>;
+
+/// Shared row-builder for session list views. The caller provides the leading
+/// indicator spans (cursor / checkbox) and their total display width, plus an
+/// optional project-name renderer (for fuzzy-match highlighting in browse mode).
+/// Everything else — agent label, project truncation, summary, padding, branch,
+/// time, git-dirty — is handled here.
+fn build_session_row<'a>(
+    session: &crate::model::Session,
+    bg: Color,
+    indicator_width: usize,
+    total_width: usize,
+    right_margin: usize,
+    proj_spans_fn: Option<&ProjSpansFn<'a>>,
+) -> Vec<Span<'a>> {
     use unicode_width::UnicodeWidthStr;
 
+    let mut spans: Vec<Span<'a>> = Vec::new();
+
+    // Agent label
+    let agent_label = format!("{:<12}", session.agent.to_string());
+    spans.push(Span::styled(
+        agent_label,
+        Style::new().fg(agent_color(session.agent)).bold().bg(bg),
+    ));
+
+    // Right side width calculation
+    let time_str = session.time_display();
+    let mut right_text = String::new();
+    if let Some(ref branch) = session.git_branch {
+        right_text.push_str(&format!("  {branch}"));
+    }
+    right_text.push_str(&format!("  {time_str}"));
+    let right_display_width = UnicodeWidthStr::width(right_text.as_str()) + right_margin;
+
+    // Truncate project name if it alone would overflow
+    let fixed_left = indicator_width + 12; // indicator + agent
+    let max_proj = total_width.saturating_sub(fixed_left + right_display_width + 4);
+    let proj_display = if session.project_name.width() > max_proj && max_proj > 3 {
+        truncate_str(&session.project_name, max_proj)
+    } else {
+        session.project_name.clone()
+    };
+
+    // Project name (highlighted or plain)
+    if let Some(render_fn) = proj_spans_fn {
+        spans.extend(render_fn(&proj_display, bg));
+    } else {
+        spans.push(Span::styled(
+            proj_display,
+            Style::new().fg(BRIGHT_WHITE).bold().bg(bg),
+        ));
+    }
+
+    // Git dirty indicator
+    if session.git_dirty == Some(true) {
+        spans.push(Span::styled("*", Style::new().fg(YELLOW).bold().bg(bg)));
+    }
+
+    let left_used: usize = indicator_width + spans.iter().map(|s| s.width()).sum::<usize>();
+    let available = total_width.saturating_sub(left_used + right_display_width);
+
+    // Summary
+    if available > 7 {
+        if let Some(ref summary) = session.summary {
+            let sep = "  ";
+            let max_summary = available.saturating_sub(sep.len());
+            if max_summary > 5 {
+                let truncated = truncate_str(summary, max_summary);
+                spans.push(Span::styled(sep, Style::new().bg(bg)));
+                spans.push(Span::styled(truncated, Style::new().fg(GRAY_400).bg(bg)));
+            }
+        }
+    }
+
+    // Padding
+    let left_width: usize = indicator_width + spans.iter().map(|s| s.width()).sum::<usize>();
+    let padding = total_width.saturating_sub(left_width + right_display_width);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), Style::new().bg(bg)));
+    }
+
+    // Right parts
+    if let Some(ref branch) = session.git_branch {
+        spans.push(Span::styled(
+            format!("  {branch}"),
+            Style::new().fg(GREEN_400).bg(bg),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("  {time_str}"),
+        Style::new().fg(VIOLET).bg(bg),
+    ));
+    if right_margin > 0 {
+        spans.push(Span::styled(" ".repeat(right_margin), Style::new().bg(bg)));
+    }
+
+    spans
+}
+
+/// Render a session list with scrollbar. Shared between browse and bulk-delete views.
+fn render_session_list_with_scrollbar(
+    f: &mut Frame,
+    area: Rect,
+    lines: Vec<Line>,
+    total_items: usize,
+    selected: usize,
+) {
     let visible_count = area.height as usize;
-    let max_lines = area.height as usize;
+    let max_lines = visible_count;
+
+    let mut padded = lines;
+    while padded.len() < max_lines {
+        padded.push(Line::from(""));
+    }
+    padded.truncate(max_lines);
+
+    f.render_widget(Paragraph::new(padded), area);
+
+    if total_items > visible_count {
+        let mut scrollbar_state = ScrollbarState::new(total_items).position(selected);
+        let scrollbar =
+            Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::new().fg(GRAY_500));
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
+}
+
+fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
+    let visible_count = area.height as usize;
     let scroll_offset = app.scroll_offset;
     let total_width = area.width as usize;
-    let right_margin = 2usize; // breathing room for scrollbar
+    let right_margin = 2usize;
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -115,105 +239,27 @@ fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
         };
         let indicator = if is_selected { "> " } else { "  " };
 
-        // Build right side first to know how much space is left
-        let time_str = session.time_display();
-        let mut right_text = String::new();
-        if let Some(ref branch) = session.git_branch {
-            right_text.push_str(&format!("  {branch}"));
-        }
-        right_text.push_str(&format!("  {time_str}"));
-        let right_display_width = UnicodeWidthStr::width(right_text.as_str()) + right_margin;
+        let mp = match_positions;
+        let proj_fn =
+            move |text: &str, bg: Color| -> Vec<Span<'_>> { highlight_text(text, &mp, 0, bg) };
 
-        // Build left side
-        let mut spans: Vec<Span> = Vec::new();
-        spans.push(Span::styled(
+        let mut spans = vec![Span::styled(
             indicator,
             Style::new().fg(Color::White).bg(bg),
+        )];
+        spans.extend(build_session_row(
+            session,
+            bg,
+            2,
+            total_width,
+            right_margin,
+            Some(&proj_fn),
         ));
-
-        let agent_label = format!("{:<12}", session.agent.to_string());
-        spans.push(Span::styled(
-            agent_label,
-            Style::new().fg(agent_color(session.agent)).bold().bg(bg),
-        ));
-
-        // Truncate project name if it alone would overflow
-        let fixed_left = 2 + 12; // indicator + agent
-        let max_proj = total_width.saturating_sub(fixed_left + right_display_width + 4);
-        let proj_display = if session.project_name.width() > max_proj && max_proj > 3 {
-            truncate_str(&session.project_name, max_proj)
-        } else {
-            session.project_name.clone()
-        };
-
-        let proj_spans = highlight_text(&proj_display, &match_positions, 0, is_selected, bg);
-        spans.extend(proj_spans);
-
-        // Git dirty indicator
-        if session.git_dirty == Some(true) {
-            spans.push(Span::styled("*", Style::new().fg(YELLOW).bold().bg(bg)));
-        }
-
-        let left_used: usize = spans.iter().map(|s| s.width()).sum();
-
-        // Guard: if left+right already exceed total, skip summary and clamp
-        let available = total_width.saturating_sub(left_used + right_display_width);
-
-        // Summary (fills remaining middle space, dimmed)
-        if available > 7 {
-            if let Some(ref summary) = session.summary {
-                let sep = "  ";
-                let max_summary = available.saturating_sub(sep.len());
-                if max_summary > 5 {
-                    let truncated = truncate_str(summary, max_summary);
-                    spans.push(Span::styled(sep, Style::new().bg(bg)));
-                    spans.push(Span::styled(truncated, Style::new().fg(GRAY_400).bg(bg)));
-                }
-            }
-        }
-
-        // Padding + right parts (recalculate after summary was added)
-        let left_width: usize = spans.iter().map(|s| s.width()).sum();
-        let padding = total_width.saturating_sub(left_width + right_display_width);
-        if padding > 0 {
-            spans.push(Span::styled(" ".repeat(padding), Style::new().bg(bg)));
-        }
-
-        // Right parts
-        if let Some(ref branch) = session.git_branch {
-            spans.push(Span::styled(
-                format!("  {branch}"),
-                Style::new().fg(GREEN_400).bg(bg),
-            ));
-        }
-        spans.push(Span::styled(
-            format!("  {time_str}"),
-            Style::new().fg(VIOLET).bg(bg),
-        ));
-        if right_margin > 0 {
-            spans.push(Span::styled(" ".repeat(right_margin), Style::new().bg(bg)));
-        }
 
         lines.push(Line::from(spans));
     }
 
-    // Pad remaining area
-    while lines.len() < max_lines {
-        lines.push(Line::from(""));
-    }
-    lines.truncate(max_lines);
-
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, area);
-
-    // Scrollbar
-    if app.filtered_indices.len() > visible_count {
-        let mut scrollbar_state =
-            ScrollbarState::new(app.filtered_indices.len()).position(app.selected);
-        let scrollbar =
-            Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::new().fg(GRAY_500));
-        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
-    }
+    render_session_list_with_scrollbar(f, area, lines, app.filtered_indices.len(), app.selected);
 }
 
 fn render_session_list_compact(f: &mut Frame, area: Rect, app: &App) {
@@ -463,11 +509,7 @@ pub fn render_agent_select(f: &mut Frame, app: &App) {
 
         // Command preview
         let preview = if let Some(s) = app.selected_session() {
-            let base = match opt.agent {
-                Agent::ClaudeCode => "claude",
-                Agent::Codex => "codex",
-                Agent::OpenCode => "opencode",
-            };
+            let base = opt.agent.new_session_cmd();
             format!("cd {} && {base}", s.display_path())
         } else {
             String::new()
@@ -640,10 +682,7 @@ fn render_bulk_delete_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_bulk_delete_list(f: &mut Frame, area: Rect, app: &App) {
-    use unicode_width::UnicodeWidthStr;
-
     let visible_count = area.height as usize;
-    let max_lines = area.height as usize;
     let scroll_offset = app.scroll_offset;
     let total_width = area.width as usize;
     let right_margin = 2usize;
@@ -676,104 +715,20 @@ fn render_bulk_delete_list(f: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(Color::White).bg(bg)
         };
 
-        // Build right side first to know how much space is left
-        let time_str = session.time_display();
-        let mut right_text = String::new();
-        if let Some(ref branch) = session.git_branch {
-            right_text.push_str(&format!("  {branch}"));
-        }
-        right_text.push_str(&format!("  {time_str}"));
-        let right_display_width = UnicodeWidthStr::width(right_text.as_str()) + right_margin;
-
-        // Build left side
-        let mut spans: Vec<Span> = Vec::new();
-        spans.push(Span::styled(indicator, indicator_style));
-
-        let agent_label = format!("{:<12}", session.agent.to_string());
-        spans.push(Span::styled(
-            agent_label,
-            Style::new().fg(agent_color(session.agent)).bold().bg(bg),
+        let mut spans = vec![Span::styled(indicator, indicator_style)];
+        spans.extend(build_session_row(
+            session,
+            bg,
+            5, // indicator width for checkbox
+            total_width,
+            right_margin,
+            None, // no highlight in bulk-delete mode
         ));
-
-        // Truncate project name if it alone would overflow
-        let fixed_left = 5 + 12; // indicator(5) + agent(12)
-        let max_proj = total_width.saturating_sub(fixed_left + right_display_width + 4);
-        let proj_display = if session.project_name.width() > max_proj && max_proj > 3 {
-            truncate_str(&session.project_name, max_proj)
-        } else {
-            session.project_name.clone()
-        };
-
-        spans.push(Span::styled(
-            proj_display,
-            Style::new().fg(BRIGHT_WHITE).bold().bg(bg),
-        ));
-
-        // Git dirty indicator
-        if session.git_dirty == Some(true) {
-            spans.push(Span::styled("*", Style::new().fg(YELLOW).bold().bg(bg)));
-        }
-
-        let left_used: usize = spans.iter().map(|s| s.width()).sum();
-
-        // Guard: if left+right already exceed total, skip summary and clamp
-        let available = total_width.saturating_sub(left_used + right_display_width);
-
-        // Summary (fills remaining middle space, dimmed)
-        if available > 7 {
-            if let Some(ref summary) = session.summary {
-                let sep = "  ";
-                let max_summary = available.saturating_sub(sep.len());
-                if max_summary > 5 {
-                    let truncated = truncate_str(summary, max_summary);
-                    spans.push(Span::styled(sep, Style::new().bg(bg)));
-                    spans.push(Span::styled(truncated, Style::new().fg(GRAY_400).bg(bg)));
-                }
-            }
-        }
-
-        // Padding + right parts
-        let left_width: usize = spans.iter().map(|s| s.width()).sum();
-        let padding = total_width.saturating_sub(left_width + right_display_width);
-        if padding > 0 {
-            spans.push(Span::styled(" ".repeat(padding), Style::new().bg(bg)));
-        }
-
-        // Right parts
-        if let Some(ref branch) = session.git_branch {
-            spans.push(Span::styled(
-                format!("  {branch}"),
-                Style::new().fg(GREEN_400).bg(bg),
-            ));
-        }
-        spans.push(Span::styled(
-            format!("  {time_str}"),
-            Style::new().fg(VIOLET).bg(bg),
-        ));
-        if right_margin > 0 {
-            spans.push(Span::styled(" ".repeat(right_margin), Style::new().bg(bg)));
-        }
 
         lines.push(Line::from(spans));
     }
 
-    // Pad remaining area
-    while lines.len() < max_lines {
-        lines.push(Line::from(""));
-    }
-    lines.truncate(max_lines);
-
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, area);
-
-    // Scrollbar
-    if app.filtered_indices.len() > visible_count {
-        let mut scrollbar_state =
-            ScrollbarState::new(app.filtered_indices.len()).position(app.selected);
-        let scrollbar =
-            Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::new().fg(GRAY_500));
-        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
-    }
+    render_session_list_with_scrollbar(f, area, lines, app.filtered_indices.len(), app.selected);
 }
 
 fn render_bulk_delete_footer(f: &mut Frame, area: Rect, app: &App) {
@@ -1015,13 +970,7 @@ fn render_bulk_delete_confirm(f: &mut Frame, app: &App) {
     );
 }
 
-fn highlight_text(
-    text: &str,
-    positions: &[u32],
-    offset: usize,
-    _is_selected: bool,
-    bg: Color,
-) -> Vec<Span<'static>> {
+fn highlight_text(text: &str, positions: &[u32], offset: usize, bg: Color) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let chars: Vec<char> = text.chars().collect();
 

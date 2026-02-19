@@ -9,20 +9,12 @@ pub fn generate_command(
 
     match action {
         Action::Resume => {
-            let cmd = match session.agent {
-                Agent::ClaudeCode => format!("claude --resume '{}'", session.session_id),
-                Agent::Codex => format!("codex resume '{}'", session.session_id),
-                Agent::OpenCode => format!("opencode -s '{}'", session.session_id),
-            };
+            let cmd = session.agent.resume_cmd(&session.session_id);
             Some(format!("cd {escaped_path} && {cmd}"))
         }
         Action::NewSession => {
             let agent = new_agent.unwrap_or(session.agent);
-            let cmd = match agent {
-                Agent::ClaudeCode => "claude".to_string(),
-                Agent::Codex => "codex".to_string(),
-                Agent::OpenCode => "opencode".to_string(),
-            };
+            let cmd = agent.new_session_cmd();
             Some(format!("cd {escaped_path} && {cmd}"))
         }
         Action::Cd => Some(format!("cd {escaped_path}")),
@@ -32,11 +24,7 @@ pub fn generate_command(
 
 pub fn action_preview(session: &Session, action: Action) -> String {
     match action {
-        Action::Resume => match session.agent {
-            Agent::ClaudeCode => format!("claude --resume '{}'", session.session_id),
-            Agent::Codex => format!("codex resume '{}'", session.session_id),
-            Agent::OpenCode => format!("opencode -s '{}'", session.session_id),
-        },
+        Action::Resume => session.agent.resume_cmd(&session.session_id),
         Action::NewSession => "choose agent CLI...".to_string(),
         Action::Cd => format!("cd {}", session.display_path()),
         Action::Delete => "remove session data".to_string(),
@@ -46,11 +34,7 @@ pub fn action_preview(session: &Session, action: Action) -> String {
 
 pub fn new_session_with_flags(session: &Session, agent: Agent, flags: &str) -> Option<String> {
     let escaped_path = shell_escape(&session.project_path);
-    let base = match agent {
-        Agent::ClaudeCode => "claude",
-        Agent::Codex => "codex",
-        Agent::OpenCode => "opencode",
-    };
+    let base = agent.new_session_cmd();
     Some(format!("cd {escaped_path} && {base}{flags}"))
 }
 
