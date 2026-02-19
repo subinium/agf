@@ -17,6 +17,12 @@ agf setup
 
 Restart your shell. Then just type `agf`.
 
+### Quick Resume (no TUI)
+
+```bash
+agf resume project-name   # fuzzy-matches and resumes the best match directly
+```
+
 ## Why agf?
 
 If you use AI coding agents, you've probably done this:
@@ -37,6 +43,7 @@ If you use AI coding agents, you've probably done this:
 - **Smart cd** — jump to any project directory
 - **Bulk delete** — `Ctrl+D` to multi-select and batch-delete sessions
 - **New session** — launch a new agent session with optional permission mode
+- **Quick resume** — `agf resume <query>` to skip the TUI and resume directly
 - **Auto-detection** — only shows agents installed on your system
 
 ## Keybindings

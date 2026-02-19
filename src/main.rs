@@ -13,7 +13,11 @@ mod tui;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "agf", about = "AI Agent Session Finder TUI")]
+#[command(
+    name = "agf",
+    about = "AI Agent Session Finder TUI",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     /// Optional query to pre-filter sessions
     query: Option<String>,
@@ -31,6 +35,11 @@ enum Commands {
     },
     /// Auto-detect shell and add agf to your shell config
     Setup,
+    /// Fuzzy-match a session and resume it directly (no TUI)
+    Resume {
+        /// Fuzzy query to match a session (project name, path, summary)
+        query: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -43,6 +52,23 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Setup) => {
             shell::setup()?;
+            return Ok(());
+        }
+        Some(Commands::Resume { query }) => {
+            let query = query.join(" ");
+            let sessions = scanner::scan_all();
+            let mut fuzzy = fuzzy::FuzzyMatcher::new();
+            let results = fuzzy.filter(&sessions, &query);
+
+            if results.is_empty() {
+                eprintln!("No session matching '{query}'");
+                std::process::exit(1);
+            }
+
+            let best = &sessions[results[0].index];
+            if let Some(cmd) = action::generate_command(best, model::Action::Resume, None) {
+                println!("{cmd}");
+            }
             return Ok(());
         }
         None => {}
