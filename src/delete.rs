@@ -16,6 +16,7 @@ pub fn delete_session(session: &Session) -> Result<(), io::Error> {
         Agent::OpenCode => delete_opencode_session(session),
         Agent::Pi => delete_pi_session(session),
         Agent::Kiro => delete_kiro_session(session),
+        Agent::CursorAgent => delete_cursor_agent_session(session),
     }
 }
 
@@ -263,6 +264,41 @@ fn delete_kiro_session(session: &Session) -> Result<(), io::Error> {
         [&session.session_id],
     )
     .map_err(|e| io::Error::other(format!("SQLite delete error: {e}")))?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cursor Agent
+// ---------------------------------------------------------------------------
+
+/// Cursor Agent sessions are stored in two locations:
+/// 1. `~/.cursor/chats/<workspace-hash>/<session_id>/store.db` (SQLite)
+/// 2. `~/.cursor/projects/*/agent-transcripts/<session_id>.txt` (transcript files)
+fn delete_cursor_agent_session(session: &Session) -> Result<(), io::Error> {
+    let cursor_dir = config::cursor_dir().map_err(io::Error::other)?;
+
+    // 1. Remove chat directory: ~/.cursor/chats/*/<session_id>/
+    let chats_dir = cursor_dir.join("chats");
+    if chats_dir.exists() {
+        remove_dirs_matching_name(&chats_dir, &session.session_id)?;
+    }
+
+    // 2. Remove transcript files: ~/.cursor/projects/*/agent-transcripts/<session_id>.txt
+    let projects_dir = cursor_dir.join("projects");
+    if projects_dir.exists() {
+        let transcript_name = format!("{}.txt", session.session_id);
+        for entry in WalkDir::new(&projects_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(&transcript_name)
+            {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 
     Ok(())
 }

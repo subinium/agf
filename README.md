@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > A fast TUI to find, resume, and manage your AI coding agent sessions.
-> Supports **Claude Code**, **Codex**, **OpenCode**, **pi**, and **Kiro** — all in one place.
+> Supports **Claude Code**, **Codex**, **OpenCode**, **pi**, **Kiro**, and **Cursor CLI** — all in one place.
 
 ![agf demo](./assets/demo.gif)
 
@@ -36,7 +36,7 @@ If you use AI coding agents, you've probably done this:
 
 ## Features
 
-- **Unified view** — Claude Code, Codex, OpenCode, pi, and Kiro sessions in one list
+- **Unified view** — Claude Code, Codex, OpenCode, pi, Kiro, and Cursor CLI sessions in one list
 - **Fuzzy search** — find any session by project name or summary
 - **One-key resume** — select a session and hit Enter
 - **Agent filter** — Tab to cycle through agents
@@ -97,6 +97,7 @@ max_sessions = 200
 | [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
 | [pi](https://github.com/badlogic/pi-mono) | `pi --resume` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
 | [Kiro](https://kiro.dev) | `kiro-cli chat --resume` | `~/Library/Application Support/kiro-cli/data.sqlite3` |
+| [Cursor CLI](https://docs.cursor.com/agent) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/*.txt` |
 
 ### Session Storage Paths
 
@@ -107,6 +108,7 @@ max_sessions = 200
 | OpenCode | SQLite | `~/.local/share/opencode/opencode.db` |
 | pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |
 | Kiro | SQLite | macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`<br>Linux: `~/.local/share/kiro-cli/data.sqlite3` |
+| Cursor CLI | SQLite + TXT | `~/.cursor/chats/*/<id>/store.db`<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` |
 
 ## Install (other methods)
 
@@ -125,7 +127,7 @@ agf setup
 ## Requirements
 
 - macOS or Linux
-- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`
+- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`
 
 ## Contributing
 

@@ -1,12 +1,14 @@
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::enum_variant_names)]
 pub enum Agent {
     ClaudeCode,
     Codex,
     OpenCode,
     Pi,
     Kiro,
+    CursorAgent,
 }
 
 impl fmt::Display for Agent {
@@ -17,6 +19,7 @@ impl fmt::Display for Agent {
             Agent::OpenCode => write!(f, "OpenCode"),
             Agent::Pi => write!(f, "pi"),
             Agent::Kiro => write!(f, "Kiro"),
+            Agent::CursorAgent => write!(f, "Cursor CLI"),
         }
     }
 }
@@ -29,6 +32,7 @@ impl Agent {
             Agent::OpenCode => (59, 130, 246),   // #3B82F6 blue
             Agent::Pi => (236, 72, 153),         // #EC4899 pink
             Agent::Kiro => (136, 69, 244),       // #8845F4 deep purple (AWS Kiro)
+            Agent::CursorAgent => (245, 184, 65), // #F5B841 Cursor brand yellow
         }
     }
 
@@ -39,6 +43,7 @@ impl Agent {
             Agent::OpenCode,
             Agent::Pi,
             Agent::Kiro,
+            Agent::CursorAgent,
         ]
     }
 
@@ -50,6 +55,7 @@ impl Agent {
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
             Agent::Kiro => "kiro-cli",
+            Agent::CursorAgent => "cursor-agent",
         }
     }
 
@@ -61,6 +67,7 @@ impl Agent {
             Agent::OpenCode => format!("opencode -s '{session_id}'"),
             Agent::Pi => "pi --resume".to_string(),
             Agent::Kiro => "kiro-cli chat --resume".to_string(),
+            Agent::CursorAgent => format!("cursor-agent --resume '{session_id}'"),
         }
     }
 
@@ -72,6 +79,7 @@ impl Agent {
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
             Agent::Kiro => "kiro-cli chat",
+            Agent::CursorAgent => "cursor-agent",
         }
     }
 }

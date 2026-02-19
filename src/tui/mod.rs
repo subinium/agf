@@ -59,11 +59,23 @@ impl App {
     pub fn new(sessions: Vec<Session>, initial_query: Option<String>) -> Self {
         let agents = installed_agents();
 
-        // Build new-session options: one per installed agent
+        // Build new-session options: one per installed agent, sorted by session count (most used first)
+        let mut agent_counts: std::collections::HashMap<Agent, usize> =
+            std::collections::HashMap::new();
+        for s in &sessions {
+            *agent_counts.entry(s.agent).or_insert(0) += 1;
+        }
+        let mut sorted_agents = agents.clone();
+        sorted_agents.sort_by(|a, b| {
+            agent_counts
+                .get(b)
+                .unwrap_or(&0)
+                .cmp(agent_counts.get(a).unwrap_or(&0))
+        });
         let mut new_session_options = Vec::new();
-        for &agent in &agents {
+        for agent in &sorted_agents {
             new_session_options.push(NewSessionOption {
-                agent,
+                agent: *agent,
                 label: format!("{agent}"),
                 command_suffix: "",
             });
