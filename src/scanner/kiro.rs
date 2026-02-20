@@ -43,14 +43,17 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 .unwrap_or("unknown")
                 .to_string();
 
-            let summary = extract_summary(&value);
+            let summaries = match extract_summary(&value) {
+                Some(s) => vec![s],
+                None => Vec::new(),
+            };
 
             Session {
                 agent: Agent::Kiro,
                 session_id: conversation_id,
                 project_name,
                 project_path: directory,
-                summary,
+                summaries,
                 timestamp: updated_at,
                 git_branch: None,
                 git_dirty: None,

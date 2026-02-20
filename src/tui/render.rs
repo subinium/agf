@@ -104,6 +104,7 @@ fn build_session_row<'a>(
     total_width: usize,
     right_margin: usize,
     proj_spans_fn: Option<&ProjSpansFn<'a>>,
+    summary_text: Option<&str>,
 ) -> Vec<Span<'a>> {
     use unicode_width::UnicodeWidthStr;
 
@@ -154,7 +155,7 @@ fn build_session_row<'a>(
 
     // Summary
     if available > 7 {
-        if let Some(ref summary) = session.summary {
+        if let Some(summary) = summary_text {
             let sep = "  ";
             let max_summary = available.saturating_sub(sep.len());
             if max_summary > 5 {
@@ -243,6 +244,13 @@ fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
         let proj_fn =
             move |text: &str, bg: Color| -> Vec<Span<'_>> { highlight_text(text, &mp, 0, bg) };
 
+        let summary_offset = app
+            .summary_offsets
+            .get(&session.session_id)
+            .copied()
+            .unwrap_or(0);
+        let summary_text = session.summaries.get(summary_offset).map(|s| s.as_str());
+
         let mut spans = vec![Span::styled(
             indicator,
             Style::new().fg(Color::White).bg(bg),
@@ -254,6 +262,7 @@ fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
             total_width,
             right_margin,
             Some(&proj_fn),
+            summary_text,
         ));
 
         lines.push(Line::from(spans));
@@ -332,7 +341,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 
     parts.push(Span::styled(
         format!(
-            " │ sort:{} │ tab agent │ ↑↓ nav │ → detail │ enter select │ ^s sort │ esc quit",
+            " │ sort:{} │ tab agent │ ↑↓ nav │ shift ↑↓ summary │ → detail │ enter select │ ^s sort │ ? help │ esc quit",
             app.sort_mode.label()
         ),
         Style::new().fg(GRAY_500),
@@ -723,6 +732,7 @@ fn render_bulk_delete_list(f: &mut Frame, area: Rect, app: &App) {
             total_width,
             right_margin,
             None, // no highlight in bulk-delete mode
+            session.summaries.first().map(|s| s.as_str()),
         ));
 
         lines.push(Line::from(spans));
@@ -813,7 +823,7 @@ pub fn render_delete_confirm(f: &mut Frame, app: &App) {
         chunks[5],
     );
 
-    if let Some(ref summary) = session.summary {
+    if let Some(summary) = session.summaries.first() {
         let truncated = truncate_str(summary, area.width as usize - 6);
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -1080,11 +1090,19 @@ pub fn render_preview(f: &mut Frame, app: &App) {
         ]));
     }
 
-    if let Some(ref summary) = session.summary {
-        lines.push(Line::from(vec![
-            Span::styled("  Summary:  ", Style::new().fg(GRAY_500)),
-            Span::styled(summary.as_str(), Style::new().fg(GRAY_400)),
-        ]));
+    if !session.summaries.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "  History:  ",
+            Style::new().fg(GRAY_500),
+        )]));
+        let max_width = area.width.saturating_sub(14) as usize;
+        for (i, summary) in session.summaries.iter().enumerate() {
+            let truncated = truncate_str(summary, max_width);
+            lines.push(Line::from(vec![
+                Span::styled(format!("    {:>2}. ", i + 1), Style::new().fg(GRAY_500)),
+                Span::styled(truncated, Style::new().fg(GRAY_400)),
+            ]));
+        }
     }
 
     f.render_widget(Paragraph::new(lines), chunks[4]);
@@ -1097,6 +1115,147 @@ pub fn render_preview(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(Span::styled(
             " enter actions │ esc/← back │ any key back",
+            Style::new().fg(GRAY_500),
+        )),
+        chunks[7],
+    );
+}
+
+pub fn render_help(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let sep = "─".repeat(area.width as usize);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // header
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // blank
+        Constraint::Min(4),    // content
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[0],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " Help & Settings",
+            Style::new().fg(BRIGHT_WHITE).bold(),
+        )),
+        chunks[1],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[2],
+    );
+
+    let key = |k: &'static str| Span::styled(format!("  {k:<18}"), Style::new().fg(BRIGHT_WHITE));
+    let desc = |d: String| Span::styled(d, Style::new().fg(GRAY_400));
+    let section = |s: &'static str| {
+        Line::from(vec![Span::styled(
+            format!("  {s}"),
+            Style::new().fg(GRAY_500),
+        )])
+    };
+
+    let search_scope_label = if app.include_summaries {
+        "all (name + path + summaries)"
+    } else {
+        "name_path (default)"
+    };
+
+    let config_path = crate::settings::Settings::config_path();
+    let config_path_str = config_path.to_string_lossy().to_string();
+
+    let lines: Vec<Line> = vec![
+        section("── Keybindings ─────────────────────"),
+        Line::from(vec![key("↑ / ↓"), desc("Navigate sessions".to_string())]),
+        Line::from(vec![
+            key("Shift+↑ / Shift+↓"),
+            desc("Cycle session summary".to_string()),
+        ]),
+        Line::from(vec![key("→"), desc("Session detail / history".to_string())]),
+        Line::from(vec![key("Enter"), desc("Open action menu".to_string())]),
+        Line::from(vec![
+            key("Tab / Shift+Tab"),
+            desc("Cycle agent filter".to_string()),
+        ]),
+        Line::from(vec![key("Ctrl+S"), desc("Cycle sort mode".to_string())]),
+        Line::from(vec![
+            key("Ctrl+D"),
+            desc("Enter bulk delete mode".to_string()),
+        ]),
+        Line::from(vec![key("?"), desc("This help panel".to_string())]),
+        Line::from(vec![key("Esc"), desc("Quit".to_string())]),
+        Line::from(vec![]),
+        section("── Settings (↑↓ navigate, enter/space toggle, +/- adjust) ──"),
+        Line::from(vec![
+            key("sort_by"),
+            desc(app.sort_mode.label().to_string()),
+        ]),
+        {
+            let selected = app.help_selected == 0;
+            let bg = if selected {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
+            let indicator = if selected { "> " } else { "  " };
+            Line::from(vec![
+                Span::styled(
+                    format!("{indicator}{:<18}", "search_scope"),
+                    Style::new().fg(BRIGHT_WHITE).bg(bg),
+                ),
+                Span::styled(
+                    format!("  {search_scope_label}"),
+                    Style::new()
+                        .fg(if selected { BRIGHT_WHITE } else { GRAY_400 })
+                        .bg(bg),
+                ),
+            ])
+        },
+        {
+            let selected = app.help_selected == 1;
+            let bg = if selected {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
+            let indicator = if selected { "> " } else { "  " };
+            Line::from(vec![
+                Span::styled(
+                    format!("{indicator}{:<18}", "summary_search_count"),
+                    Style::new().fg(BRIGHT_WHITE).bg(bg),
+                ),
+                Span::styled(
+                    format!("  {}", app.summary_search_count),
+                    Style::new()
+                        .fg(if selected { BRIGHT_WHITE } else { GRAY_400 })
+                        .bg(bg),
+                ),
+            ])
+        },
+        Line::from(vec![]),
+        section("── Config File ──────────────────────"),
+        Line::from(vec![
+            Span::styled("  ", Style::new()),
+            Span::styled(config_path_str, Style::new().fg(GRAY_400)),
+        ]),
+    ];
+
+    f.render_widget(Paragraph::new(lines), chunks[4]);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[6],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " ↑↓ navigate │ enter/space toggle │ +/- adjust │ esc/q close",
             Style::new().fg(GRAY_500),
         )),
         chunks[7],

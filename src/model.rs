@@ -115,7 +115,7 @@ pub struct Session {
     pub session_id: String,
     pub project_name: String,
     pub project_path: String,
-    pub summary: Option<String>,
+    pub summaries: Vec<String>,
     pub timestamp: i64, // Unix ms
     pub git_branch: Option<String>,
     pub git_dirty: Option<bool>,
@@ -169,11 +169,13 @@ impl Session {
         self.project_path.clone()
     }
 
-    pub fn search_text(&self) -> String {
+    pub fn search_text(&self, max_summaries: usize, include_summaries: bool) -> String {
         let mut text = format!("{} {}", self.project_name, self.project_path);
-        if let Some(ref summary) = self.summary {
-            text.push(' ');
-            text.push_str(summary);
+        if include_summaries {
+            for summary in self.summaries.iter().take(max_summaries) {
+                text.push(' ');
+                text.push_str(summary);
+            }
         }
         if let Some(ref branch) = self.git_branch {
             text.push(' ');

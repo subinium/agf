@@ -43,7 +43,11 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 session_id: id,
                 project_name,
                 project_path: directory,
-                summary: if title.is_empty() { None } else { Some(title) },
+                summaries: if title.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![title]
+                },
                 timestamp: time_updated,
                 git_branch: None,
                 git_dirty: None,

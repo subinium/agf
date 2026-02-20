@@ -58,7 +58,7 @@ fn main() -> anyhow::Result<()> {
             let query = query.join(" ");
             let sessions = scanner::scan_all();
             let mut fuzzy = fuzzy::FuzzyMatcher::new();
-            let results = fuzzy.filter(&sessions, &query);
+            let results = fuzzy.filter(&sessions, &query, 5, false);
 
             if results.is_empty() {
                 eprintln!("No session matching '{query}'");
@@ -87,7 +87,13 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut app = tui::App::new(sessions, cli.query);
+    let include_summaries = config.search_scope == "all";
+    let mut app = tui::App::new(
+        sessions,
+        cli.query,
+        config.summary_search_count,
+        include_summaries,
+    );
 
     // Apply sort_by from config
     if let Some(ref sort_by) = config.sort_by {
