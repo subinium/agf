@@ -54,6 +54,7 @@ If you use AI coding agents, you've probably done this:
 |:---|:---|
 | Type anything | Fuzzy search |
 | `↑` `↓` | Navigate |
+| `Shift+↑` `Shift+↓` | Cycle session summary |
 | `Enter` | Open action menu |
 | `→` | Preview session details |
 | `Tab` / `Shift+Tab` | Cycle agent filter |
