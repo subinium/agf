@@ -115,7 +115,7 @@ pub struct Session {
     pub session_id: String,
     pub project_name: String,
     pub project_path: String,
-    pub summary: Option<String>,
+    pub summaries: Vec<String>,
     pub timestamp: i64, // Unix ms
     pub git_branch: Option<String>,
     pub git_dirty: Option<bool>,
@@ -171,7 +171,7 @@ impl Session {
 
     pub fn search_text(&self) -> String {
         let mut text = format!("{} {}", self.project_name, self.project_path);
-        if let Some(ref summary) = self.summary {
+        for summary in &self.summaries {
             text.push(' ');
             text.push_str(summary);
         }

@@ -38,7 +38,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     let codex_dir = crate::config::codex_dir()?;
     let sessions_dir = codex_dir.join("sessions");
 
-    // Collect summaries from history.jsonl (keyed by session_id, keep latest)
+    // Collect summaries from history.jsonl (keyed by session_id, newest-first)
     let summaries = read_history_summaries(&codex_dir);
 
     let mut sessions = Vec::new();
@@ -105,14 +105,14 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
 
         let git_branch = payload.git.and_then(|g| g.branch);
 
-        let summary = summaries.get(&session_id).cloned();
+        let session_summaries = summaries.get(&session_id).cloned().unwrap_or_default();
 
         sessions.push(Session {
             agent: Agent::Codex,
             session_id,
             project_name,
             project_path: cwd,
-            summary,
+            summaries: session_summaries,
             timestamp,
             git_branch,
             git_dirty: None,
@@ -123,9 +123,9 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     Ok(sessions)
 }
 
-fn read_history_summaries(codex_dir: &std::path::Path) -> HashMap<String, String> {
+fn read_history_summaries(codex_dir: &std::path::Path) -> HashMap<String, Vec<String>> {
     let path = codex_dir.join("history.jsonl");
-    let mut summaries: HashMap<String, (f64, String)> = HashMap::new();
+    let mut summaries: HashMap<String, Vec<(f64, String)>> = HashMap::new();
 
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
@@ -150,11 +150,14 @@ fn read_history_summaries(codex_dir: &std::path::Path) -> HashMap<String, String
             Some(t) if !t.is_empty() => t,
             _ => continue,
         };
-        let existing_ts = summaries.get(&session_id).map(|(t, _)| *t).unwrap_or(0.0);
-        if ts >= existing_ts {
-            summaries.insert(session_id, (ts, text));
-        }
+        summaries.entry(session_id).or_default().push((ts, text));
     }
 
-    summaries.into_iter().map(|(k, (_, v))| (k, v)).collect()
+    summaries
+        .into_iter()
+        .map(|(k, mut v)| {
+            v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            (k, v.into_iter().map(|(_, s)| s).collect())
+        })
+        .collect()
 }

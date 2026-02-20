@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crossterm::event::{self, Event};
@@ -52,6 +52,7 @@ pub struct App {
     pub viewport_height: usize, // actual visible item count, set during render
     pub sort_mode: SortMode,
     pub selected_set: HashSet<usize>,
+    pub summary_offsets: HashMap<String, usize>, // session_id -> summary offset
     fuzzy: FuzzyMatcher,
 }
 
@@ -102,6 +103,7 @@ impl App {
             viewport_height: 4,
             sort_mode: SortMode::Time,
             selected_set: HashSet::new(),
+            summary_offsets: HashMap::new(),
             fuzzy: FuzzyMatcher::new(),
         };
         if !app.query.is_empty() {
@@ -168,6 +170,27 @@ impl App {
         self.filtered_indices
             .get(self.selected)
             .and_then(|&i| self.sessions.get(i))
+    }
+
+    /// Cycle the summary offset for the currently selected session.
+    /// `forward` = true means go to an older summary (higher index).
+    pub fn cycle_summary(&mut self, forward: bool) {
+        let session = match self.selected_session() {
+            Some(s) => s,
+            None => return,
+        };
+        let count = session.summaries.len();
+        if count <= 1 {
+            return;
+        }
+        let id = session.session_id.clone();
+        let offset = self.summary_offsets.get(&id).copied().unwrap_or(0);
+        let new_offset = if forward {
+            if offset + 1 < count { offset + 1 } else { offset }
+        } else {
+            offset.saturating_sub(1)
+        };
+        self.summary_offsets.insert(id, new_offset);
     }
 
     pub fn adjust_scroll(&mut self) {

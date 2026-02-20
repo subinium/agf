@@ -14,6 +14,16 @@ pub fn handle_browse(app: &mut App, key: KeyEvent) -> InputResult {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputResult::Quit,
 
+        (KeyCode::Up, m) if m.contains(KeyModifiers::SHIFT) => {
+            app.cycle_summary(true);
+            InputResult::Continue
+        }
+
+        (KeyCode::Down, m) if m.contains(KeyModifiers::SHIFT) => {
+            app.cycle_summary(false);
+            InputResult::Continue
+        }
+
         (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
             if app.selected > 0 {
                 app.selected -= 1;

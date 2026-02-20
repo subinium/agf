@@ -96,7 +96,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             session_id,
             project_name,
             project_path: project_path_str,
-            summary,
+            summaries: summary.into_iter().collect(),
             timestamp,
             git_branch: None,
             git_dirty: None,

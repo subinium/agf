@@ -104,6 +104,7 @@ fn build_session_row<'a>(
     total_width: usize,
     right_margin: usize,
     proj_spans_fn: Option<&ProjSpansFn<'a>>,
+    summary_text: Option<&str>,
 ) -> Vec<Span<'a>> {
     use unicode_width::UnicodeWidthStr;
 
@@ -154,7 +155,7 @@ fn build_session_row<'a>(
 
     // Summary
     if available > 7 {
-        if let Some(ref summary) = session.summary {
+        if let Some(summary) = summary_text {
             let sep = "  ";
             let max_summary = available.saturating_sub(sep.len());
             if max_summary > 5 {
@@ -243,6 +244,9 @@ fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
         let proj_fn =
             move |text: &str, bg: Color| -> Vec<Span<'_>> { highlight_text(text, &mp, 0, bg) };
 
+        let summary_offset = app.summary_offsets.get(&session.session_id).copied().unwrap_or(0);
+        let summary_text = session.summaries.get(summary_offset).map(|s| s.as_str());
+
         let mut spans = vec![Span::styled(
             indicator,
             Style::new().fg(Color::White).bg(bg),
@@ -254,6 +258,7 @@ fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
             total_width,
             right_margin,
             Some(&proj_fn),
+            summary_text,
         ));
 
         lines.push(Line::from(spans));
@@ -332,7 +337,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 
     parts.push(Span::styled(
         format!(
-            " │ sort:{} │ tab agent │ ↑↓ nav │ → detail │ enter select │ ^s sort │ esc quit",
+            " │ sort:{} │ tab agent │ ↑↓ nav │ shift ↑↓ summary │ → detail │ enter select │ ^s sort │ esc quit",
             app.sort_mode.label()
         ),
         Style::new().fg(GRAY_500),
@@ -723,6 +728,7 @@ fn render_bulk_delete_list(f: &mut Frame, area: Rect, app: &App) {
             total_width,
             right_margin,
             None, // no highlight in bulk-delete mode
+            session.summaries.first().map(|s| s.as_str()),
         ));
 
         lines.push(Line::from(spans));
@@ -813,7 +819,7 @@ pub fn render_delete_confirm(f: &mut Frame, app: &App) {
         chunks[5],
     );
 
-    if let Some(ref summary) = session.summary {
+    if let Some(summary) = session.summaries.first() {
         let truncated = truncate_str(summary, area.width as usize - 6);
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -1080,10 +1086,10 @@ pub fn render_preview(f: &mut Frame, app: &App) {
         ]));
     }
 
-    if let Some(ref summary) = session.summary {
+    if let Some(summary) = session.summaries.first() {
         lines.push(Line::from(vec![
             Span::styled("  Summary:  ", Style::new().fg(GRAY_500)),
-            Span::styled(summary.as_str(), Style::new().fg(GRAY_400)),
+            Span::styled(summary.clone(), Style::new().fg(GRAY_400)),
         ]));
     }
 

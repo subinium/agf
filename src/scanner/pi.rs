@@ -89,7 +89,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             session_id,
             project_name,
             project_path: cwd,
-            summary: None,
+            summaries: Vec::new(),
             timestamp,
             git_branch: None,
             git_dirty: None,
