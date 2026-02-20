@@ -85,9 +85,13 @@ If you use AI coding agents, you've probably done this:
 Optional. Create `~/.config/agf/config.toml`:
 
 ```toml
-sort_by = "time"       # "time" | "name" | "agent"
+sort_by = "time"            # "time" | "name" | "agent"
 max_sessions = 200
+search_scope = "name_path"  # "name_path" (default) | "all" (include summaries)
+summary_search_count = 5    # number of summaries included when search_scope = "all"
 ```
+
+You can also edit `search_scope` and `summary_search_count` interactively by pressing `?` in the TUI.
 
 ## Supported Agents
 
@@ -133,6 +137,10 @@ agf setup
 ## Contributing
 
 Issues and PRs are welcome.
+
+### Contributors
+
+- [@noahcoffey](https://github.com/noahcoffey) — Shift+↑↓ summary cycling, summaries Vec support
 
 ## License
 
