@@ -14,6 +14,11 @@ pub fn handle_browse(app: &mut App, key: KeyEvent) -> InputResult {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputResult::Quit,
 
+        (KeyCode::Char('?'), _) => {
+            app.mode = Mode::Help;
+            InputResult::Continue
+        }
+
         (KeyCode::Up, m) if m.contains(KeyModifiers::SHIFT) => {
             app.cycle_summary(true);
             InputResult::Continue
@@ -398,6 +403,52 @@ pub fn handle_delete_confirm(app: &mut App, key: KeyEvent) -> InputResult {
 
         _ => InputResult::Continue,
     }
+}
+
+pub fn handle_help(app: &mut App, key: KeyEvent) -> InputResult {
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _)
+        | (KeyCode::Char('c'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('q'), _) => {
+            app.mode = Mode::Browse;
+        }
+
+        (KeyCode::Up, _) => {
+            if app.help_selected > 0 {
+                app.help_selected -= 1;
+            }
+        }
+
+        (KeyCode::Down, _) => {
+            if app.help_selected < 1 {
+                app.help_selected += 1;
+            }
+        }
+
+        // search_scope: toggle with Enter/Space/Left/Right
+        (KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right, _)
+            if app.help_selected == 0 =>
+        {
+            app.include_summaries = !app.include_summaries;
+            app.save_settings();
+            app.update_filter();
+        }
+
+        // summary_search_count: + to increment
+        (KeyCode::Char('+') | KeyCode::Char('='), _) if app.help_selected == 1 => {
+            app.summary_search_count = app.summary_search_count.saturating_add(1).min(50);
+            app.save_settings();
+        }
+
+        // summary_search_count: - to decrement
+        (KeyCode::Char('-'), _) if app.help_selected == 1 => {
+            app.summary_search_count = app.summary_search_count.saturating_sub(1).max(1);
+            app.save_settings();
+        }
+
+        _ => {}
+    }
+    InputResult::Continue
 }
 
 pub fn handle_preview(app: &mut App, key: KeyEvent) -> InputResult {

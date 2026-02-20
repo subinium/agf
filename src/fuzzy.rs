@@ -24,7 +24,13 @@ impl FuzzyMatcher {
         }
     }
 
-    pub fn filter(&mut self, sessions: &[Session], query: &str) -> Vec<MatchResult> {
+    pub fn filter(
+        &mut self,
+        sessions: &[Session],
+        query: &str,
+        max_summaries: usize,
+        include_summaries: bool,
+    ) -> Vec<MatchResult> {
         if query.is_empty() {
             return sessions
                 .iter()
@@ -48,7 +54,7 @@ impl FuzzyMatcher {
             .iter()
             .enumerate()
             .filter_map(|(i, session)| {
-                let text = session.search_text();
+                let text = session.search_text(max_summaries, include_summaries);
                 let haystack = Utf32Str::new(&text, &mut self.buf);
                 let mut indices = Vec::new();
                 let score = pattern.indices(haystack, &mut self.matcher, &mut indices)?;

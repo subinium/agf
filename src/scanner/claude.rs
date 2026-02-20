@@ -81,7 +81,8 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             let timestamp = data.timestamp as i64;
 
             // Sort summaries newest-first
-            data.summaries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            data.summaries
+                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             let summaries: Vec<String> = data.summaries.into_iter().map(|(_, s)| s).collect();
 
             Some(Session {

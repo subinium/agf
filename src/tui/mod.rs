@@ -24,6 +24,7 @@ pub enum Mode {
     DeleteConfirm,
     BulkDelete,
     Preview,
+    Help,
 }
 
 /// An option in the "New Session" agent picker.
@@ -53,11 +54,19 @@ pub struct App {
     pub sort_mode: SortMode,
     pub selected_set: HashSet<usize>,
     pub summary_offsets: HashMap<String, usize>, // session_id -> summary offset
+    pub summary_search_count: usize,
+    pub include_summaries: bool,
+    pub help_selected: usize, // 0 = search_scope, 1 = summary_search_count
     fuzzy: FuzzyMatcher,
 }
 
 impl App {
-    pub fn new(sessions: Vec<Session>, initial_query: Option<String>) -> Self {
+    pub fn new(
+        sessions: Vec<Session>,
+        initial_query: Option<String>,
+        summary_search_count: usize,
+        include_summaries: bool,
+    ) -> Self {
         let agents = installed_agents();
 
         // Build new-session options: one per installed agent, sorted by session count (most used first)
@@ -104,6 +113,9 @@ impl App {
             sort_mode: SortMode::Time,
             selected_set: HashSet::new(),
             summary_offsets: HashMap::new(),
+            summary_search_count,
+            include_summaries,
+            help_selected: 0,
             fuzzy: FuzzyMatcher::new(),
         };
         if !app.query.is_empty() {
@@ -151,7 +163,12 @@ impl App {
                 .map(|&i| self.sessions[i].clone())
                 .collect();
 
-            let results = self.fuzzy.filter(&subset, &self.query);
+            let results = self.fuzzy.filter(
+                &subset,
+                &self.query,
+                self.summary_search_count,
+                self.include_summaries,
+            );
 
             self.filtered_indices = results.iter().map(|r| agent_filtered[r.index]).collect();
             self.match_positions = results.iter().map(|r| r.positions.clone()).collect();
@@ -186,11 +203,29 @@ impl App {
         let id = session.session_id.clone();
         let offset = self.summary_offsets.get(&id).copied().unwrap_or(0);
         let new_offset = if forward {
-            if offset + 1 < count { offset + 1 } else { offset }
+            if offset + 1 < count {
+                offset + 1
+            } else {
+                offset
+            }
         } else {
             offset.saturating_sub(1)
         };
         self.summary_offsets.insert(id, new_offset);
+    }
+
+    pub fn save_settings(&self) {
+        let settings = crate::settings::Settings {
+            sort_by: None,
+            max_sessions: None,
+            summary_search_count: self.summary_search_count,
+            search_scope: if self.include_summaries {
+                "all".to_string()
+            } else {
+                "name_path".to_string()
+            },
+        };
+        settings.save_editable();
     }
 
     pub fn adjust_scroll(&mut self) {
@@ -291,6 +326,7 @@ impl App {
                     Mode::DeleteConfirm => render::render_delete_confirm(f, self),
                     Mode::BulkDelete => render::render_bulk_delete(f, self),
                     Mode::Preview => render::render_preview(f, self),
+                    Mode::Help => render::render_help(f, self),
                 }
             })?;
 
@@ -303,6 +339,7 @@ impl App {
                     Mode::DeleteConfirm => input::handle_delete_confirm(self, key),
                     Mode::BulkDelete => input::handle_bulk_delete(self, key),
                     Mode::Preview => input::handle_preview(self, key),
+                    Mode::Help => input::handle_help(self, key),
                 };
 
                 match result {
