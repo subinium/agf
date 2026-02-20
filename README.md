@@ -140,7 +140,8 @@ Issues and PRs are welcome.
 
 ### Contributors
 
-- [@noahcoffey](https://github.com/noahcoffey) — Shift+↑↓ summary cycling, summaries Vec support
+<a href="https://github.com/subinium"><img src="https://github.com/subinium.png" width="40" height="40" alt="subinium" title="subinium" style="border-radius:50%"/></a>
+<a href="https://github.com/noahcoffey"><img src="https://github.com/noahcoffey.png" width="40" height="40" alt="noahcoffey" title="noahcoffey" style="border-radius:50%"/></a>
 
 ## License
 
