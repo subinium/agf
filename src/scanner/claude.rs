@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufRead, BufReader};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -58,11 +59,12 @@ fn scan_session_worktrees(claude_dir: &std::path::Path) -> HashMap<String, Strin
             if map.contains_key(&session_id) {
                 continue;
             }
-            let Ok(content) = fs::read_to_string(&file_path) else {
+            let Ok(file) = fs::File::open(&file_path) else {
                 continue;
             };
-            for line in content.lines().take(20) {
-                if let Ok(val) = serde_json::from_str::<Value>(line) {
+            for line in BufReader::new(file).lines().take(20) {
+                let Ok(line) = line else { continue };
+                if let Ok(val) = serde_json::from_str::<Value>(&line) {
                     if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str()) {
                         if let Some((_, wt)) = cwd.split_once("/.claude/worktrees/") {
                             if !wt.is_empty() {
@@ -100,6 +102,8 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     }
 
     let worktrees = scan_session_worktrees(&claude_dir);
+    // Cache git branch reads — many sessions share the same project_path.
+    let mut branch_cache: HashMap<String, Option<String>> = HashMap::new();
     let content = fs::read_to_string(&path)?;
     let mut sessions_map: HashMap<String, SessionData> = HashMap::new();
 
@@ -164,7 +168,10 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             //     which is displayed in the detail view alongside the worktree name.
             //   - For regular sessions this shows the project's current branch.
             let worktree = worktrees.get(&session_id).cloned();
-            let git_branch = read_git_branch(&project_path);
+            let git_branch = branch_cache
+                .entry(project_path.clone())
+                .or_insert_with(|| read_git_branch(&project_path))
+                .clone();
 
             // Sort summaries newest-first
             data.summaries
@@ -180,7 +187,6 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 timestamp,
                 git_branch,
                 worktree,
-                git_dirty: None,
             })
         })
         .collect();

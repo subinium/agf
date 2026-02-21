@@ -119,7 +119,6 @@ pub struct Session {
     pub timestamp: i64, // Unix ms
     pub git_branch: Option<String>,
     pub worktree: Option<String>,
-    pub git_dirty: Option<bool>,
 }
 
 impl Session {

@@ -159,11 +159,6 @@ fn build_session_row<'a>(
         ));
     }
 
-    // Git dirty indicator
-    if session.git_dirty == Some(true) {
-        spans.push(Span::styled("*", Style::new().fg(YELLOW).bold().bg(bg)));
-    }
-
     let left_used: usize = indicator_width + spans.iter().map(|s| s.width()).sum::<usize>();
     let available = total_width.saturating_sub(left_used + git_info_width + right_display_width);
 
@@ -1098,16 +1093,9 @@ pub fn render_preview(f: &mut Frame, app: &App) {
     ];
 
     if let Some(ref branch) = session.git_branch {
-        let dirty_marker = if session.git_dirty == Some(true) {
-            " *"
-        } else {
-            ""
-        };
         lines.push(Line::from(vec![
             Span::styled("  Branch:   ", Style::new().fg(GRAY_500)),
-            Span::styled(
-                format!("{branch}{dirty_marker}"),
-                Style::new().fg(GREEN_400),
+            Span::styled(branch.clone(), Style::new().fg(GREEN_400),
             ),
         ]));
     }
