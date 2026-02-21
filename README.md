@@ -69,7 +69,7 @@ If you use AI coding agents, you've probably done this:
 | Key | Action |
 |:---|:---|
 | `Space` | Toggle selection + move down |
-| `↑` `↓` | Navigate |
+| `↑` `↓` / `Ctrl+K` `Ctrl+J` | Navigate |
 | `Enter` | Confirm deletion (when items selected) |
 | `Esc` | Cancel and return to browse |
 
