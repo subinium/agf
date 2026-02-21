@@ -18,6 +18,7 @@ const YELLOW: Color = Color::Rgb(245, 158, 11);
 const SEPARATOR: Color = Color::Rgb(64, 64, 64);
 const RED: Color = Color::Rgb(239, 68, 68);
 const GREEN_400: Color = Color::Rgb(52, 211, 153);
+const CYAN: Color = Color::Rgb(34, 211, 238);
 
 fn agent_color(agent: Agent) -> Color {
     let (r, g, b) = agent.color();
@@ -117,19 +118,31 @@ fn build_session_row<'a>(
         Style::new().fg(agent_color(session.agent)).bold().bg(bg),
     ));
 
-    // Right side width calculation
+    // Right side layout: [padding][git_info][  time  ][margin]
+    //
+    // time is anchored to the right edge (fixed width per row, varies only by relative age).
+    // git_info (worktree OR branch) floats between project/summary and time.
+    // This prevents time from jumping between rows when git_info is absent on some sessions.
     let time_str = session.time_display();
-    let mut right_text = String::new();
-    if let Some(ref branch) = session.git_branch {
-        right_text.push_str(&format!("  {branch}"));
-    }
-    right_text.push_str(&format!("  {time_str}"));
-    let right_display_width = UnicodeWidthStr::width(right_text.as_str()) + right_margin;
+    let time_width = UnicodeWidthStr::width(time_str.as_str()) + 2; // "  " prefix
+    let right_display_width = time_width + right_margin;
 
-    // Truncate project name if it alone would overflow
+    let git_info_str: Option<String> = if let Some(ref wt) = session.worktree {
+        Some(format!("  {wt}"))
+    } else {
+        session.git_branch.as_ref().map(|b| format!("  {b}"))
+    };
+    let git_info_width = git_info_str
+        .as_deref()
+        .map(UnicodeWidthStr::width)
+        .unwrap_or(0);
+
+    // Truncate project name to fit, always — no max_proj > 3 guard that can cause overflow
     let fixed_left = indicator_width + 12; // indicator + agent
-    let max_proj = total_width.saturating_sub(fixed_left + right_display_width + 4);
-    let proj_display = if session.project_name.width() > max_proj && max_proj > 3 {
+    let max_proj = total_width.saturating_sub(fixed_left + right_display_width + git_info_width + 4);
+    let proj_display = if max_proj == 0 {
+        String::new()
+    } else if session.project_name.width() > max_proj {
         truncate_str(&session.project_name, max_proj)
     } else {
         session.project_name.clone()
@@ -151,7 +164,7 @@ fn build_session_row<'a>(
     }
 
     let left_used: usize = indicator_width + spans.iter().map(|s| s.width()).sum::<usize>();
-    let available = total_width.saturating_sub(left_used + right_display_width);
+    let available = total_width.saturating_sub(left_used + git_info_width + right_display_width);
 
     // Summary
     if available > 7 {
@@ -166,19 +179,21 @@ fn build_session_row<'a>(
         }
     }
 
-    // Padding
+    // Padding: fills space so that git_info + time flush to the right edge
     let left_width: usize = indicator_width + spans.iter().map(|s| s.width()).sum::<usize>();
-    let padding = total_width.saturating_sub(left_width + right_display_width);
+    let padding = total_width.saturating_sub(left_width + git_info_width + right_display_width);
     if padding > 0 {
         spans.push(Span::styled(" ".repeat(padding), Style::new().bg(bg)));
     }
 
-    // Right parts
-    if let Some(ref branch) = session.git_branch {
-        spans.push(Span::styled(
-            format!("  {branch}"),
-            Style::new().fg(GREEN_400).bg(bg),
-        ));
+    // Right parts: [git_info][  time  ][margin]
+    if let Some(git_str) = git_info_str {
+        let color = if session.worktree.is_some() {
+            CYAN
+        } else {
+            GREEN_400
+        };
+        spans.push(Span::styled(git_str, Style::new().fg(color).bg(bg)));
     }
     spans.push(Span::styled(
         format!("  {time_str}"),
@@ -222,7 +237,7 @@ fn render_session_list(f: &mut Frame, area: Rect, app: &App) {
     let visible_count = area.height as usize;
     let scroll_offset = app.scroll_offset;
     let total_width = area.width as usize;
-    let right_margin = 2usize;
+    let right_margin = 1usize;
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -303,7 +318,12 @@ fn render_session_list_compact(f: &mut Frame, area: Rect, app: &App) {
             format!("{:<20}", truncate_str(&session.project_name, 20)),
             Style::new().fg(BRIGHT_WHITE).bold().bg(bg),
         ));
-        if let Some(ref branch) = session.git_branch {
+        if let Some(ref wt) = session.worktree {
+            spans.push(Span::styled(
+                format!("{:<8}", truncate_str(wt, 8)),
+                Style::new().fg(CYAN).bg(bg),
+            ));
+        } else if let Some(ref branch) = session.git_branch {
             spans.push(Span::styled(
                 format!("{:<8}", truncate_str(branch, 8)),
                 Style::new().fg(GREEN_400).bg(bg),
@@ -311,6 +331,7 @@ fn render_session_list_compact(f: &mut Frame, area: Rect, app: &App) {
         } else {
             spans.push(Span::styled("        ", Style::new().bg(bg)));
         }
+
         spans.push(Span::styled(
             format!("{:>12}", session.time_display()),
             Style::new().fg(VIOLET).bg(bg),
@@ -694,7 +715,7 @@ fn render_bulk_delete_list(f: &mut Frame, area: Rect, app: &App) {
     let visible_count = area.height as usize;
     let scroll_offset = app.scroll_offset;
     let total_width = area.width as usize;
-    let right_margin = 2usize;
+    let right_margin = 1usize;
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -1089,6 +1110,12 @@ pub fn render_preview(f: &mut Frame, app: &App) {
             ),
         ]));
     }
+    if let Some(ref wt) = session.worktree {
+        lines.push(Line::from(vec![
+            Span::styled("  Worktree: ", Style::new().fg(GRAY_500)),
+            Span::styled(wt.clone(), Style::new().fg(CYAN)),
+        ]));
+    }
 
     if !session.summaries.is_empty() {
         lines.push(Line::from(vec![Span::styled(
@@ -1264,6 +1291,15 @@ pub fn render_help(f: &mut Frame, app: &App) {
 
 fn truncate_str(s: &str, max_width: usize) -> String {
     use unicode_width::UnicodeWidthChar;
+
+    // Collapse newlines/tabs into spaces so multi-line content never breaks a row.
+    let normalized;
+    let s = if s.contains(['\n', '\r', '\t']) {
+        normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        normalized.as_str()
+    } else {
+        s
+    };
 
     let mut width = 0;
     let mut end = 0;

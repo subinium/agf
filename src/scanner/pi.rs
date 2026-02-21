@@ -92,6 +92,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             summaries: Vec::new(),
             timestamp,
             git_branch: None,
+            worktree: None,
             git_dirty: None,
         });
     }

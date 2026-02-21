@@ -115,6 +115,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             summaries: session_summaries,
             timestamp,
             git_branch,
+            worktree: None,
             git_dirty: None,
         });
     }

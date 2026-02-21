@@ -45,6 +45,8 @@ If you use AI coding agents, you've probably done this:
 - **New session** — launch a new agent session with optional permission mode
 - **Quick resume** — `agf resume <query>` to skip the TUI and resume directly
 - **Auto-detection** — only shows agents installed on your system
+- **Git branch** — shows the current branch of each project's working directory
+- **Worktree support** — detects Claude Code `--worktree` sessions; shows worktree name in the list and parent branch in the detail view
 
 ## Keybindings
 
@@ -97,7 +99,7 @@ You can also edit `search_scope` and `summary_search_count` interactively by pre
 
 | Agent | Resume Command | Data Source |
 |:---|:---|:---|
-| [Claude Code](https://github.com/anthropics/claude-code) | `claude --resume <id>` | `~/.claude/history.jsonl` |
+| [Claude Code](https://github.com/anthropics/claude-code) | `claude --resume <id>` | `~/.claude/history.jsonl` + `~/.claude/projects/` |
 | [Codex](https://github.com/openai/codex) | `codex resume <id>` | `~/.codex/sessions/**/*.jsonl` |
 | [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
 | [pi](https://github.com/badlogic/pi-mono) | `pi --resume` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
@@ -108,7 +110,7 @@ You can also edit `search_scope` and `summary_search_count` interactively by pre
 
 | Agent | Format | Default Path |
 |:---|:---|:---|
-| Claude Code | JSONL | `~/.claude/history.jsonl` |
+| Claude Code | JSONL | `~/.claude/history.jsonl` (sessions)<br>`~/.claude/projects/*/` (worktree detection) |
 | Codex | JSONL | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 | OpenCode | SQLite | `~/.local/share/opencode/opencode.db` |
 | pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |

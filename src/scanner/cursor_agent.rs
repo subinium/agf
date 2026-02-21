@@ -99,6 +99,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             summaries: summary.into_iter().collect(),
             timestamp,
             git_branch: None,
+            worktree: None,
             git_dirty: None,
         });
     }

@@ -1,7 +1,7 @@
 class Agf < Formula
   desc "AI Agent Session Finder TUI — unified launcher for Claude Code, Codex, OpenCode, Pi, Kiro, and Cursor CLI"
   homepage "https://github.com/subinium/agf"
-  version "0.5.0"
+  version "0.5.1"
   license "MIT"
 
   on_macos do
