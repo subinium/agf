@@ -1095,8 +1095,7 @@ pub fn render_preview(f: &mut Frame, app: &App) {
     if let Some(ref branch) = session.git_branch {
         lines.push(Line::from(vec![
             Span::styled("  Branch:   ", Style::new().fg(GRAY_500)),
-            Span::styled(branch.clone(), Style::new().fg(GREEN_400),
-            ),
+            Span::styled(branch.clone(), Style::new().fg(GREEN_400)),
         ]));
     }
     if let Some(ref wt) = session.worktree {
