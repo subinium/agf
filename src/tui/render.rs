@@ -139,7 +139,8 @@ fn build_session_row<'a>(
 
     // Truncate project name to fit, always — no max_proj > 3 guard that can cause overflow
     let fixed_left = indicator_width + 12; // indicator + agent
-    let max_proj = total_width.saturating_sub(fixed_left + right_display_width + git_info_width + 4);
+    let max_proj =
+        total_width.saturating_sub(fixed_left + right_display_width + git_info_width + 4);
     let proj_display = if max_proj == 0 {
         String::new()
     } else if session.project_name.width() > max_proj {
