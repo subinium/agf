@@ -55,10 +55,10 @@ If you use AI coding agents, you've probably done this:
 | Key | Action |
 |:---|:---|
 | Type anything | Fuzzy search |
-| `↑` `↓` | Navigate |
+| `↑` `↓` / `Ctrl+K` `Ctrl+J` | Navigate |
 | `Shift+↑` `Shift+↓` | Cycle session summary |
 | `Enter` | Open action menu |
-| `→` | Preview session details |
+| `→` / `Ctrl+L` | Preview session details |
 | `Tab` / `Shift+Tab` | Cycle agent filter |
 | `Ctrl+S` | Cycle sort (time / name / agent) |
 | `Ctrl+D` | Enter bulk delete mode |

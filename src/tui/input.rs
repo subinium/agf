@@ -29,7 +29,9 @@ pub fn handle_browse(app: &mut App, key: KeyEvent) -> InputResult {
             InputResult::Continue
         }
 
-        (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+        (KeyCode::Up, _)
+        | (KeyCode::Char('p'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
             if app.selected > 0 {
                 app.selected -= 1;
                 app.adjust_scroll();
@@ -37,7 +39,9 @@ pub fn handle_browse(app: &mut App, key: KeyEvent) -> InputResult {
             InputResult::Continue
         }
 
-        (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+        (KeyCode::Down, _)
+        | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
             if !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
                 app.selected += 1;
                 app.adjust_scroll();
@@ -53,7 +57,7 @@ pub fn handle_browse(app: &mut App, key: KeyEvent) -> InputResult {
             InputResult::Continue
         }
 
-        (KeyCode::Right, _) => {
+        (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
             if app.selected_session().is_some() {
                 app.mode = Mode::Preview;
             }
@@ -113,14 +117,18 @@ pub fn handle_action_select(app: &mut App, key: KeyEvent) -> InputResult {
             InputResult::Continue
         }
 
-        (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+        (KeyCode::Up, _)
+        | (KeyCode::Char('p'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
             if app.action_index > 0 {
                 app.action_index -= 1;
             }
             InputResult::Continue
         }
 
-        (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+        (KeyCode::Down, _)
+        | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
             if app.action_index < actions.len() - 1 {
                 app.action_index += 1;
             }
@@ -177,14 +185,18 @@ pub fn handle_agent_select(app: &mut App, key: KeyEvent) -> InputResult {
             InputResult::Continue
         }
 
-        (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+        (KeyCode::Up, _)
+        | (KeyCode::Char('p'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
             if app.agent_index > 0 {
                 app.agent_index -= 1;
             }
             InputResult::Continue
         }
 
-        (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+        (KeyCode::Down, _)
+        | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
             if option_count > 0 && app.agent_index < option_count - 1 {
                 app.agent_index += 1;
             }
@@ -256,14 +268,18 @@ pub fn handle_mode_select(app: &mut App, key: KeyEvent) -> InputResult {
             InputResult::Continue
         }
 
-        (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+        (KeyCode::Up, _)
+        | (KeyCode::Char('p'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
             if app.mode_index > 0 {
                 app.mode_index -= 1;
             }
             InputResult::Continue
         }
 
-        (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+        (KeyCode::Down, _)
+        | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
             if option_count > 0 && app.mode_index < option_count - 1 {
                 app.mode_index += 1;
             }
@@ -306,7 +322,9 @@ pub fn handle_bulk_delete(app: &mut App, key: KeyEvent) -> InputResult {
             InputResult::Continue
         }
 
-        (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+        (KeyCode::Up, _)
+        | (KeyCode::Char('p'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
             if app.selected > 0 {
                 app.selected -= 1;
                 app.adjust_scroll();
@@ -314,7 +332,9 @@ pub fn handle_bulk_delete(app: &mut App, key: KeyEvent) -> InputResult {
             InputResult::Continue
         }
 
-        (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+        (KeyCode::Down, _)
+        | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
             if !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
                 app.selected += 1;
                 app.adjust_scroll();
@@ -361,7 +381,16 @@ pub fn handle_delete_confirm(app: &mut App, key: KeyEvent) -> InputResult {
             InputResult::Continue
         }
 
-        (KeyCode::Up, _) | (KeyCode::Down, _) | (KeyCode::Left, _) | (KeyCode::Right, _) => {
+        (KeyCode::Up, _)
+        | (KeyCode::Down, _)
+        | (KeyCode::Left, _)
+        | (KeyCode::Right, _)
+        | (KeyCode::Char('p'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('k'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('j'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('h'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
             app.delete_index = if app.delete_index == 0 { 1 } else { 0 };
             InputResult::Continue
         }
@@ -413,13 +442,13 @@ pub fn handle_help(app: &mut App, key: KeyEvent) -> InputResult {
             app.mode = Mode::Browse;
         }
 
-        (KeyCode::Up, _) => {
+        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
             if app.help_selected > 0 {
                 app.help_selected -= 1;
             }
         }
 
-        (KeyCode::Down, _) => {
+        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
             if app.help_selected < 1 {
                 app.help_selected += 1;
             }
@@ -456,7 +485,8 @@ pub fn handle_preview(app: &mut App, key: KeyEvent) -> InputResult {
         (KeyCode::Esc, _)
         | (KeyCode::Char('c'), KeyModifiers::CONTROL)
         | (KeyCode::Left, _)
-        | (KeyCode::Right, _) => {
+        | (KeyCode::Right, _)
+        | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
             app.mode = Mode::Browse;
             InputResult::Continue
         }
