@@ -3,7 +3,6 @@ mod config;
 mod delete;
 mod error;
 mod fuzzy;
-mod git;
 mod model;
 mod scanner;
 mod settings;

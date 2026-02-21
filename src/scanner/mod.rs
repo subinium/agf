@@ -33,18 +33,6 @@ pub fn scan_all() -> Vec<Session> {
         .flat_map(|h| h.join().unwrap_or_default())
         .collect();
 
-    // Populate git_dirty in parallel
-    let dirty_handles: Vec<_> = sessions
-        .iter()
-        .map(|s| {
-            let path = s.project_path.clone();
-            thread::spawn(move || crate::git::is_dirty(&path))
-        })
-        .collect();
-    for (session, handle) in sessions.iter_mut().zip(dirty_handles) {
-        session.git_dirty = handle.join().unwrap_or(None);
-    }
-
     sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     sessions
 }
