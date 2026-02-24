@@ -24,6 +24,10 @@ pub fn pi_sessions_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".pi/agent/sessions"))
 }
 
+pub fn gemini_dir() -> Result<PathBuf, AgfError> {
+    Ok(home_dir()?.join(".gemini"))
+}
+
 pub fn cursor_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".cursor"))
 }

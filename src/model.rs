@@ -9,6 +9,7 @@ pub enum Agent {
     Pi,
     Kiro,
     CursorAgent,
+    Gemini,
 }
 
 impl fmt::Display for Agent {
@@ -20,6 +21,7 @@ impl fmt::Display for Agent {
             Agent::Pi => write!(f, "pi"),
             Agent::Kiro => write!(f, "Kiro"),
             Agent::CursorAgent => write!(f, "Cursor CLI"),
+            Agent::Gemini => write!(f, "Gemini"),
         }
     }
 }
@@ -33,6 +35,7 @@ impl Agent {
             Agent::Pi => (236, 72, 153),         // #EC4899 pink
             Agent::Kiro => (136, 69, 244),       // #8845F4 deep purple (AWS Kiro)
             Agent::CursorAgent => (245, 184, 65), // #F5B841 Cursor brand yellow
+            Agent::Gemini => (66, 133, 244),     // #4285F4 Google blue
         }
     }
 
@@ -44,6 +47,7 @@ impl Agent {
             Agent::Pi,
             Agent::Kiro,
             Agent::CursorAgent,
+            Agent::Gemini,
         ]
     }
 
@@ -56,6 +60,7 @@ impl Agent {
             Agent::Pi => "pi",
             Agent::Kiro => "kiro-cli",
             Agent::CursorAgent => "cursor-agent",
+            Agent::Gemini => "gemini",
         }
     }
 
@@ -68,6 +73,7 @@ impl Agent {
             Agent::Pi => "pi --resume".to_string(),
             Agent::Kiro => "kiro-cli chat --resume".to_string(),
             Agent::CursorAgent => format!("cursor-agent --resume '{session_id}'"),
+            Agent::Gemini => "gemini".to_string(),
         }
     }
 
@@ -80,6 +86,7 @@ impl Agent {
             Agent::Pi => "pi",
             Agent::Kiro => "kiro-cli chat",
             Agent::CursorAgent => "cursor-agent",
+            Agent::Gemini => "gemini",
         }
     }
 }

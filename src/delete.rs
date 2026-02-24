@@ -17,6 +17,7 @@ pub fn delete_session(session: &Session) -> Result<(), io::Error> {
         Agent::Pi => delete_pi_session(session),
         Agent::Kiro => delete_kiro_session(session),
         Agent::CursorAgent => delete_cursor_agent_session(session),
+        Agent::Gemini => delete_gemini_session(session),
     }
 }
 
@@ -296,6 +297,52 @@ fn delete_cursor_agent_session(session: &Session) -> Result<(), io::Error> {
             if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(&transcript_name)
             {
                 let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Gemini
+// ---------------------------------------------------------------------------
+
+/// Gemini sessions are stored as JSON files under
+/// `~/.gemini/tmp/<project-name-or-hash>/chats/session-<date>-<short-id>.json`.
+fn delete_gemini_session(session: &Session) -> Result<(), io::Error> {
+    let gemini_dir = config::gemini_dir().map_err(io::Error::other)?;
+    let tmp_dir = gemini_dir.join("tmp");
+    if !tmp_dir.exists() {
+        return Ok(());
+    }
+
+    for project_entry in fs::read_dir(&tmp_dir)?.filter_map(|e| e.ok()) {
+        let chats_dir = project_entry.path().join("chats");
+        if !chats_dir.is_dir() {
+            continue;
+        }
+
+        for chat_entry in fs::read_dir(&chats_dir)?.filter_map(|e| e.ok()) {
+            let path = chat_entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if json
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .map(|id| id == session.session_id)
+                    .unwrap_or(false)
+                {
+                    fs::remove_file(&path)?;
+                    return Ok(());
+                }
             }
         }
     }

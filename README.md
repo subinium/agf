@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > A fast TUI to find, resume, and manage your AI coding agent sessions.
-> Supports **Claude Code**, **Codex**, **OpenCode**, **pi**, **Kiro**, and **Cursor CLI** — all in one place.
+> Supports **Claude Code**, **Codex**, **OpenCode**, **pi**, **Kiro**, **Cursor CLI**, and **Gemini** — all in one place.
 
 ![agf demo](./assets/demo.gif)
 
@@ -36,7 +36,7 @@ If you use AI coding agents, you've probably done this:
 
 ## Features
 
-- **Unified view** — Claude Code, Codex, OpenCode, pi, Kiro, and Cursor CLI sessions in one list
+- **Unified view** — Claude Code, Codex, OpenCode, pi, Kiro, Cursor CLI, and Gemini sessions in one list
 - **Fuzzy search** — find any session by project name or summary
 - **One-key resume** — select a session and hit Enter
 - **Agent filter** — Tab to cycle through agents
@@ -105,6 +105,7 @@ You can also edit `search_scope` and `summary_search_count` interactively by pre
 | [pi](https://github.com/badlogic/pi-mono) | `pi --resume` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
 | [Kiro](https://kiro.dev) | `kiro-cli chat --resume` | `~/Library/Application Support/kiro-cli/data.sqlite3` |
 | [Cursor CLI](https://docs.cursor.com/agent) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/*.txt` |
+| [Gemini](https://github.com/google-gemini/gemini-cli) | `gemini` | `~/.gemini/tmp/<project>/chats/session-*.json` |
 
 ### Session Storage Paths
 
@@ -116,6 +117,7 @@ You can also edit `search_scope` and `summary_search_count` interactively by pre
 | pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |
 | Kiro | SQLite | macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`<br>Linux: `~/.local/share/kiro-cli/data.sqlite3` |
 | Cursor CLI | SQLite + TXT | `~/.cursor/chats/*/<id>/store.db`<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` |
+| Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>Project paths resolved via `~/.gemini/projects.json` |
 
 ## Install (other methods)
 
