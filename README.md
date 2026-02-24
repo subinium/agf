@@ -154,4 +154,4 @@ Issues and PRs are welcome.
 
 ### Agent Support Roadmap
 
-**Gemini CLI** and **Amp** are not yet supported. Both tools store session data without a direct mapping between session files and project directories (Gemini uses SHA-256 hashed directory names; Amp stores sessions on a remote server), making it difficult to reliably resolve project paths from session metadata. We are monitoring upstream changes and will add support when feasible.
+**Amp** is not yet supported. Amp stores sessions on a remote server, making it difficult to reliably resolve project paths from session metadata. We are monitoring upstream changes and will add support when feasible.
