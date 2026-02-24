@@ -61,7 +61,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
 
             if let Some(session) = parse_session(&chat_entry.path(), &project_path, &project_name) {
                 let existing = by_id.get(&session.session_id);
-                if existing.map_or(true, |e| session.timestamp > e.timestamp) {
+                if existing.is_none_or(|e| session.timestamp > e.timestamp) {
                     by_id.insert(session.session_id.clone(), session);
                 }
             }
