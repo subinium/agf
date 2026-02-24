@@ -105,7 +105,7 @@ You can also edit `search_scope` and `summary_search_count` interactively by pre
 | [pi](https://github.com/badlogic/pi-mono) | `pi --resume` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
 | [Kiro](https://kiro.dev) | `kiro-cli chat --resume` | `~/Library/Application Support/kiro-cli/data.sqlite3` |
 | [Cursor CLI](https://docs.cursor.com/agent) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/*.txt` |
-| [Gemini](https://github.com/google-gemini/gemini-cli) | `gemini` | `~/.gemini/tmp/<project>/chats/session-*.json` |
+| [Gemini](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` |
 
 ### Session Storage Paths
 
@@ -117,7 +117,7 @@ You can also edit `search_scope` and `summary_search_count` interactively by pre
 | pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |
 | Kiro | SQLite | macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`<br>Linux: `~/.local/share/kiro-cli/data.sqlite3` |
 | Cursor CLI | SQLite + TXT | `~/.cursor/chats/*/<id>/store.db`<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` |
-| Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>Project paths resolved via `~/.gemini/projects.json` |
+| Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
 
 ## Install (other methods)
 
