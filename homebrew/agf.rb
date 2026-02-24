@@ -1,22 +1,22 @@
 class Agf < Formula
   desc "AI Agent Session Finder TUI — unified launcher for Claude Code, Codex, OpenCode, Pi, Kiro, and Cursor CLI"
   homepage "https://github.com/subinium/agf"
-  version "0.5.2"
+  version "0.5.3"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/subinium/agf/releases/download/v#{version}/agf-aarch64-apple-darwin.tar.gz"
-      sha256 "ae01aaa8c30364b36b85c18152fcc3f95e3051e11ec2c6a09d66aa8ed43edb29"
+      sha256 "00b094f2ae27181cc66d23bb5e62b294ef45925133d37ecc6dcc238b2d7150aa"
     else
       url "https://github.com/subinium/agf/releases/download/v#{version}/agf-x86_64-apple-darwin.tar.gz"
-      sha256 "3a838dbb552d3d5d92e85dddadb6efcffb7e89a820a5e62c4068b23334f81514"
+      sha256 "f1e8d29b15f0486ae227e8df4c843c5ca77aea16fb4b47deac180d1255a9f4d2"
     end
   end
 
   on_linux do
     url "https://github.com/subinium/agf/releases/download/v#{version}/agf-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "05784cb4cf27838aee11ca2194f033e12aeb68e8879d34674ebd85bb328578a6"
+    sha256 "49718cea88973b01a1b2c94fdc8bb15da666c278e1eb4a6363cdbcf17b81928d"
   end
 
   def install
