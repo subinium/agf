@@ -45,6 +45,10 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
 
         let (project_path, project_name) = resolve_project(&dir_name, &path_map);
 
+        if project_path.is_empty() {
+            continue;
+        }
+
         let Ok(chat_entries) = fs::read_dir(&chats_dir) else {
             continue;
         };

@@ -73,7 +73,7 @@ impl Agent {
             Agent::Pi => "pi --resume".to_string(),
             Agent::Kiro => "kiro-cli chat --resume".to_string(),
             Agent::CursorAgent => format!("cursor-agent --resume '{session_id}'"),
-            Agent::Gemini => "gemini".to_string(),
+            Agent::Gemini => format!("gemini --resume '{session_id}'"),
         }
     }
 

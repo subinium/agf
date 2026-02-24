@@ -233,7 +233,13 @@ pub fn handle_agent_select(app: &mut App, key: KeyEvent) -> InputResult {
                     crate::model::Agent::Pi => vec![("default", "")],
                     crate::model::Agent::Kiro => vec![("default", "")],
                     crate::model::Agent::CursorAgent => vec![("default", "")],
-                    crate::model::Agent::Gemini => vec![("default", "")],
+                    crate::model::Agent::Gemini => vec![
+                        ("default", ""),
+                        ("auto_edit", " --approval-mode auto_edit"),
+                        ("yolo (no approval)", " -y"),
+                        ("plan (read-only)", " --approval-mode plan"),
+                        ("sandbox", " -s"),
+                    ],
                 };
                 app.mode_index = 0;
                 app.mode = super::Mode::PermissionSelect;
