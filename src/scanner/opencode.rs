@@ -18,7 +18,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     let mut stmt = conn.prepare(
         "SELECT id, title, directory, time_updated \
          FROM session \
-         WHERE time_archived IS NULL \
+         WHERE time_archived IS NULL AND parent_id IS NULL \
          ORDER BY time_updated DESC",
     )?;
 
