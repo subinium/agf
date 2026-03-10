@@ -77,6 +77,35 @@ impl Agent {
         }
     }
 
+    /// Permission/approval mode options for resuming a session with extra flags.
+    pub fn resume_mode_options(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Agent::ClaudeCode => &[
+                ("default", ""),
+                ("acceptEdits", " --permission-mode acceptEdits"),
+                ("plan (read-only)", " --permission-mode plan"),
+                ("bypass permissions", " --dangerously-skip-permissions"),
+            ],
+            Agent::Codex => &[
+                ("default", ""),
+                ("auto-edit", " -a untrusted"),
+                ("full-auto", " --full-auto"),
+                (
+                    "bypass sandbox",
+                    " --dangerously-bypass-approvals-and-sandbox",
+                ),
+            ],
+            Agent::Gemini => &[
+                ("default", ""),
+                ("auto_edit", " --approval-mode auto_edit"),
+                ("yolo (no approval)", " -y"),
+                ("plan (read-only)", " --approval-mode plan"),
+                ("sandbox", " -s"),
+            ],
+            _ => &[("default", "")],
+        }
+    }
+
     /// Shell command to start a new session (base, without flags).
     pub fn new_session_cmd(&self) -> &'static str {
         match self {

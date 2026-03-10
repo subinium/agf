@@ -472,12 +472,14 @@ pub fn render_action_select(f: &mut Frame, app: &App) {
         chunks[6],
     );
 
-    // Footer
+    // Footer — show tab hint when Resume is the selected action
+    let footer = if Action::MENU[app.action_index] == Action::Resume {
+        " tab mode │ enter confirm │ esc back"
+    } else {
+        " enter confirm │ esc back"
+    };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            " enter confirm │ esc back",
-            Style::new().fg(GRAY_500),
-        ))),
+        Paragraph::new(Line::from(Span::styled(footer, Style::new().fg(GRAY_500)))),
         chunks[7],
     );
 }
@@ -622,6 +624,95 @@ pub fn render_mode_select(f: &mut Frame, app: &App) {
     let mut mode_lines: Vec<Line> = Vec::new();
     for (i, &(label, flags)) in app.mode_options.iter().enumerate() {
         let is_selected = i == app.mode_index;
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            Color::Reset
+        };
+        let indicator = format!(" {}) ", i + 1);
+        let flag_preview = if flags.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", flags.trim())
+        };
+        let padding_len = (area.width as usize)
+            .saturating_sub(indicator.len() + label.len() + flag_preview.len());
+
+        mode_lines.push(Line::from(vec![
+            Span::styled(indicator, Style::new().fg(GRAY_400).bg(bg)),
+            Span::styled(label, {
+                let s = Style::new().fg(BRIGHT_WHITE).bg(bg);
+                if is_selected {
+                    s.bold()
+                } else {
+                    s
+                }
+            }),
+            Span::styled(flag_preview, Style::new().fg(GRAY_500).bg(bg)),
+            Span::styled(" ".repeat(padding_len), Style::new().bg(bg)),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(mode_lines), chunks[4]);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[6],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            " 1-9 select │ enter confirm │ esc back",
+            Style::new().fg(GRAY_500),
+        )),
+        chunks[7],
+    );
+}
+
+pub fn render_resume_select(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let session = match app.selected_session() {
+        Some(s) => s,
+        None => return,
+    };
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // header
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // blank
+        Constraint::Min(3),    // mode options
+        Constraint::Length(1), // blank
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    let sep = "─".repeat(area.width as usize);
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Resume mode for ", Style::new().fg(BRIGHT_WHITE)),
+            Span::styled(
+                format!("{}", session.agent),
+                Style::new().fg(agent_color(session.agent)).bold(),
+            ),
+        ])),
+        chunks[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(&sep, Style::new().fg(SEPARATOR))),
+        chunks[2],
+    );
+
+    let mut mode_lines: Vec<Line> = Vec::new();
+    for (i, &(label, flags)) in app.resume_mode_options.iter().enumerate() {
+        let is_selected = i == app.resume_mode_index;
         let bg = if is_selected {
             HIGHLIGHT_BG
         } else {

@@ -143,6 +143,17 @@ pub fn handle_action_select(app: &mut App, key: KeyEvent) -> InputResult {
             dispatch_action(app, actions[app.action_index])
         }
 
+        (KeyCode::Tab, _) => {
+            if actions[app.action_index] == Action::Resume {
+                if let Some(session) = app.selected_session() {
+                    app.resume_mode_options = session.agent.resume_mode_options().to_vec();
+                    app.resume_mode_index = 0;
+                    app.mode = super::Mode::ResumeSelect;
+                }
+            }
+            InputResult::Continue
+        }
+
         (KeyCode::Enter, _) => dispatch_action(app, actions[app.action_index]),
 
         _ => InputResult::Continue,
@@ -316,6 +327,57 @@ fn dispatch_mode_option(app: &mut App) -> InputResult {
                     return InputResult::Execute(cmd);
                 }
             }
+        }
+    }
+    InputResult::Continue
+}
+
+pub fn handle_resume_select(app: &mut App, key: KeyEvent) -> InputResult {
+    let option_count = app.resume_mode_options.len();
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+            app.mode = super::Mode::ActionSelect;
+            InputResult::Continue
+        }
+
+        (KeyCode::Up, _)
+        | (KeyCode::Char('p'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+            if app.resume_mode_index > 0 {
+                app.resume_mode_index -= 1;
+            }
+            InputResult::Continue
+        }
+
+        (KeyCode::Down, _)
+        | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+        | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+            if option_count > 0 && app.resume_mode_index < option_count - 1 {
+                app.resume_mode_index += 1;
+            }
+            InputResult::Continue
+        }
+
+        (KeyCode::Char(c @ '1'..='9'), _) => {
+            let idx = (c as usize) - ('1' as usize);
+            if idx < option_count {
+                app.resume_mode_index = idx;
+            }
+            dispatch_resume_mode(app)
+        }
+
+        (KeyCode::Enter, _) => dispatch_resume_mode(app),
+
+        _ => InputResult::Continue,
+    }
+}
+
+fn dispatch_resume_mode(app: &mut App) -> InputResult {
+    if let Some(&(_, flags)) = app.resume_mode_options.get(app.resume_mode_index) {
+        if let Some(session) = app.selected_session().cloned() {
+            let cmd = action::resume_with_flags(&session, flags);
+            return InputResult::Execute(cmd);
         }
     }
     InputResult::Continue

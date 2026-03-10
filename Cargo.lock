@@ -13,6 +13,7 @@ dependencies = [
  "dirs",
  "nucleo",
  "ratatui",
+ "rayon",
  "rusqlite",
  "serde",
  "serde_json",

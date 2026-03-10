@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 
+use rayon::prelude::*;
+
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -30,12 +32,13 @@ struct SessionData {
 /// worktree sessions looks like `<project>/.claude/worktrees/<name>`.
 fn scan_session_worktrees(claude_dir: &std::path::Path) -> HashMap<String, String> {
     let projects_dir = claude_dir.join("projects");
-    let mut map = HashMap::new();
 
     let Ok(proj_entries) = fs::read_dir(&projects_dir) else {
-        return map;
+        return HashMap::new();
     };
 
+    // Collect all JSONL file paths first, then process in parallel.
+    let mut file_paths: Vec<(String, std::path::PathBuf)> = Vec::new();
     for proj_entry in proj_entries.flatten() {
         let proj_path = proj_entry.path();
         if !proj_path.is_dir() {
@@ -49,36 +52,36 @@ fn scan_session_worktrees(claude_dir: &std::path::Path) -> HashMap<String, Strin
             if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            let Some(session_id) = file_path
+            if let Some(session_id) = file_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_string())
-            else {
-                continue;
-            };
-            if map.contains_key(&session_id) {
-                continue;
+            {
+                file_paths.push((session_id, file_path));
             }
-            let Ok(file) = fs::File::open(&file_path) else {
-                continue;
-            };
-            for line in BufReader::new(file).lines().take(20) {
+        }
+    }
+
+    // Read the first 3 lines of each file in parallel to find worktree sessions.
+    file_paths
+        .into_par_iter()
+        .filter_map(|(session_id, file_path)| {
+            let file = fs::File::open(&file_path).ok()?;
+            for line in BufReader::new(file).lines().take(3) {
                 let Ok(line) = line else { continue };
                 if let Ok(val) = serde_json::from_str::<Value>(&line) {
                     if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str()) {
                         if let Some((_, wt)) = cwd.split_once("/.claude/worktrees/") {
                             if !wt.is_empty() {
-                                map.insert(session_id.clone(), wt.to_string());
-                                break;
+                                return Some((session_id, wt.to_string()));
                             }
                         }
                     }
                 }
             }
-        }
-    }
-
-    map
+            None
+        })
+        .collect()
 }
 
 /// Read the current git branch from the project root's `.git/HEAD`.
@@ -104,15 +107,19 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     let worktrees = scan_session_worktrees(&claude_dir);
     // Cache git branch reads — many sessions share the same project_path.
     let mut branch_cache: HashMap<String, Option<String>> = HashMap::new();
-    let content = fs::read_to_string(&path)?;
     let mut sessions_map: HashMap<String, SessionData> = HashMap::new();
 
-    for line in content.lines() {
-        let line = line.trim();
+    let file = fs::File::open(&path)?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let line = line.trim().to_owned();
         if line.is_empty() {
             continue;
         }
-        let entry: ClaudeEntry = match serde_json::from_str(line) {
+        let entry: ClaudeEntry = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(_) => continue,
         };

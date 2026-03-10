@@ -20,7 +20,8 @@ pub enum Mode {
     Browse,
     ActionSelect,
     AgentSelect,
-    PermissionSelect, // permission/approval mode picker
+    PermissionSelect, // permission/approval mode picker for new sessions
+    ResumeSelect,     // permission/approval mode picker for resume
     DeleteConfirm,
     BulkDelete,
     Preview,
@@ -48,7 +49,9 @@ pub struct App {
     pub delete_index: usize, // 0 = Yes, 1 = Cancel
     pub new_session_options: Vec<NewSessionOption>,
     pub mode_index: usize,
-    pub mode_options: Vec<(&'static str, &'static str)>, // (label, flag)
+    pub mode_options: Vec<(&'static str, &'static str)>, // (label, flag) for new-session permission picker
+    pub resume_mode_index: usize,
+    pub resume_mode_options: Vec<(&'static str, &'static str)>, // (label, flag) for resume permission picker
     pub scroll_offset: usize,
     pub viewport_height: usize, // actual visible item count, set during render
     pub sort_mode: SortMode,
@@ -108,6 +111,8 @@ impl App {
             new_session_options,
             mode_index: 0,
             mode_options: Vec::new(),
+            resume_mode_index: 0,
+            resume_mode_options: Vec::new(),
             scroll_offset: 0,
             viewport_height: 4,
             sort_mode: SortMode::Time,
@@ -323,6 +328,7 @@ impl App {
                     Mode::ActionSelect => render::render_action_select(f, self),
                     Mode::AgentSelect => render::render_agent_select(f, self),
                     Mode::PermissionSelect => render::render_mode_select(f, self),
+                    Mode::ResumeSelect => render::render_resume_select(f, self),
                     Mode::DeleteConfirm => render::render_delete_confirm(f, self),
                     Mode::BulkDelete => render::render_bulk_delete(f, self),
                     Mode::Preview => render::render_preview(f, self),
@@ -336,6 +342,7 @@ impl App {
                     Mode::ActionSelect => input::handle_action_select(self, key),
                     Mode::AgentSelect => input::handle_agent_select(self, key),
                     Mode::PermissionSelect => input::handle_mode_select(self, key),
+                    Mode::ResumeSelect => input::handle_resume_select(self, key),
                     Mode::DeleteConfirm => input::handle_delete_confirm(self, key),
                     Mode::BulkDelete => input::handle_bulk_delete(self, key),
                     Mode::Preview => input::handle_preview(self, key),

@@ -32,6 +32,12 @@ pub fn action_preview(session: &Session, action: Action) -> String {
     }
 }
 
+pub fn resume_with_flags(session: &Session, flags: &str) -> String {
+    let escaped_path = shell_escape(&session.project_path);
+    let base_cmd = session.agent.resume_cmd(&session.session_id);
+    format!("cd {escaped_path} && {base_cmd}{flags}")
+}
+
 pub fn new_session_with_flags(session: &Session, agent: Agent, flags: &str) -> Option<String> {
     let escaped_path = shell_escape(&session.project_path);
     let base = agent.new_session_cmd();
