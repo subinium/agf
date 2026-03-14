@@ -1,39 +1,42 @@
 use std::collections::{HashMap, HashSet};
-use std::io;
 
-use crossterm::event::{self, Event};
-use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::prelude::*;
+use unicode_width::UnicodeWidthStr;
 
+use crate::action;
 use crate::config::installed_agents;
 use crate::fuzzy::FuzzyMatcher;
-use crate::model::{Agent, Session, SortMode};
+use crate::model::{Action, Agent, Session, SortMode};
 
-pub mod input;
-pub mod render;
-
-use input::InputResult;
+// Color constants
+const HIGHLIGHT_BG: slt::Color = slt::Color::Rgb(59, 59, 59);
+const BRIGHT_WHITE: slt::Color = slt::Color::Rgb(229, 229, 229);
+const GRAY_500: slt::Color = slt::Color::Rgb(107, 114, 128);
+const GRAY_400: slt::Color = slt::Color::Rgb(163, 163, 163);
+const VIOLET: slt::Color = slt::Color::Rgb(139, 92, 246);
+const YELLOW: slt::Color = slt::Color::Rgb(245, 158, 11);
+const SEPARATOR: slt::Color = slt::Color::Rgb(64, 64, 64);
+const RED: slt::Color = slt::Color::Rgb(239, 68, 68);
+const GREEN_400: slt::Color = slt::Color::Rgb(52, 211, 153);
+const CYAN: slt::Color = slt::Color::Rgb(34, 211, 238);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
     Browse,
     ActionSelect,
     AgentSelect,
-    PermissionSelect, // permission/approval mode picker for new sessions
-    ResumeSelect,     // permission/approval mode picker for resume
+    PermissionSelect,
+    ResumeSelect,
     DeleteConfirm,
     BulkDelete,
     Preview,
     Help,
 }
 
-/// An option in the "New Session" agent picker.
 #[derive(Debug, Clone)]
 pub struct NewSessionOption {
     pub agent: Agent,
     pub label: String,
-    pub command_suffix: &'static str, // extra flags appended to the base command
+    pub command_suffix: &'static str,
 }
 
 pub struct App {
@@ -46,20 +49,20 @@ pub struct App {
     pub agent_filter: Option<Agent>,
     pub action_index: usize,
     pub agent_index: usize,
-    pub delete_index: usize, // 0 = Yes, 1 = Cancel
+    pub delete_index: usize,
     pub new_session_options: Vec<NewSessionOption>,
     pub mode_index: usize,
-    pub mode_options: Vec<(&'static str, &'static str)>, // (label, flag) for new-session permission picker
+    pub mode_options: Vec<(&'static str, &'static str)>,
     pub resume_mode_index: usize,
-    pub resume_mode_options: Vec<(&'static str, &'static str)>, // (label, flag) for resume permission picker
+    pub resume_mode_options: Vec<(&'static str, &'static str)>,
     pub scroll_offset: usize,
-    pub viewport_height: usize, // actual visible item count, set during render
+    pub viewport_height: usize,
     pub sort_mode: SortMode,
     pub selected_set: HashSet<usize>,
-    pub summary_offsets: HashMap<String, usize>, // session_id -> summary offset
+    pub summary_offsets: HashMap<String, usize>,
     pub summary_search_count: usize,
     pub include_summaries: bool,
-    pub help_selected: usize, // 0 = search_scope, 1 = summary_search_count
+    pub help_selected: usize,
     fuzzy: FuzzyMatcher,
 }
 
@@ -72,7 +75,6 @@ impl App {
     ) -> Self {
         let agents = installed_agents();
 
-        // Build new-session options: one per installed agent, sorted by session count (most used first)
         let mut agent_counts: std::collections::HashMap<Agent, usize> =
             std::collections::HashMap::new();
         for s in &sessions {
@@ -194,8 +196,6 @@ impl App {
             .and_then(|&i| self.sessions.get(i))
     }
 
-    /// Cycle the summary offset for the currently selected session.
-    /// `forward` = true means go to an older summary (higher index).
     pub fn cycle_summary(&mut self, forward: bool) {
         let session = match self.selected_session() {
             Some(s) => s,
@@ -244,20 +244,17 @@ impl App {
         } else if self.selected >= self.scroll_offset + visible {
             self.scroll_offset = self.selected - visible + 1;
         }
-        // Clamp scroll offset
         let max_offset = self.filtered_indices.len().saturating_sub(visible);
         if self.scroll_offset > max_offset {
             self.scroll_offset = max_offset;
         }
     }
 
-    /// Returns agents that have at least one session in the current list.
     fn agents_with_sessions(&self) -> Vec<Agent> {
         let mut seen = HashSet::new();
         for s in &self.sessions {
             seen.insert(s.agent);
         }
-        // Preserve ordering from Agent::all()
         Agent::all()
             .iter()
             .copied()
@@ -296,65 +293,1546 @@ impl App {
     }
 
     pub fn run(&mut self) -> anyhow::Result<Option<String>> {
-        crossterm::terminal::enable_raw_mode()?;
-        let mut stderr = io::stderr();
-        execute!(stderr, EnterAlternateScreen)?;
+        let mut result: Option<String> = None;
+        let app = self;
+        slt::run_with(
+            slt::RunConfig {
+                mouse: false,
+                ..Default::default()
+            },
+            |ui: &mut slt::Context| {
+                app.viewport_height = (ui.height() as usize).saturating_sub(4).max(1);
+                app.adjust_scroll();
+                match app.mode {
+                    Mode::Browse => ui_browse(ui, app),
+                    Mode::ActionSelect => ui_action_select(ui, app, &mut result),
+                    Mode::AgentSelect => ui_agent_select(ui, app, &mut result),
+                    Mode::PermissionSelect => ui_permission_select(ui, app, &mut result),
+                    Mode::ResumeSelect => ui_resume_select(ui, app, &mut result),
+                    Mode::DeleteConfirm => ui_delete_confirm(ui, app),
+                    Mode::BulkDelete => ui_bulk_delete(ui, app),
+                    Mode::Preview => ui_preview(ui, app),
+                    Mode::Help => ui_help(ui, app),
+                }
+            },
+        )?;
+        Ok(result)
+    }
+}
 
-        let backend = CrosstermBackend::new(stderr);
-        let mut terminal = Terminal::new(backend)?;
+type StyledChunk = (String, slt::Style);
 
-        let result = self.event_loop(&mut terminal);
+fn agent_color(agent: Agent) -> slt::Color {
+    let (r, g, b) = agent.color();
+    slt::Color::Rgb(r, g, b)
+}
 
-        crossterm::terminal::disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+fn ui_browse(ui: &mut slt::Context, app: &mut App) {
+    let ctrl_up =
+        ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
+    let ctrl_down =
+        ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
+    let ctrl_sort = ui.key_mod('s', slt::KeyModifiers::CONTROL);
+    let ctrl_bulk = ui.key_mod('d', slt::KeyModifiers::CONTROL);
+    let ctrl_clear = ui.key_mod('u', slt::KeyModifiers::CONTROL);
 
-        result
+    if ui.key_code(slt::KeyCode::Esc) {
+        ui.quit();
     }
 
-    fn event_loop(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
-    ) -> anyhow::Result<Option<String>> {
-        loop {
-            terminal.draw(|f| {
-                // Update viewport_height based on actual terminal size
-                let area = f.area();
-                // header(3) + footer(1) = 4 rows overhead, 1 line per session
-                let list_height = area.height.saturating_sub(4) as usize;
-                self.viewport_height = list_height.max(1);
+    if ui.key('?') {
+        app.mode = Mode::Help;
+    }
 
-                match self.mode {
-                    Mode::Browse => render::render_browse(f, self),
-                    Mode::ActionSelect => render::render_action_select(f, self),
-                    Mode::AgentSelect => render::render_agent_select(f, self),
-                    Mode::PermissionSelect => render::render_mode_select(f, self),
-                    Mode::ResumeSelect => render::render_resume_select(f, self),
-                    Mode::DeleteConfirm => render::render_delete_confirm(f, self),
-                    Mode::BulkDelete => render::render_bulk_delete(f, self),
-                    Mode::Preview => render::render_preview(f, self),
-                    Mode::Help => render::render_help(f, self),
-                }
-            })?;
+    if ui.key('[') {
+        app.cycle_summary(true);
+    }
+    if ui.key(']') {
+        app.cycle_summary(false);
+    }
 
-            if let Event::Key(key) = event::read()? {
-                let result = match self.mode {
-                    Mode::Browse => input::handle_browse(self, key),
-                    Mode::ActionSelect => input::handle_action_select(self, key),
-                    Mode::AgentSelect => input::handle_agent_select(self, key),
-                    Mode::PermissionSelect => input::handle_mode_select(self, key),
-                    Mode::ResumeSelect => input::handle_resume_select(self, key),
-                    Mode::DeleteConfirm => input::handle_delete_confirm(self, key),
-                    Mode::BulkDelete => input::handle_bulk_delete(self, key),
-                    Mode::Preview => input::handle_preview(self, key),
-                    Mode::Help => input::handle_help(self, key),
+    if (ui.key_code(slt::KeyCode::Up) || ctrl_up) && app.selected > 0 {
+        app.selected -= 1;
+        app.adjust_scroll();
+    }
+
+    if (ui.key_code(slt::KeyCode::Down) || ctrl_down)
+        && !app.filtered_indices.is_empty()
+        && app.selected < app.filtered_indices.len() - 1
+    {
+        app.selected += 1;
+        app.adjust_scroll();
+    }
+
+    if ui.key_code(slt::KeyCode::Enter) && app.selected_session().is_some() {
+        app.action_index = 0;
+        app.mode = Mode::ActionSelect;
+    }
+
+    if (ui.key_code(slt::KeyCode::Right) || ui.key_mod('l', slt::KeyModifiers::CONTROL))
+        && app.selected_session().is_some()
+    {
+        app.mode = Mode::Preview;
+    }
+
+    if ctrl_sort {
+        app.sort_mode = app.sort_mode.next();
+        app.apply_sort();
+    }
+
+    if ctrl_bulk {
+        app.selected_set.clear();
+        app.mode = Mode::BulkDelete;
+    }
+
+    if ui.key_code(slt::KeyCode::Tab) {
+        app.cycle_agent_filter(true);
+    }
+
+    if ui.key_code(slt::KeyCode::BackTab) {
+        app.cycle_agent_filter(false);
+    }
+
+    if ctrl_clear {
+        app.query.clear();
+        app.update_filter();
+    }
+
+    if ui.key_code(slt::KeyCode::Backspace) {
+        app.query.pop();
+        app.update_filter();
+    }
+
+    let mut blocked_chars = HashSet::new();
+    if ctrl_up {
+        blocked_chars.insert('p');
+        blocked_chars.insert('k');
+    }
+    if ctrl_down {
+        blocked_chars.insert('n');
+        blocked_chars.insert('j');
+    }
+    if ctrl_sort {
+        blocked_chars.insert('s');
+    }
+    if ctrl_bulk {
+        blocked_chars.insert('d');
+    }
+    if ctrl_clear {
+        blocked_chars.insert('u');
+    }
+    if ui.key_mod('l', slt::KeyModifiers::CONTROL) {
+        blocked_chars.insert('l');
+    }
+
+    let mut query_changed = false;
+    for code in 32u8..=126u8 {
+        let c = code as char;
+        if c == '?' || c == '[' || c == ']' {
+            continue;
+        }
+        if blocked_chars.contains(&c) {
+            continue;
+        }
+        if ui.key(c) {
+            app.query.push(c);
+            query_changed = true;
+        }
+    }
+    if query_changed {
+        app.update_filter();
+    }
+
+    let is_compact = ui.width() < 60;
+    ui.col(|ui| {
+        ui.bordered(slt::Border::Single)
+            .border_style(slt::Style::new().fg(SEPARATOR))
+            .min_h(3)
+            .max_h(3)
+            .col(|ui| {
+                ui.row(|ui| {
+                    ui.text("> ").bold().fg(YELLOW);
+                    ui.text(&app.query).fg(slt::Color::White);
+                    ui.text("_").fg(YELLOW);
+                    ui.spacer();
+                    match app.agent_filter {
+                        Some(agent) => {
+                            ui.text(format!("[{agent}]"))
+                                .fg(agent_color(agent))
+                                .bold();
+                        }
+                        None => {
+                            ui.text("[All]").fg(GRAY_500);
+                        }
+                    };
+                });
+            });
+
+        ui.container().grow(1).col(|ui| {
+            if is_compact {
+                render_session_list_compact(ui, app);
+            } else {
+                render_session_list(ui, app, false);
+            }
+        });
+
+        let total = app.sessions.len();
+        let filtered = app.filtered_indices.len();
+        ui.row(|ui| {
+            ui.text(format!(" {filtered} of {total} sessions")).fg(GRAY_500);
+            if let Some(agent) = app.agent_filter {
+                ui.text(format!(" ({agent})")).fg(agent_color(agent));
+            }
+            ui.text(format!(
+                " | sort:{} | tab agent | up/down nav | [ ] summary | right detail | enter select | ^s sort | ? help | esc quit",
+                app.sort_mode.label()
+            ))
+            .fg(GRAY_500);
+        });
+    });
+}
+
+fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
+    let actions = Action::MENU;
+
+    if ui.key_code(slt::KeyCode::Esc) {
+        app.mode = Mode::Browse;
+    }
+
+    if (ui.key_code(slt::KeyCode::Up)
+        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.action_index > 0
+    {
+        app.action_index -= 1;
+    }
+
+    if (ui.key_code(slt::KeyCode::Down)
+        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && app.action_index < actions.len() - 1
+    {
+        app.action_index += 1;
+    }
+
+    for i in 0..actions.len().min(9) {
+        let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
+        if ui.key(key) {
+            app.action_index = i;
+            dispatch_action(ui, app, actions[app.action_index], result);
+        }
+    }
+
+    if ui.key_code(slt::KeyCode::Tab)
+        && actions[app.action_index] == Action::Resume
+        && app.selected_session().is_some()
+    {
+        if let Some(session) = app.selected_session() {
+            app.resume_mode_options = session.agent.resume_mode_options().to_vec();
+            app.resume_mode_index = 0;
+            app.mode = Mode::ResumeSelect;
+        }
+    }
+
+    if ui.key_code(slt::KeyCode::Enter) {
+        dispatch_action(ui, app, actions[app.action_index], result);
+    }
+
+    let Some(session) = app.selected_session() else {
+        app.mode = Mode::Browse;
+        return;
+    };
+
+    ui.col(|ui| {
+        render_separator(ui);
+        ui.row(|ui| {
+            ui.text(format!(" {} ", session.agent))
+                .fg(agent_color(session.agent))
+                .bold();
+            ui.text("| ").fg(SEPARATOR);
+            ui.text(&session.project_name).fg(BRIGHT_WHITE).bold();
+            ui.text(" | ").fg(SEPARATOR);
+            ui.text(session.display_path()).fg(GRAY_500);
+            if let Some(branch) = &session.git_branch {
+                ui.text(" | ").fg(SEPARATOR);
+                ui.text(branch).fg(GREEN_400);
+            }
+            ui.text(" | ").fg(SEPARATOR);
+            ui.text(session.time_display()).fg(VIOLET);
+        });
+        render_separator(ui);
+        ui.text("");
+
+        ui.container().grow(1).col(|ui| {
+            let total_width = ui.width() as usize;
+            for (i, act) in actions.iter().enumerate() {
+                let is_selected = i == app.action_index;
+                let bg = if is_selected {
+                    HIGHLIGHT_BG
+                } else {
+                    slt::Color::Reset
                 };
+                let indicator = format!(" {}) ", i + 1);
+                let label = act.to_string();
+                let base_style = if *act == Action::Delete {
+                    slt::Style::new().fg(RED).bg(bg)
+                } else if *act == Action::Back {
+                    slt::Style::new().fg(GRAY_500).bg(bg)
+                } else {
+                    slt::Style::new().fg(BRIGHT_WHITE).bg(bg)
+                };
+                let label_style = if is_selected {
+                    base_style.bold()
+                } else {
+                    base_style
+                };
+                let preview = action::action_preview(session, *act);
+                let mut preview_text = format!("    {preview}");
+                let used = UnicodeWidthStr::width(indicator.as_str())
+                    + UnicodeWidthStr::width(label.as_str())
+                    + UnicodeWidthStr::width(preview_text.as_str());
+                if used > total_width {
+                    let max_preview = total_width.saturating_sub(
+                        UnicodeWidthStr::width(indicator.as_str())
+                            + UnicodeWidthStr::width(label.as_str())
+                            + 4,
+                    );
+                    preview_text = if max_preview > 0 {
+                        format!("    {}", truncate_str(&preview, max_preview))
+                    } else {
+                        String::new()
+                    };
+                }
+                let pad = total_width.saturating_sub(
+                    UnicodeWidthStr::width(indicator.as_str())
+                        + UnicodeWidthStr::width(label.as_str())
+                        + UnicodeWidthStr::width(preview_text.as_str()),
+                );
 
-                match result {
-                    InputResult::Continue => {}
-                    InputResult::Quit => return Ok(None),
-                    InputResult::Execute(cmd) => return Ok(Some(cmd)),
+                ui.row(|ui| {
+                    ui.styled(
+                        indicator.clone(),
+                        slt::Style::new().fg(slt::Color::White).bg(bg),
+                    );
+                    ui.styled(label.clone(), label_style);
+                    ui.styled(preview_text.clone(), slt::Style::new().fg(GRAY_500).bg(bg));
+                    if pad > 0 {
+                        ui.styled(" ".repeat(pad), slt::Style::new().bg(bg));
+                    }
+                });
+            }
+        });
+
+        ui.text("");
+        render_separator(ui);
+        let footer = if actions[app.action_index] == Action::Resume {
+            " tab mode | enter confirm | esc back"
+        } else {
+            " enter confirm | esc back"
+        };
+        ui.text(footer).fg(GRAY_500);
+    });
+}
+
+fn dispatch_action(
+    ui: &mut slt::Context,
+    app: &mut App,
+    selected_action: Action,
+    result: &mut Option<String>,
+) {
+    match selected_action {
+        Action::Back => {
+            app.mode = Mode::Browse;
+        }
+        Action::NewSession => {
+            app.agent_index = 0;
+            app.mode = Mode::AgentSelect;
+        }
+        Action::Delete => {
+            app.delete_index = 1;
+            app.mode = Mode::DeleteConfirm;
+        }
+        _ => {
+            if let Some(session) = app.selected_session().cloned() {
+                if let Some(cmd) = action::generate_command(&session, selected_action, None) {
+                    result.replace(cmd);
+                    ui.quit();
                 }
             }
         }
+    }
+}
+
+fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
+    let option_count = app.new_session_options.len();
+
+    if ui.key_code(slt::KeyCode::Esc) {
+        app.mode = Mode::ActionSelect;
+    }
+
+    if (ui.key_code(slt::KeyCode::Up)
+        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.agent_index > 0
+    {
+        app.agent_index -= 1;
+    }
+
+    if (ui.key_code(slt::KeyCode::Down)
+        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && option_count > 0
+        && app.agent_index < option_count - 1
+    {
+        app.agent_index += 1;
+    }
+
+    for i in 0..option_count.min(9) {
+        let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
+        if ui.key(key) {
+            app.agent_index = i;
+            dispatch_agent_option(ui, app, result);
+        }
+    }
+
+    if ui.key_code(slt::KeyCode::Tab) && app.new_session_options.get(app.agent_index).is_some() {
+        if let Some(opt) = app.new_session_options.get(app.agent_index) {
+            app.mode_options = permission_options_for(opt.agent);
+            app.mode_index = 0;
+            app.mode = Mode::PermissionSelect;
+        }
+    }
+
+    if ui.key_code(slt::KeyCode::Enter) {
+        dispatch_agent_option(ui, app, result);
+    }
+
+    let Some(session) = app.selected_session() else {
+        app.mode = Mode::Browse;
+        return;
+    };
+
+    ui.col(|ui| {
+        render_separator(ui);
+        ui.row(|ui| {
+            ui.text(" New session in ").fg(BRIGHT_WHITE);
+            ui.text(session.display_path()).fg(GRAY_500);
+            ui.text("  (tab -> permission mode)").fg(GRAY_500);
+        });
+        render_separator(ui);
+        ui.text("");
+
+        ui.container().grow(1).col(|ui| {
+            let total_width = ui.width() as usize;
+            for (i, opt) in app.new_session_options.iter().enumerate() {
+                let is_selected = i == app.agent_index;
+                let bg = if is_selected {
+                    HIGHLIGHT_BG
+                } else {
+                    slt::Color::Reset
+                };
+                let indicator = format!(" {}) ", i + 1);
+                let preview = if let Some(s) = app.selected_session() {
+                    let base = opt.agent.new_session_cmd();
+                    format!("cd {} && {base}", s.display_path())
+                } else {
+                    String::new()
+                };
+                let preview_text = format!("    {preview}");
+                let used = UnicodeWidthStr::width(indicator.as_str())
+                    + UnicodeWidthStr::width(opt.label.as_str())
+                    + UnicodeWidthStr::width(preview_text.as_str());
+                let pad = total_width.saturating_sub(used);
+
+                ui.row(|ui| {
+                    ui.styled(indicator.clone(), slt::Style::new().fg(GRAY_400).bg(bg));
+                    let base = slt::Style::new().fg(agent_color(opt.agent)).bg(bg);
+                    ui.styled(
+                        opt.label.clone(),
+                        if is_selected { base.bold() } else { base },
+                    );
+                    ui.styled(preview_text.clone(), slt::Style::new().fg(GRAY_500).bg(bg));
+                    if pad > 0 {
+                        ui.styled(" ".repeat(pad), slt::Style::new().bg(bg));
+                    }
+                });
+            }
+        });
+
+        ui.text("");
+        render_separator(ui);
+        ui.text(" 1-9 select | tab mode | enter confirm | esc back")
+            .fg(GRAY_500);
+    });
+}
+
+fn permission_options_for(agent: Agent) -> Vec<(&'static str, &'static str)> {
+    match agent {
+        Agent::ClaudeCode => vec![
+            ("default", ""),
+            ("acceptEdits", " --permission-mode acceptEdits"),
+            ("plan (read-only)", " --permission-mode plan"),
+            ("bypass permissions", " --dangerously-skip-permissions"),
+        ],
+        Agent::Codex => vec![
+            ("suggest (default)", ""),
+            ("auto-edit", " -a untrusted"),
+            ("full-auto", " --full-auto"),
+            (
+                "bypass sandbox",
+                " --dangerously-bypass-approvals-and-sandbox",
+            ),
+        ],
+        Agent::Gemini => vec![
+            ("default", ""),
+            ("auto_edit", " --approval-mode auto_edit"),
+            ("yolo (no approval)", " -y"),
+            ("plan (read-only)", " --approval-mode plan"),
+            ("sandbox", " -s"),
+        ],
+        _ => vec![("default", "")],
+    }
+}
+
+fn dispatch_agent_option(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
+    if let Some(opt) = app.new_session_options.get(app.agent_index) {
+        let agent = opt.agent;
+        let suffix = opt.command_suffix;
+        if let Some(session) = app.selected_session().cloned() {
+            if let Some(cmd) = action::new_session_with_flags(&session, agent, suffix) {
+                result.replace(cmd);
+                ui.quit();
+            }
+        }
+    }
+}
+
+fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
+    let option_count = app.mode_options.len();
+
+    if ui.key_code(slt::KeyCode::Esc) {
+        app.mode = Mode::AgentSelect;
+    }
+
+    if (ui.key_code(slt::KeyCode::Up)
+        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.mode_index > 0
+    {
+        app.mode_index -= 1;
+    }
+
+    if (ui.key_code(slt::KeyCode::Down)
+        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && option_count > 0
+        && app.mode_index < option_count - 1
+    {
+        app.mode_index += 1;
+    }
+
+    for i in 0..option_count.min(9) {
+        let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
+        if ui.key(key) {
+            app.mode_index = i;
+            dispatch_mode_option(ui, app, result);
+        }
+    }
+
+    if ui.key_code(slt::KeyCode::Enter) {
+        dispatch_mode_option(ui, app, result);
+    }
+
+    if app.selected_session().is_none() {
+        app.mode = Mode::Browse;
+        return;
+    }
+
+    let agent_label = app
+        .new_session_options
+        .get(app.agent_index)
+        .map(|o| o.label.as_str())
+        .unwrap_or("agent");
+
+    ui.col(|ui| {
+        render_separator(ui);
+        ui.row(|ui| {
+            ui.text(" Select mode for ").fg(BRIGHT_WHITE);
+            ui.text(agent_label).fg(YELLOW).bold();
+        });
+        render_separator(ui);
+        ui.text("");
+
+        ui.container().grow(1).col(|ui| {
+            let total_width = ui.width() as usize;
+            for (i, (label, flags)) in app.mode_options.iter().enumerate() {
+                let is_selected = i == app.mode_index;
+                let bg = if is_selected {
+                    HIGHLIGHT_BG
+                } else {
+                    slt::Color::Reset
+                };
+                let indicator = format!(" {}) ", i + 1);
+                let flag_preview = if flags.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", flags.trim())
+                };
+                let pad = total_width.saturating_sub(
+                    UnicodeWidthStr::width(indicator.as_str())
+                        + UnicodeWidthStr::width(*label)
+                        + UnicodeWidthStr::width(flag_preview.as_str()),
+                );
+
+                ui.row(|ui| {
+                    ui.styled(indicator.clone(), slt::Style::new().fg(GRAY_400).bg(bg));
+                    let base = slt::Style::new().fg(BRIGHT_WHITE).bg(bg);
+                    ui.styled(
+                        (*label).to_string(),
+                        if is_selected { base.bold() } else { base },
+                    );
+                    ui.styled(flag_preview.clone(), slt::Style::new().fg(GRAY_500).bg(bg));
+                    if pad > 0 {
+                        ui.styled(" ".repeat(pad), slt::Style::new().bg(bg));
+                    }
+                });
+            }
+        });
+
+        ui.text("");
+        render_separator(ui);
+        ui.text(" 1-9 select | enter confirm | esc back")
+            .fg(GRAY_500);
+    });
+}
+
+fn dispatch_mode_option(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
+    if let Some((_, flags)) = app.mode_options.get(app.mode_index) {
+        if let Some(opt) = app.new_session_options.get(app.agent_index) {
+            let agent = opt.agent;
+            if let Some(session) = app.selected_session().cloned() {
+                if let Some(cmd) = action::new_session_with_flags(&session, agent, flags) {
+                    result.replace(cmd);
+                    ui.quit();
+                }
+            }
+        }
+    }
+}
+
+fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
+    let option_count = app.resume_mode_options.len();
+
+    if ui.key_code(slt::KeyCode::Esc) {
+        app.mode = Mode::ActionSelect;
+    }
+
+    if (ui.key_code(slt::KeyCode::Up)
+        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.resume_mode_index > 0
+    {
+        app.resume_mode_index -= 1;
+    }
+
+    if (ui.key_code(slt::KeyCode::Down)
+        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && option_count > 0
+        && app.resume_mode_index < option_count - 1
+    {
+        app.resume_mode_index += 1;
+    }
+
+    for i in 0..option_count.min(9) {
+        let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
+        if ui.key(key) {
+            app.resume_mode_index = i;
+            dispatch_resume_mode(ui, app, result);
+        }
+    }
+
+    if ui.key_code(slt::KeyCode::Enter) {
+        dispatch_resume_mode(ui, app, result);
+    }
+
+    let Some(session) = app.selected_session() else {
+        app.mode = Mode::Browse;
+        return;
+    };
+
+    ui.col(|ui| {
+        render_separator(ui);
+        ui.row(|ui| {
+            ui.text(" Resume mode for ").fg(BRIGHT_WHITE);
+            ui.text(format!("{}", session.agent))
+                .fg(agent_color(session.agent))
+                .bold();
+        });
+        render_separator(ui);
+        ui.text("");
+
+        ui.container().grow(1).col(|ui| {
+            let total_width = ui.width() as usize;
+            for (i, (label, flags)) in app.resume_mode_options.iter().enumerate() {
+                let is_selected = i == app.resume_mode_index;
+                let bg = if is_selected {
+                    HIGHLIGHT_BG
+                } else {
+                    slt::Color::Reset
+                };
+                let indicator = format!(" {}) ", i + 1);
+                let flag_preview = if flags.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", flags.trim())
+                };
+                let pad = total_width.saturating_sub(
+                    UnicodeWidthStr::width(indicator.as_str())
+                        + UnicodeWidthStr::width(*label)
+                        + UnicodeWidthStr::width(flag_preview.as_str()),
+                );
+
+                ui.row(|ui| {
+                    ui.styled(indicator.clone(), slt::Style::new().fg(GRAY_400).bg(bg));
+                    let base = slt::Style::new().fg(BRIGHT_WHITE).bg(bg);
+                    ui.styled(
+                        (*label).to_string(),
+                        if is_selected { base.bold() } else { base },
+                    );
+                    ui.styled(flag_preview.clone(), slt::Style::new().fg(GRAY_500).bg(bg));
+                    if pad > 0 {
+                        ui.styled(" ".repeat(pad), slt::Style::new().bg(bg));
+                    }
+                });
+            }
+        });
+
+        ui.text("");
+        render_separator(ui);
+        ui.text(" 1-9 select | enter confirm | esc back")
+            .fg(GRAY_500);
+    });
+}
+
+fn dispatch_resume_mode(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
+    if let Some((_, flags)) = app.resume_mode_options.get(app.resume_mode_index) {
+        if let Some(session) = app.selected_session().cloned() {
+            let cmd = action::resume_with_flags(&session, flags);
+            result.replace(cmd);
+            ui.quit();
+        }
+    }
+}
+
+fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
+    if ui.key_code(slt::KeyCode::Esc) {
+        app.selected_set.clear();
+        app.mode = Mode::Browse;
+    }
+
+    if (ui.key_code(slt::KeyCode::Up)
+        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.selected > 0
+    {
+        app.selected -= 1;
+        app.adjust_scroll();
+    }
+
+    if (ui.key_code(slt::KeyCode::Down)
+        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && !app.filtered_indices.is_empty()
+        && app.selected < app.filtered_indices.len() - 1
+    {
+        app.selected += 1;
+        app.adjust_scroll();
+    }
+
+    if ui.key(' ') {
+        if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
+            if !app.selected_set.remove(&idx) {
+                app.selected_set.insert(idx);
+            }
+        }
+        if !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
+            app.selected += 1;
+            app.adjust_scroll();
+        }
+    }
+
+    if ui.key_code(slt::KeyCode::Enter) && !app.selected_set.is_empty() {
+        app.delete_index = 1;
+        app.mode = Mode::DeleteConfirm;
+    }
+
+    ui.col(|ui| {
+        ui.bordered(slt::Border::Single)
+            .border_style(slt::Style::new().fg(RED))
+            .min_h(3)
+            .max_h(3)
+            .col(|ui| {
+                ui.row(|ui| {
+                    ui.text(" DELETE MODE").fg(RED).bold();
+                    if !app.selected_set.is_empty() {
+                        ui.text(format!("  ({} selected)", app.selected_set.len()))
+                            .fg(RED);
+                    }
+                });
+            });
+
+        ui.container().grow(1).col(|ui| {
+            render_session_list(ui, app, true);
+        });
+
+        ui.row(|ui| {
+            ui.text(format!(" {} selected", app.selected_set.len()))
+                .fg(RED)
+                .bold();
+            ui.text(" | space toggle | enter delete | esc cancel")
+                .fg(GRAY_500);
+        });
+    });
+}
+
+fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
+    let is_bulk = !app.selected_set.is_empty();
+
+    if ui.key_code(slt::KeyCode::Esc) {
+        if is_bulk {
+            app.mode = Mode::BulkDelete;
+        } else {
+            app.mode = Mode::ActionSelect;
+        }
+    }
+
+    if ui.key_code(slt::KeyCode::Up)
+        || ui.key_code(slt::KeyCode::Down)
+        || ui.key_code(slt::KeyCode::Left)
+        || ui.key_code(slt::KeyCode::Right)
+        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('h', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('l', slt::KeyModifiers::CONTROL)
+    {
+        app.delete_index = if app.delete_index == 0 { 1 } else { 0 };
+    }
+
+    if ui.key_code(slt::KeyCode::Enter) {
+        if app.delete_index == 0 {
+            if is_bulk {
+                let mut indices: Vec<usize> = app.selected_set.drain().collect();
+                indices.sort_unstable_by(|a, b| b.cmp(a));
+                for idx in indices {
+                    if idx < app.sessions.len() {
+                        let _ = crate::delete::delete_session(&app.sessions[idx]);
+                        app.sessions.remove(idx);
+                    }
+                }
+                app.selected_set.clear();
+                app.update_filter();
+            } else if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
+                let _ = crate::delete::delete_session(&app.sessions[idx]);
+                app.sessions.remove(idx);
+                app.update_filter();
+            }
+            app.mode = Mode::Browse;
+        } else if is_bulk {
+            app.mode = Mode::BulkDelete;
+        } else {
+            app.mode = Mode::Browse;
+        }
+    }
+
+    if is_bulk {
+        render_bulk_delete_confirm(ui, app);
+    } else {
+        render_single_delete_confirm(ui, app);
+    }
+}
+
+fn render_single_delete_confirm(ui: &mut slt::Context, app: &App) {
+    let Some(session) = app.selected_session() else {
+        return;
+    };
+
+    ui.col(|ui| {
+        render_separator(ui);
+        ui.text(" Delete session?").fg(RED).bold();
+        render_separator(ui);
+        ui.text("");
+
+        ui.row(|ui| {
+            ui.text(format!("  {} ", session.agent))
+                .fg(agent_color(session.agent))
+                .bold();
+            ui.text("| ").fg(SEPARATOR);
+            ui.text(&session.project_name).fg(BRIGHT_WHITE);
+            ui.text(" | ").fg(SEPARATOR);
+            ui.text(&session.session_id).fg(GRAY_500);
+        });
+        ui.text(format!("  {}", session.display_path()))
+            .fg(GRAY_500);
+        if let Some(summary) = session.summaries.first() {
+            let max_width = (ui.width() as usize).saturating_sub(6);
+            let truncated = truncate_str(summary, max_width);
+            ui.text(format!("  \"{truncated}\"")).fg(GRAY_400);
+        }
+
+        ui.text("");
+        let options = ["Yes, delete", "Cancel"];
+        for (i, opt) in options.iter().enumerate() {
+            let is_selected = i == app.delete_index;
+            let bg = if is_selected {
+                HIGHLIGHT_BG
+            } else {
+                slt::Color::Reset
+            };
+            let indicator = if is_selected { " > " } else { "   " };
+            let label_style = if i == 0 {
+                slt::Style::new().fg(RED).bold().bg(bg)
+            } else {
+                slt::Style::new().fg(BRIGHT_WHITE).bg(bg)
+            };
+            let desc = if i == 0 {
+                "removes session data only"
+            } else {
+                "go back"
+            };
+
+            ui.row(|ui| {
+                ui.styled(
+                    indicator.to_string(),
+                    slt::Style::new().fg(slt::Color::White).bg(bg),
+                );
+                ui.styled((*opt).to_string(), label_style);
+                ui.styled(format!("    {desc}"), slt::Style::new().fg(GRAY_500).bg(bg));
+            });
+        }
+
+        render_separator(ui);
+    });
+}
+
+fn render_bulk_delete_confirm(ui: &mut slt::Context, app: &App) {
+    let count = app.selected_set.len();
+    let mut names: Vec<String> = app
+        .selected_set
+        .iter()
+        .filter_map(|idx| app.sessions.get(*idx))
+        .map(|s| s.project_name.clone())
+        .collect();
+    names.sort();
+
+    ui.col(|ui| {
+        render_separator(ui);
+        ui.text(format!(" Delete {count} sessions?")).fg(RED).bold();
+        render_separator(ui);
+        ui.text("");
+
+        for (i, name) in names.iter().enumerate() {
+            if i >= 5 {
+                ui.text(format!("  ... and {} more", count.saturating_sub(5)))
+                    .fg(GRAY_500);
+                break;
+            }
+            ui.text(format!("  - {name}")).fg(BRIGHT_WHITE);
+        }
+
+        ui.text("");
+        let options = ["Yes, delete all", "Cancel"];
+        for (i, opt) in options.iter().enumerate() {
+            let is_selected = i == app.delete_index;
+            let bg = if is_selected {
+                HIGHLIGHT_BG
+            } else {
+                slt::Color::Reset
+            };
+            let indicator = if is_selected { " > " } else { "   " };
+            let label_style = if i == 0 {
+                slt::Style::new().fg(RED).bold().bg(bg)
+            } else {
+                slt::Style::new().fg(BRIGHT_WHITE).bg(bg)
+            };
+            let desc = if i == 0 {
+                "removes session data only"
+            } else {
+                "go back"
+            };
+
+            ui.row(|ui| {
+                ui.styled(
+                    indicator.to_string(),
+                    slt::Style::new().fg(slt::Color::White).bg(bg),
+                );
+                ui.styled((*opt).to_string(), label_style);
+                ui.styled(format!("    {desc}"), slt::Style::new().fg(GRAY_500).bg(bg));
+            });
+        }
+
+        render_separator(ui);
+    });
+}
+
+fn ui_preview(ui: &mut slt::Context, app: &mut App) {
+    if ui.key_code(slt::KeyCode::Esc)
+        || ui.key_code(slt::KeyCode::Left)
+        || ui.key_code(slt::KeyCode::Right)
+        || ui.key_mod('h', slt::KeyModifiers::CONTROL)
+    {
+        app.mode = Mode::Browse;
+    } else if ui.key_code(slt::KeyCode::Enter) {
+        app.action_index = 0;
+        app.mode = Mode::ActionSelect;
+    } else if any_key_pressed(ui) {
+        app.mode = Mode::Browse;
+    }
+
+    let Some(session) = app.selected_session() else {
+        app.mode = Mode::Browse;
+        return;
+    };
+
+    ui.col(|ui| {
+        render_separator(ui);
+        ui.text(" Session Detail").fg(BRIGHT_WHITE).bold();
+        render_separator(ui);
+        ui.text("");
+
+        ui.row(|ui| {
+            ui.text("  Agent:    ").fg(GRAY_500);
+            ui.text(session.agent.to_string())
+                .fg(agent_color(session.agent))
+                .bold();
+        });
+        ui.row(|ui| {
+            ui.text("  Project:  ").fg(GRAY_500);
+            ui.text(&session.project_name).fg(BRIGHT_WHITE).bold();
+        });
+        ui.row(|ui| {
+            ui.text("  Path:     ").fg(GRAY_500);
+            ui.text(session.display_path()).fg(GRAY_400);
+        });
+        ui.row(|ui| {
+            ui.text("  Session:  ").fg(GRAY_500);
+            ui.text(&session.session_id).fg(GRAY_400);
+        });
+        ui.row(|ui| {
+            ui.text("  Time:     ").fg(GRAY_500);
+            ui.text(session.time_display()).fg(VIOLET);
+        });
+
+        if let Some(branch) = &session.git_branch {
+            ui.row(|ui| {
+                ui.text("  Branch:   ").fg(GRAY_500);
+                ui.text(branch).fg(GREEN_400);
+            });
+        }
+        if let Some(wt) = &session.worktree {
+            ui.row(|ui| {
+                ui.text("  Worktree: ").fg(GRAY_500);
+                ui.text(wt).fg(CYAN);
+            });
+        }
+
+        if !session.summaries.is_empty() {
+            ui.row(|ui| {
+                ui.text("  History:  ").fg(GRAY_500);
+            });
+            let max_width = (ui.width() as usize).saturating_sub(14);
+            for (i, summary) in session.summaries.iter().enumerate() {
+                let truncated = truncate_str(summary, max_width);
+                ui.row(|ui| {
+                    ui.text(format!("    {:>2}. ", i + 1)).fg(GRAY_500);
+                    ui.text(truncated.clone()).fg(GRAY_400);
+                });
+            }
+        }
+
+        ui.text("");
+        render_separator(ui);
+        ui.text(" enter actions | esc/left back | any key back")
+            .fg(GRAY_500);
+    });
+}
+
+fn ui_help(ui: &mut slt::Context, app: &mut App) {
+    if ui.key_code(slt::KeyCode::Esc) || ui.key('q') {
+        app.mode = Mode::Browse;
+    }
+
+    if (ui.key_code(slt::KeyCode::Up) || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.help_selected > 0
+    {
+        app.help_selected -= 1;
+    }
+
+    if (ui.key_code(slt::KeyCode::Down) || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && app.help_selected < 1
+    {
+        app.help_selected += 1;
+    }
+
+    if app.help_selected == 0
+        && (ui.key_code(slt::KeyCode::Enter)
+            || ui.key(' ')
+            || ui.key_code(slt::KeyCode::Left)
+            || ui.key_code(slt::KeyCode::Right))
+    {
+        app.include_summaries = !app.include_summaries;
+        app.save_settings();
+        app.update_filter();
+    }
+
+    if app.help_selected == 1 && (ui.key('+') || ui.key('=')) {
+        app.summary_search_count = app.summary_search_count.saturating_add(1).min(50);
+        app.save_settings();
+    }
+
+    if app.help_selected == 1 && ui.key('-') {
+        app.summary_search_count = app.summary_search_count.saturating_sub(1).max(1);
+        app.save_settings();
+    }
+
+    let search_scope_label = if app.include_summaries {
+        "all (name + path + summaries)"
+    } else {
+        "name_path (default)"
+    };
+    let config_path = crate::settings::Settings::config_path();
+    let config_path_str = config_path.to_string_lossy().to_string();
+
+    ui.col(|ui| {
+        render_separator(ui);
+        ui.text(" Help & Settings").fg(BRIGHT_WHITE).bold();
+        render_separator(ui);
+        ui.text("");
+
+        ui.text("  -- Keybindings --").fg(GRAY_500);
+        help_line(ui, "up / down", "Navigate sessions");
+        help_line(ui, "[ / ]", "Cycle session summary");
+        help_line(ui, "right", "Session detail / history");
+        help_line(ui, "Enter", "Open action menu");
+        help_line(ui, "Tab / Shift+Tab", "Cycle agent filter");
+        help_line(ui, "Ctrl+S", "Cycle sort mode");
+        help_line(ui, "Ctrl+D", "Enter bulk delete mode");
+        help_line(ui, "?", "This help panel");
+        help_line(ui, "Esc", "Quit");
+        ui.text("");
+
+        ui.text("  -- Settings (up/down navigate, enter/space toggle, +/- adjust) --")
+            .fg(GRAY_500);
+        help_line(ui, "sort_by", app.sort_mode.label());
+
+        let selected_scope = app.help_selected == 0;
+        let scope_bg = if selected_scope {
+            HIGHLIGHT_BG
+        } else {
+            slt::Color::Reset
+        };
+        ui.row(|ui| {
+            ui.styled(
+                format!(
+                    "{}{: <18}",
+                    if selected_scope { "> " } else { "  " },
+                    "search_scope"
+                ),
+                slt::Style::new().fg(BRIGHT_WHITE).bg(scope_bg),
+            );
+            ui.styled(
+                format!("  {search_scope_label}"),
+                slt::Style::new()
+                    .fg(if selected_scope {
+                        BRIGHT_WHITE
+                    } else {
+                        GRAY_400
+                    })
+                    .bg(scope_bg),
+            );
+        });
+
+        let selected_count = app.help_selected == 1;
+        let count_bg = if selected_count {
+            HIGHLIGHT_BG
+        } else {
+            slt::Color::Reset
+        };
+        ui.row(|ui| {
+            ui.styled(
+                format!(
+                    "{}{: <18}",
+                    if selected_count { "> " } else { "  " },
+                    "summary_search_count"
+                ),
+                slt::Style::new().fg(BRIGHT_WHITE).bg(count_bg),
+            );
+            ui.styled(
+                format!("  {}", app.summary_search_count),
+                slt::Style::new()
+                    .fg(if selected_count {
+                        BRIGHT_WHITE
+                    } else {
+                        GRAY_400
+                    })
+                    .bg(count_bg),
+            );
+        });
+
+        ui.text("");
+        ui.text("  -- Config File --").fg(GRAY_500);
+        ui.text(format!("  {config_path_str}")).fg(GRAY_400);
+
+        ui.container().grow(1).col(|_| {});
+        render_separator(ui);
+        ui.text(" up/down navigate | enter/space toggle | +/- adjust | esc/q close")
+            .fg(GRAY_500);
+    });
+}
+
+fn help_line(ui: &mut slt::Context, key: &str, desc: &str) {
+    ui.row(|ui| {
+        ui.text(format!("  {:<18}", key)).fg(BRIGHT_WHITE);
+        ui.text(desc).fg(GRAY_400);
+    });
+}
+
+fn render_separator(ui: &mut slt::Context) {
+    ui.text("─".repeat(ui.width() as usize)).fg(SEPARATOR);
+}
+
+fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
+    let visible = app.viewport_height.max(1);
+    let end = (app.scroll_offset + visible).min(app.filtered_indices.len());
+    let total_width = ui.width() as usize;
+    let right_margin = 1usize;
+
+    for vi in app.scroll_offset..end {
+        let session_idx = app.filtered_indices[vi];
+        let session = &app.sessions[session_idx];
+        let is_selected = vi == app.selected;
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            slt::Color::Reset
+        };
+
+        if bulk_mode {
+            let is_checked = app.selected_set.contains(&session_idx);
+            let indicator = match (is_selected, is_checked) {
+                (true, true) => ">[x] ",
+                (true, false) => ">[ ] ",
+                (false, true) => " [x] ",
+                (false, false) => " [ ] ",
+            };
+            let indicator_style = if is_checked {
+                slt::Style::new().fg(RED).bold().bg(bg)
+            } else {
+                slt::Style::new().fg(slt::Color::White).bg(bg)
+            };
+            let summary_text = session.summaries.first().map(String::as_str);
+            let chunks = build_session_row(
+                session,
+                bg,
+                5,
+                total_width,
+                right_margin,
+                None,
+                summary_text,
+            );
+
+            ui.row(|ui| {
+                ui.styled(indicator.to_string(), indicator_style);
+                render_chunks(ui, &chunks);
+            });
+        } else {
+            let indicator = if is_selected { "> " } else { "  " };
+            let match_positions = app.match_positions.get(vi).map(Vec::as_slice);
+            let summary_offset = app
+                .summary_offsets
+                .get(&session.session_id)
+                .copied()
+                .unwrap_or(0);
+            let summary_text = session.summaries.get(summary_offset).map(String::as_str);
+            let chunks = build_session_row(
+                session,
+                bg,
+                2,
+                total_width,
+                right_margin,
+                match_positions,
+                summary_text,
+            );
+
+            ui.row(|ui| {
+                ui.styled(
+                    indicator.to_string(),
+                    slt::Style::new().fg(slt::Color::White).bg(bg),
+                );
+                render_chunks(ui, &chunks);
+            });
+        }
+    }
+}
+
+fn render_session_list_compact(ui: &mut slt::Context, app: &App) {
+    let visible = app.viewport_height.max(1);
+    let end = (app.scroll_offset + visible).min(app.filtered_indices.len());
+
+    for vi in app.scroll_offset..end {
+        let session_idx = app.filtered_indices[vi];
+        let session = &app.sessions[session_idx];
+        let is_selected = vi == app.selected;
+        let bg = if is_selected {
+            HIGHLIGHT_BG
+        } else {
+            slt::Color::Reset
+        };
+        let indicator = if is_selected { "> " } else { "  " };
+
+        ui.row(|ui| {
+            ui.styled(
+                indicator.to_string(),
+                slt::Style::new().fg(slt::Color::White).bg(bg),
+            );
+            ui.styled(
+                format!("{:<12}", session.agent.to_string()),
+                slt::Style::new()
+                    .fg(agent_color(session.agent))
+                    .bold()
+                    .bg(bg),
+            );
+            ui.styled(
+                format!("{:<20}", truncate_str(&session.project_name, 20)),
+                slt::Style::new().fg(BRIGHT_WHITE).bold().bg(bg),
+            );
+            if let Some(wt) = &session.worktree {
+                ui.styled(
+                    format!("{:<8}", truncate_str(wt, 8)),
+                    slt::Style::new().fg(CYAN).bg(bg),
+                );
+            } else if let Some(branch) = &session.git_branch {
+                ui.styled(
+                    format!("{:<8}", truncate_str(branch, 8)),
+                    slt::Style::new().fg(GREEN_400).bg(bg),
+                );
+            } else {
+                ui.styled("        ", slt::Style::new().bg(bg));
+            }
+            ui.styled(
+                format!("{:>12}", session.time_display()),
+                slt::Style::new().fg(VIOLET).bg(bg),
+            );
+        });
+    }
+}
+
+fn build_session_row(
+    session: &Session,
+    bg: slt::Color,
+    indicator_width: usize,
+    total_width: usize,
+    right_margin: usize,
+    match_positions: Option<&[u32]>,
+    summary_text: Option<&str>,
+) -> Vec<StyledChunk> {
+    let mut chunks: Vec<StyledChunk> = Vec::new();
+
+    let agent_label = format!("{:<12}", session.agent.to_string());
+    chunks.push((
+        agent_label,
+        slt::Style::new()
+            .fg(agent_color(session.agent))
+            .bold()
+            .bg(bg),
+    ));
+
+    let time_str = session.time_display();
+    let time_width = UnicodeWidthStr::width(time_str.as_str()) + 2;
+    let right_display_width = time_width + right_margin;
+
+    let git_info_str = if let Some(wt) = &session.worktree {
+        Some(format!("  {wt}"))
+    } else {
+        session.git_branch.as_ref().map(|b| format!("  {b}"))
+    };
+    let git_info_width = git_info_str
+        .as_deref()
+        .map(UnicodeWidthStr::width)
+        .unwrap_or(0);
+
+    let fixed_left = indicator_width + 12;
+    let max_proj =
+        total_width.saturating_sub(fixed_left + right_display_width + git_info_width + 4);
+    let proj_display = if max_proj == 0 {
+        String::new()
+    } else if UnicodeWidthStr::width(session.project_name.as_str()) > max_proj {
+        truncate_str(&session.project_name, max_proj)
+    } else {
+        session.project_name.clone()
+    };
+
+    if let Some(positions) = match_positions {
+        chunks.extend(highlight_text(&proj_display, positions, 0, bg));
+    } else {
+        chunks.push((
+            proj_display,
+            slt::Style::new().fg(BRIGHT_WHITE).bold().bg(bg),
+        ));
+    }
+
+    let left_used = indicator_width + chunk_width(&chunks);
+    let available = total_width.saturating_sub(left_used + git_info_width + right_display_width);
+
+    if available > 7 {
+        if let Some(summary) = summary_text {
+            let sep = "  ";
+            let max_summary = available.saturating_sub(sep.len());
+            if max_summary > 5 {
+                let truncated = truncate_str(summary, max_summary);
+                chunks.push((sep.to_string(), slt::Style::new().bg(bg)));
+                chunks.push((truncated, slt::Style::new().fg(GRAY_400).bg(bg)));
+            }
+        }
+    }
+
+    let left_width = indicator_width + chunk_width(&chunks);
+    let padding = total_width.saturating_sub(left_width + git_info_width + right_display_width);
+    if padding > 0 {
+        chunks.push((" ".repeat(padding), slt::Style::new().bg(bg)));
+    }
+
+    if let Some(git_str) = git_info_str {
+        let color = if session.worktree.is_some() {
+            CYAN
+        } else {
+            GREEN_400
+        };
+        chunks.push((git_str, slt::Style::new().fg(color).bg(bg)));
+    }
+    chunks.push((format!("  {time_str}"), slt::Style::new().fg(VIOLET).bg(bg)));
+    if right_margin > 0 {
+        chunks.push((" ".repeat(right_margin), slt::Style::new().bg(bg)));
+    }
+
+    chunks
+}
+
+fn chunk_width(chunks: &[StyledChunk]) -> usize {
+    chunks
+        .iter()
+        .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
+        .sum()
+}
+
+fn render_chunks(ui: &mut slt::Context, chunks: &[StyledChunk]) {
+    for (text, style) in chunks {
+        ui.styled(text.clone(), *style);
+    }
+}
+
+fn highlight_text(
+    text: &str,
+    positions: &[u32],
+    offset: usize,
+    bg: slt::Color,
+) -> Vec<StyledChunk> {
+    let mut chunks = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+
+    let mut i = 0;
+    while i < chars.len() {
+        let global_pos = (i + offset) as u32;
+        if positions.contains(&global_pos) {
+            chunks.push((
+                chars[i].to_string(),
+                slt::Style::new().fg(YELLOW).bold().underline().bg(bg),
+            ));
+            i += 1;
+        } else {
+            let start = i;
+            while i < chars.len() && !positions.contains(&((i + offset) as u32)) {
+                i += 1;
+            }
+            let normal: String = chars[start..i].iter().collect();
+            chunks.push((normal, slt::Style::new().fg(BRIGHT_WHITE).bold().bg(bg)));
+        }
+    }
+
+    chunks
+}
+
+fn any_key_pressed(ui: &slt::Context) -> bool {
+    if ui.key_code(slt::KeyCode::Esc)
+        || ui.key_code(slt::KeyCode::Enter)
+        || ui.key_code(slt::KeyCode::Backspace)
+        || ui.key_code(slt::KeyCode::Tab)
+        || ui.key_code(slt::KeyCode::BackTab)
+        || ui.key_code(slt::KeyCode::Up)
+        || ui.key_code(slt::KeyCode::Down)
+        || ui.key_code(slt::KeyCode::Left)
+        || ui.key_code(slt::KeyCode::Right)
+        || ui.key_code(slt::KeyCode::Home)
+        || ui.key_code(slt::KeyCode::End)
+        || ui.key_code(slt::KeyCode::PageUp)
+        || ui.key_code(slt::KeyCode::PageDown)
+        || ui.key_code(slt::KeyCode::Delete)
+    {
+        return true;
+    }
+    for code in 1u8..=12u8 {
+        if ui.key_code(slt::KeyCode::F(code)) {
+            return true;
+        }
+    }
+    for code in 32u8..=126u8 {
+        if ui.key(code as char) {
+            return true;
+        }
+    }
+    false
+}
+
+fn truncate_str(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let normalized;
+    let s = if s.contains(['\n', '\r', '\t']) {
+        normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        normalized.as_str()
+    } else {
+        s
+    };
+
+    let mut width = 0;
+    let mut end = 0;
+
+    for (i, ch) in s.char_indices() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        width += ch_width;
+        end = i + ch.len_utf8();
+    }
+
+    if end >= s.len() {
+        s.to_string()
+    } else if max_width > 3 {
+        let mut w = 0;
+        let mut e = 0;
+        for (i, ch) in s.char_indices() {
+            let ch_width = ch.width().unwrap_or(0);
+            if w + ch_width > max_width - 3 {
+                break;
+            }
+            w += ch_width;
+            e = i + ch.len_utf8();
+        }
+        format!("{}...", &s[..e])
+    } else {
+        s[..end].to_string()
     }
 }

@@ -88,7 +88,14 @@ fn scan_session_worktrees(claude_dir: &std::path::Path) -> HashMap<String, Strin
 /// Returns `None` if the directory is not a git repo or is in detached HEAD state.
 fn read_git_branch(project_path: &str) -> Option<String> {
     let head_path = std::path::Path::new(project_path).join(".git").join("HEAD");
-    let content = fs::read_to_string(&head_path).ok()?;
+    let path = head_path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(fs::read_to_string(&path).ok());
+    });
+    let content = rx
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .ok()??;
     let branch = content.trim().strip_prefix("ref: refs/heads/")?.to_string();
     if branch.is_empty() {
         None
@@ -105,7 +112,6 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     }
 
     let worktrees = scan_session_worktrees(&claude_dir);
-    // Cache git branch reads — many sessions share the same project_path.
     let mut branch_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut sessions_map: HashMap<String, SessionData> = HashMap::new();
 

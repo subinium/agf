@@ -80,24 +80,44 @@ pub fn shell_init(shell: &str) -> String {
 }
 
 const ZSH_WRAPPER: &str = r#"function agf() {
-    local result
-    result="$(command agf "$@")"
-    if [ $? -eq 0 ] && [ -n "$result" ]; then
-        eval "$result"
+    local tmpfile
+    tmpfile="$(mktemp)" || return 1
+    AGF_CMD_FILE="$tmpfile" command agf "$@"
+    local ret=$?
+    if [ $ret -eq 0 ] && [ -f "$tmpfile" ]; then
+        local result
+        result="$(cat "$tmpfile")"
+        if [ -n "$result" ]; then
+            eval "$result"
+        fi
     fi
+    rm -f "$tmpfile"
 }"#;
 
 const BASH_WRAPPER: &str = r#"function agf() {
-    local result
-    result="$(command agf "$@")"
-    if [ $? -eq 0 ] && [ -n "$result" ]; then
-        eval "$result"
+    local tmpfile
+    tmpfile="$(mktemp)" || return 1
+    AGF_CMD_FILE="$tmpfile" command agf "$@"
+    local ret=$?
+    if [ $ret -eq 0 ] && [ -f "$tmpfile" ]; then
+        local result
+        result="$(cat "$tmpfile")"
+        if [ -n "$result" ]; then
+            eval "$result"
+        fi
     fi
+    rm -f "$tmpfile"
 }"#;
 
 const FISH_WRAPPER: &str = r#"function agf
-    set -l result (command agf $argv)
-    if test $status -eq 0; and test -n "$result"
-        eval $result
+    set -l tmpfile (mktemp); or return 1
+    AGF_CMD_FILE=$tmpfile command agf $argv
+    set -l ret $status
+    if test $ret -eq 0; and test -f $tmpfile
+        set -l result (cat $tmpfile)
+        if test -n "$result"
+            eval $result
+        end
     end
+    rm -f $tmpfile
 end"#;
