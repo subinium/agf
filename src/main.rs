@@ -104,8 +104,13 @@ fn main() -> anyhow::Result<()> {
         app.apply_sort();
     }
     if let Some(cmd) = app.run()? {
-        // Print command to stdout — the shell wrapper evals it in the real terminal
-        println!("{cmd}");
+        // Write command to AGF_CMD_FILE (temp file) — the shell wrapper evals it
+        if let Ok(file) = std::env::var("AGF_CMD_FILE") {
+            std::fs::write(&file, &cmd)?;
+        } else {
+            // Fallback for direct invocation (e.g., `agf resume`)
+            println!("{cmd}");
+        }
     }
 
     Ok(())

@@ -1,10 +1,13 @@
 # agf
+
 [![CI](https://github.com/subinium/agf/actions/workflows/ci.yml/badge.svg)](https://github.com/subinium/agf/actions)
 [![Release](https://img.shields.io/github/v/release/subinium/agf?include_prereleases&sort=semver)](https://github.com/subinium/agf/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > A fast TUI to find, resume, and manage your AI coding agent sessions.
 > Supports **Claude Code**, **Codex**, **OpenCode**, **pi**, **Kiro**, **Cursor CLI**, and **Gemini** — all in one place.
+
+Built with [SuperLightTUI (SLT)](https://github.com/subinium/SuperLightTUI) — an immediate-mode terminal UI library for Rust.
 
 ![agf demo](./assets/demo.gif)
 
@@ -56,12 +59,13 @@ If you use AI coding agents, you've probably done this:
 |:---|:---|
 | Type anything | Fuzzy search |
 | `↑` `↓` / `Ctrl+K` `Ctrl+J` | Navigate |
-| `Shift+↑` `Shift+↓` | Cycle session summary |
+| `[` `]` | Cycle session summary |
 | `Enter` | Open action menu |
 | `→` / `Ctrl+L` | Preview session details |
 | `Tab` / `Shift+Tab` | Cycle agent filter |
 | `Ctrl+S` | Cycle sort (time / name / agent) |
 | `Ctrl+D` | Enter bulk delete mode |
+| `?` | Help / settings |
 | `Esc` | Quit |
 
 ### Bulk Delete (`Ctrl+D`)
@@ -133,10 +137,16 @@ agf setup
 
 </details>
 
+## Upgrading to v0.6
+
+v0.6 changes the shell integration method. After upgrading, run `agf setup` again (or restart your shell) to apply the new wrapper.
+
+See [CHANGELOG.md](CHANGELOG.md) for full details.
+
 ## Requirements
 
 - macOS or Linux
-- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`
+- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`
 
 ## Contributing
 
