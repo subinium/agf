@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use slt;
 use unicode_width::UnicodeWidthStr;
 
 use crate::action;
@@ -352,32 +351,28 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         app.cycle_summary(false);
     }
 
-    if ui.key_code(slt::KeyCode::Up) || ctrl_up {
-        if app.selected > 0 {
+    if (ui.key_code(slt::KeyCode::Up) || ctrl_up)
+        && app.selected > 0 {
             app.selected -= 1;
             app.adjust_scroll();
         }
-    }
 
-    if ui.key_code(slt::KeyCode::Down) || ctrl_down {
-        if !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
+    if (ui.key_code(slt::KeyCode::Down) || ctrl_down)
+        && !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
             app.selected += 1;
             app.adjust_scroll();
         }
-    }
 
-    if ui.key_code(slt::KeyCode::Enter) {
-        if app.selected_session().is_some() {
+    if ui.key_code(slt::KeyCode::Enter)
+        && app.selected_session().is_some() {
             app.action_index = 0;
             app.mode = Mode::ActionSelect;
         }
-    }
 
-    if ui.key_code(slt::KeyCode::Right) || ui.key_mod('l', slt::KeyModifiers::CONTROL) {
-        if app.selected_session().is_some() {
+    if (ui.key_code(slt::KeyCode::Right) || ui.key_mod('l', slt::KeyModifiers::CONTROL))
+        && app.selected_session().is_some() {
             app.mode = Mode::Preview;
         }
-    }
 
     if ctrl_sort {
         app.sort_mode = app.sort_mode.next();
@@ -503,23 +498,19 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.mode = Mode::Browse;
     }
 
-    if ui.key_code(slt::KeyCode::Up)
+    if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
-    {
-        if app.action_index > 0 {
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.action_index > 0 {
             app.action_index -= 1;
         }
-    }
 
-    if ui.key_code(slt::KeyCode::Down)
+    if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
-    {
-        if app.action_index < actions.len() - 1 {
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && app.action_index < actions.len() - 1 {
             app.action_index += 1;
         }
-    }
 
     for i in 0..actions.len().min(9) {
         let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
@@ -676,23 +667,19 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         app.mode = Mode::ActionSelect;
     }
 
-    if ui.key_code(slt::KeyCode::Up)
+    if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
-    {
-        if app.agent_index > 0 {
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.agent_index > 0 {
             app.agent_index -= 1;
         }
-    }
 
-    if ui.key_code(slt::KeyCode::Down)
+    if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
-    {
-        if option_count > 0 && app.agent_index < option_count - 1 {
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && option_count > 0 && app.agent_index < option_count - 1 {
             app.agent_index += 1;
         }
-    }
 
     for i in 0..option_count.min(9) {
         let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
@@ -821,23 +808,19 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         app.mode = Mode::AgentSelect;
     }
 
-    if ui.key_code(slt::KeyCode::Up)
+    if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
-    {
-        if app.mode_index > 0 {
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.mode_index > 0 {
             app.mode_index -= 1;
         }
-    }
 
-    if ui.key_code(slt::KeyCode::Down)
+    if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
-    {
-        if option_count > 0 && app.mode_index < option_count - 1 {
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && option_count > 0 && app.mode_index < option_count - 1 {
             app.mode_index += 1;
         }
-    }
 
     for i in 0..option_count.min(9) {
         let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
@@ -935,23 +918,19 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.mode = Mode::ActionSelect;
     }
 
-    if ui.key_code(slt::KeyCode::Up)
+    if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
-    {
-        if app.resume_mode_index > 0 {
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.resume_mode_index > 0 {
             app.resume_mode_index -= 1;
         }
-    }
 
-    if ui.key_code(slt::KeyCode::Down)
+    if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
-    {
-        if option_count > 0 && app.resume_mode_index < option_count - 1 {
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && option_count > 0 && app.resume_mode_index < option_count - 1 {
             app.resume_mode_index += 1;
         }
-    }
 
     for i in 0..option_count.min(9) {
         let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
@@ -1040,25 +1019,21 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
         app.mode = Mode::Browse;
     }
 
-    if ui.key_code(slt::KeyCode::Up)
+    if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
-    {
-        if app.selected > 0 {
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.selected > 0 {
             app.selected -= 1;
             app.adjust_scroll();
         }
-    }
 
-    if ui.key_code(slt::KeyCode::Down)
+    if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
-    {
-        if !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
             app.selected += 1;
             app.adjust_scroll();
         }
-    }
 
     if ui.key(' ') {
         if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
@@ -1374,17 +1349,15 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         app.mode = Mode::Browse;
     }
 
-    if ui.key_code(slt::KeyCode::Up) || ui.key_mod('k', slt::KeyModifiers::CONTROL) {
-        if app.help_selected > 0 {
+    if (ui.key_code(slt::KeyCode::Up) || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && app.help_selected > 0 {
             app.help_selected -= 1;
         }
-    }
 
-    if ui.key_code(slt::KeyCode::Down) || ui.key_mod('j', slt::KeyModifiers::CONTROL) {
-        if app.help_selected < 1 {
+    if (ui.key_code(slt::KeyCode::Down) || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && app.help_selected < 1 {
             app.help_selected += 1;
         }
-    }
 
     if app.help_selected == 0
         && (ui.key_code(slt::KeyCode::Enter)
