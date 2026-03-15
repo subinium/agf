@@ -84,11 +84,12 @@ impl Agent {
                 ("default", ""),
                 ("acceptEdits", " --permission-mode acceptEdits"),
                 ("plan (read-only)", " --permission-mode plan"),
+                ("dontAsk (pre-approved only)", " --permission-mode dontAsk"),
                 ("bypass permissions", " --dangerously-skip-permissions"),
             ],
             Agent::Codex => &[
                 ("default", ""),
-                ("auto-edit", " -a untrusted"),
+                ("untrusted (ask before edits)", " -a untrusted"),
                 ("full-auto", " --full-auto"),
                 (
                     "bypass sandbox",
@@ -98,8 +99,7 @@ impl Agent {
             Agent::Gemini => &[
                 ("default", ""),
                 ("auto_edit", " --approval-mode auto_edit"),
-                ("yolo (no approval)", " -y"),
-                ("plan (read-only)", " --approval-mode plan"),
+                ("yolo (no approval)", " --approval-mode yolo"),
                 ("sandbox", " -s"),
             ],
             _ => &[("default", "")],
