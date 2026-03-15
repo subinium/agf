@@ -523,17 +523,6 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         }
     }
 
-    if ui.key_code(slt::KeyCode::Tab)
-        && actions[app.action_index] == Action::Resume
-        && app.selected_session().is_some()
-    {
-        if let Some(session) = app.selected_session() {
-            app.resume_mode_options = session.agent.resume_mode_options().to_vec();
-            app.resume_mode_index = 0;
-            app.mode = Mode::ResumeSelect;
-        }
-    }
-
     if ui.key_code(slt::KeyCode::Enter) {
         dispatch_action(ui, app, actions[app.action_index], result);
     }
@@ -625,12 +614,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         render_separator(ui);
-        let footer = if actions[app.action_index] == Action::Resume {
-            " tab mode | enter confirm | esc back"
-        } else {
-            " enter confirm | esc back"
-        };
-        ui.text(footer).fg(GRAY_500);
+        ui.text(" enter confirm | esc back").fg(GRAY_500);
     });
 }
 
@@ -643,6 +627,13 @@ fn dispatch_action(
     match selected_action {
         Action::Back => {
             app.mode = Mode::Browse;
+        }
+        Action::Resume => {
+            if let Some(session) = app.selected_session() {
+                app.resume_mode_options = session.agent.resume_mode_options().to_vec();
+                app.resume_mode_index = 0;
+                app.mode = Mode::ResumeSelect;
+            }
         }
         Action::NewSession => {
             app.agent_index = 0;
