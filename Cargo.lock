@@ -819,9 +819,9 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "superlighttui"
-version = "0.6.0"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13bb4bd708537c44945660209353e1c5cbc8f3fc240546dc0e782088463311e8"
+checksum = "206c65f98a3478b64cd8b33f790f274878e59e03f818903fc9dad5663592b1b9"
 dependencies = [
  "crossterm",
  "unicode-width",
