@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.4] - 2025-03-20
+
+### Changed
+
+- **SLT upgrade: v0.6 → v0.15** — major TUI library upgrade bringing 9 minor versions of improvements.
+- **Rounded borders** — filter bar and bulk-delete header now use `Border::Rounded` with colored borders for a modern look.
+- **Native separators** — replaced manual `"─".repeat()` with SLT's `separator_colored()`.
+- **Native help bars** — all footer keybinding hints now use SLT's `help()` widget for consistent styling.
+- **Responsive breakpoints** — compact layout now uses `ui.breakpoint()` instead of manual width checks.
+- **Inline text with `line()`** — preview details, headers, and info rows use `line()` for proper inline text rendering.
+
+### Added
+
+- **Agent filter badges** — agent filter indicator now uses `badge_colored()` / `badge()` widgets.
+- **Empty state** — shows a friendly "No sessions found" message when search/filter returns no results.
+- **Section dividers in Help** — help screen uses `divider_text()` for section headers.
+- **Key hints in Help** — keybindings displayed with `key_hint()` widget for visual distinction.
+- **Terminal title** — window title set to "agf" via `RunConfig::default().title()`.
+
+### Removed
+
+- **Dead legacy files** — deleted unused `tui/input.rs` and `tui/render.rs` (ratatui/crossterm remnants).
+
+### Fixed
+
+- **49 `#[must_use]` warnings** — all unused `Response` returns from SLT 0.11+ properly handled.
+- **Clippy clean** — resolved 17 clippy suggestions (collapsible if-statements, redundant imports).
+
 ## [0.6.0] - 2025-03-14
 
 ### Breaking Changes
