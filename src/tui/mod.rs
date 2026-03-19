@@ -296,10 +296,7 @@ impl App {
         let mut result: Option<String> = None;
         let app = self;
         slt::run_with(
-            slt::RunConfig {
-                mouse: false,
-                ..Default::default()
-            },
+            slt::RunConfig::default().title("agf"),
             |ui: &mut slt::Context| {
                 app.viewport_height = (ui.height() as usize).saturating_sub(4).max(1);
                 app.adjust_scroll();
@@ -443,33 +440,37 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         app.update_filter();
     }
 
-    let is_compact = ui.width() < 60;
-    ui.col(|ui| {
-        ui.bordered(slt::Border::Single)
-            .border_style(slt::Style::new().fg(SEPARATOR))
+    let is_compact = matches!(ui.breakpoint(), slt::Breakpoint::Xs);
+    let _ = ui.col(|ui| {
+        let _ = ui
+            .bordered(slt::Border::Rounded)
+            .border_fg(SEPARATOR)
             .min_h(3)
             .max_h(3)
             .col(|ui| {
-                ui.row(|ui| {
+                let _ = ui.row(|ui| {
                     ui.text("> ").bold().fg(YELLOW);
                     ui.text(&app.query).fg(slt::Color::White);
                     ui.text("_").fg(YELLOW);
                     ui.spacer();
                     match app.agent_filter {
                         Some(agent) => {
-                            ui.text(format!("[{agent}]"))
-                                .fg(agent_color(agent))
-                                .bold();
+                            let _ = ui.badge_colored(&agent.to_string(), agent_color(agent));
                         }
                         None => {
-                            ui.text("[All]").fg(GRAY_500);
+                            let _ = ui.badge("All");
                         }
                     };
                 });
             });
 
-        ui.container().grow(1).col(|ui| {
-            if is_compact {
+        let _ = ui.container().grow(1).col(|ui| {
+            if app.filtered_indices.is_empty() {
+                let _ = ui.empty_state(
+                    "No sessions found",
+                    "Try a different search or agent filter",
+                );
+            } else if is_compact {
                 render_session_list_compact(ui, app);
             } else {
                 render_session_list(ui, app, false);
@@ -478,17 +479,26 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
 
         let total = app.sessions.len();
         let filtered = app.filtered_indices.len();
-        ui.row(|ui| {
-            ui.text(format!(" {filtered} of {total} sessions")).fg(GRAY_500);
+        ui.line(|ui| {
+            ui.text(format!(" {filtered}/{total}")).fg(GRAY_500);
             if let Some(agent) = app.agent_filter {
-                ui.text(format!(" ({agent})")).fg(agent_color(agent));
+                ui.text(" ").fg(GRAY_500);
+                let _ = ui.badge_colored(&agent.to_string(), agent_color(agent));
             }
-            ui.text(format!(
-                " | sort:{} | tab agent | up/down nav | [ ] summary | right detail | enter select | ^s sort | ? help | esc quit",
-                app.sort_mode.label()
-            ))
-            .fg(GRAY_500);
+            ui.text(format!(" sort:{}", app.sort_mode.label()))
+                .fg(GRAY_500);
         });
+        let _ = ui.help(&[
+            ("↑↓", "nav"),
+            ("Tab", "agent"),
+            ("[ ]", "summary"),
+            ("→", "detail"),
+            ("Enter", "select"),
+            ("^S", "sort"),
+            ("^D", "delete"),
+            ("?", "help"),
+            ("Esc", "quit"),
+        ]);
     });
 }
 
@@ -523,6 +533,17 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         }
     }
 
+    if ui.key_code(slt::KeyCode::Tab)
+        && actions[app.action_index] == Action::Resume
+        && app.selected_session().is_some()
+    {
+        if let Some(session) = app.selected_session() {
+            app.resume_mode_options = session.agent.resume_mode_options().to_vec();
+            app.resume_mode_index = 0;
+            app.mode = Mode::ResumeSelect;
+        }
+    }
+
     if ui.key_code(slt::KeyCode::Enter) {
         dispatch_action(ui, app, actions[app.action_index], result);
     }
@@ -532,9 +553,9 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         return;
     };
 
-    ui.col(|ui| {
-        render_separator(ui);
-        ui.row(|ui| {
+    let _ = ui.col(|ui| {
+        ui.separator_colored(SEPARATOR);
+        ui.line(|ui| {
             ui.text(format!(" {} ", session.agent))
                 .fg(agent_color(session.agent))
                 .bold();
@@ -549,10 +570,10 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
             ui.text(" | ").fg(SEPARATOR);
             ui.text(session.time_display()).fg(VIOLET);
         });
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
         ui.text("");
 
-        ui.container().grow(1).col(|ui| {
+        let _ = ui.container().grow(1).col(|ui| {
             let total_width = ui.width() as usize;
             for (i, act) in actions.iter().enumerate() {
                 let is_selected = i == app.action_index;
@@ -598,7 +619,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
                         + UnicodeWidthStr::width(preview_text.as_str()),
                 );
 
-                ui.row(|ui| {
+                let _ = ui.row(|ui| {
                     ui.styled(
                         indicator.clone(),
                         slt::Style::new().fg(slt::Color::White).bg(bg),
@@ -613,8 +634,12 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         });
 
         ui.text("");
-        render_separator(ui);
-        ui.text(" enter confirm | esc back").fg(GRAY_500);
+        ui.separator_colored(SEPARATOR);
+        if actions[app.action_index] == Action::Resume {
+            let _ = ui.help(&[("Tab", "mode"), ("Enter", "confirm"), ("Esc", "back")]);
+        } else {
+            let _ = ui.help(&[("Enter", "confirm"), ("Esc", "back")]);
+        }
     });
 }
 
@@ -627,13 +652,6 @@ fn dispatch_action(
     match selected_action {
         Action::Back => {
             app.mode = Mode::Browse;
-        }
-        Action::Resume => {
-            if let Some(session) = app.selected_session() {
-                app.resume_mode_options = session.agent.resume_mode_options().to_vec();
-                app.resume_mode_index = 0;
-                app.mode = Mode::ResumeSelect;
-            }
         }
         Action::NewSession => {
             app.agent_index = 0;
@@ -703,17 +721,17 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         return;
     };
 
-    ui.col(|ui| {
-        render_separator(ui);
-        ui.row(|ui| {
+    let _ = ui.col(|ui| {
+        ui.separator_colored(SEPARATOR);
+        ui.line(|ui| {
             ui.text(" New session in ").fg(BRIGHT_WHITE);
             ui.text(session.display_path()).fg(GRAY_500);
             ui.text("  (tab -> permission mode)").fg(GRAY_500);
         });
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
         ui.text("");
 
-        ui.container().grow(1).col(|ui| {
+        let _ = ui.container().grow(1).col(|ui| {
             let total_width = ui.width() as usize;
             for (i, opt) in app.new_session_options.iter().enumerate() {
                 let is_selected = i == app.agent_index;
@@ -735,7 +753,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
                     + UnicodeWidthStr::width(preview_text.as_str());
                 let pad = total_width.saturating_sub(used);
 
-                ui.row(|ui| {
+                let _ = ui.row(|ui| {
                     ui.styled(indicator.clone(), slt::Style::new().fg(GRAY_400).bg(bg));
                     let base = slt::Style::new().fg(agent_color(opt.agent)).bg(bg);
                     ui.styled(
@@ -751,9 +769,13 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         });
 
         ui.text("");
-        render_separator(ui);
-        ui.text(" 1-9 select | tab mode | enter confirm | esc back")
-            .fg(GRAY_500);
+        ui.separator_colored(SEPARATOR);
+        let _ = ui.help(&[
+            ("1-9", "select"),
+            ("Tab", "mode"),
+            ("Enter", "confirm"),
+            ("Esc", "back"),
+        ]);
     });
 }
 
@@ -845,16 +867,16 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         .map(|o| o.label.as_str())
         .unwrap_or("agent");
 
-    ui.col(|ui| {
-        render_separator(ui);
-        ui.row(|ui| {
+    let _ = ui.col(|ui| {
+        ui.separator_colored(SEPARATOR);
+        ui.line(|ui| {
             ui.text(" Select mode for ").fg(BRIGHT_WHITE);
             ui.text(agent_label).fg(YELLOW).bold();
         });
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
         ui.text("");
 
-        ui.container().grow(1).col(|ui| {
+        let _ = ui.container().grow(1).col(|ui| {
             let total_width = ui.width() as usize;
             for (i, (label, flags)) in app.mode_options.iter().enumerate() {
                 let is_selected = i == app.mode_index;
@@ -875,7 +897,7 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
                         + UnicodeWidthStr::width(flag_preview.as_str()),
                 );
 
-                ui.row(|ui| {
+                let _ = ui.row(|ui| {
                     ui.styled(indicator.clone(), slt::Style::new().fg(GRAY_400).bg(bg));
                     let base = slt::Style::new().fg(BRIGHT_WHITE).bg(bg);
                     ui.styled(
@@ -891,9 +913,8 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         });
 
         ui.text("");
-        render_separator(ui);
-        ui.text(" 1-9 select | enter confirm | esc back")
-            .fg(GRAY_500);
+        ui.separator_colored(SEPARATOR);
+        let _ = ui.help(&[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")]);
     });
 }
 
@@ -952,18 +973,18 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         return;
     };
 
-    ui.col(|ui| {
-        render_separator(ui);
-        ui.row(|ui| {
+    let _ = ui.col(|ui| {
+        ui.separator_colored(SEPARATOR);
+        ui.line(|ui| {
             ui.text(" Resume mode for ").fg(BRIGHT_WHITE);
             ui.text(format!("{}", session.agent))
                 .fg(agent_color(session.agent))
                 .bold();
         });
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
         ui.text("");
 
-        ui.container().grow(1).col(|ui| {
+        let _ = ui.container().grow(1).col(|ui| {
             let total_width = ui.width() as usize;
             for (i, (label, flags)) in app.resume_mode_options.iter().enumerate() {
                 let is_selected = i == app.resume_mode_index;
@@ -984,7 +1005,7 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
                         + UnicodeWidthStr::width(flag_preview.as_str()),
                 );
 
-                ui.row(|ui| {
+                let _ = ui.row(|ui| {
                     ui.styled(indicator.clone(), slt::Style::new().fg(GRAY_400).bg(bg));
                     let base = slt::Style::new().fg(BRIGHT_WHITE).bg(bg);
                     ui.styled(
@@ -1000,9 +1021,8 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         });
 
         ui.text("");
-        render_separator(ui);
-        ui.text(" 1-9 select | enter confirm | esc back")
-            .fg(GRAY_500);
+        ui.separator_colored(SEPARATOR);
+        let _ = ui.help(&[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")]);
     });
 }
 
@@ -1058,13 +1078,14 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
         app.mode = Mode::DeleteConfirm;
     }
 
-    ui.col(|ui| {
-        ui.bordered(slt::Border::Single)
-            .border_style(slt::Style::new().fg(RED))
+    let _ = ui.col(|ui| {
+        let _ = ui
+            .bordered(slt::Border::Rounded)
+            .border_fg(RED)
             .min_h(3)
             .max_h(3)
             .col(|ui| {
-                ui.row(|ui| {
+                ui.line(|ui| {
                     ui.text(" DELETE MODE").fg(RED).bold();
                     if !app.selected_set.is_empty() {
                         ui.text(format!("  ({} selected)", app.selected_set.len()))
@@ -1073,17 +1094,16 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
                 });
             });
 
-        ui.container().grow(1).col(|ui| {
+        let _ = ui.container().grow(1).col(|ui| {
             render_session_list(ui, app, true);
         });
 
-        ui.row(|ui| {
+        ui.line(|ui| {
             ui.text(format!(" {} selected", app.selected_set.len()))
                 .fg(RED)
                 .bold();
-            ui.text(" | space toggle | enter delete | esc cancel")
-                .fg(GRAY_500);
         });
+        let _ = ui.help(&[("Space", "toggle"), ("Enter", "delete"), ("Esc", "cancel")]);
     });
 }
 
@@ -1150,13 +1170,13 @@ fn render_single_delete_confirm(ui: &mut slt::Context, app: &App) {
         return;
     };
 
-    ui.col(|ui| {
-        render_separator(ui);
+    let _ = ui.col(|ui| {
+        ui.separator_colored(SEPARATOR);
         ui.text(" Delete session?").fg(RED).bold();
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
         ui.text("");
 
-        ui.row(|ui| {
+        ui.line(|ui| {
             ui.text(format!("  {} ", session.agent))
                 .fg(agent_color(session.agent))
                 .bold();
@@ -1194,7 +1214,7 @@ fn render_single_delete_confirm(ui: &mut slt::Context, app: &App) {
                 "go back"
             };
 
-            ui.row(|ui| {
+            let _ = ui.row(|ui| {
                 ui.styled(
                     indicator.to_string(),
                     slt::Style::new().fg(slt::Color::White).bg(bg),
@@ -1204,7 +1224,7 @@ fn render_single_delete_confirm(ui: &mut slt::Context, app: &App) {
             });
         }
 
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
     });
 }
 
@@ -1218,10 +1238,10 @@ fn render_bulk_delete_confirm(ui: &mut slt::Context, app: &App) {
         .collect();
     names.sort();
 
-    ui.col(|ui| {
-        render_separator(ui);
+    let _ = ui.col(|ui| {
+        ui.separator_colored(SEPARATOR);
         ui.text(format!(" Delete {count} sessions?")).fg(RED).bold();
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
         ui.text("");
 
         for (i, name) in names.iter().enumerate() {
@@ -1254,7 +1274,7 @@ fn render_bulk_delete_confirm(ui: &mut slt::Context, app: &App) {
                 "go back"
             };
 
-            ui.row(|ui| {
+            let _ = ui.row(|ui| {
                 ui.styled(
                     indicator.to_string(),
                     slt::Style::new().fg(slt::Color::White).bg(bg),
@@ -1264,7 +1284,7 @@ fn render_bulk_delete_confirm(ui: &mut slt::Context, app: &App) {
             });
         }
 
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
     });
 }
 
@@ -1287,56 +1307,56 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         return;
     };
 
-    ui.col(|ui| {
-        render_separator(ui);
+    let _ = ui.col(|ui| {
+        ui.separator_colored(SEPARATOR);
         ui.text(" Session Detail").fg(BRIGHT_WHITE).bold();
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
         ui.text("");
 
-        ui.row(|ui| {
+        ui.line(|ui| {
             ui.text("  Agent:    ").fg(GRAY_500);
             ui.text(session.agent.to_string())
                 .fg(agent_color(session.agent))
                 .bold();
         });
-        ui.row(|ui| {
+        ui.line(|ui| {
             ui.text("  Project:  ").fg(GRAY_500);
             ui.text(&session.project_name).fg(BRIGHT_WHITE).bold();
         });
-        ui.row(|ui| {
+        ui.line(|ui| {
             ui.text("  Path:     ").fg(GRAY_500);
             ui.text(session.display_path()).fg(GRAY_400);
         });
-        ui.row(|ui| {
+        ui.line(|ui| {
             ui.text("  Session:  ").fg(GRAY_500);
             ui.text(&session.session_id).fg(GRAY_400);
         });
-        ui.row(|ui| {
+        ui.line(|ui| {
             ui.text("  Time:     ").fg(GRAY_500);
             ui.text(session.time_display()).fg(VIOLET);
         });
 
         if let Some(branch) = &session.git_branch {
-            ui.row(|ui| {
+            ui.line(|ui| {
                 ui.text("  Branch:   ").fg(GRAY_500);
                 ui.text(branch).fg(GREEN_400);
             });
         }
         if let Some(wt) = &session.worktree {
-            ui.row(|ui| {
+            ui.line(|ui| {
                 ui.text("  Worktree: ").fg(GRAY_500);
                 ui.text(wt).fg(CYAN);
             });
         }
 
         if !session.summaries.is_empty() {
-            ui.row(|ui| {
+            ui.line(|ui| {
                 ui.text("  History:  ").fg(GRAY_500);
             });
             let max_width = (ui.width() as usize).saturating_sub(14);
             for (i, summary) in session.summaries.iter().enumerate() {
                 let truncated = truncate_str(summary, max_width);
-                ui.row(|ui| {
+                ui.line(|ui| {
                     ui.text(format!("    {:>2}. ", i + 1)).fg(GRAY_500);
                     ui.text(truncated.clone()).fg(GRAY_400);
                 });
@@ -1344,9 +1364,8 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         }
 
         ui.text("");
-        render_separator(ui);
-        ui.text(" enter actions | esc/left back | any key back")
-            .fg(GRAY_500);
+        ui.separator_colored(SEPARATOR);
+        let _ = ui.help(&[("Enter", "actions"), ("Esc", "back"), ("Any", "back")]);
     });
 }
 
@@ -1396,13 +1415,13 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
     let config_path = crate::settings::Settings::config_path();
     let config_path_str = config_path.to_string_lossy().to_string();
 
-    ui.col(|ui| {
-        render_separator(ui);
+    let _ = ui.col(|ui| {
+        ui.separator_colored(SEPARATOR);
         ui.text(" Help & Settings").fg(BRIGHT_WHITE).bold();
-        render_separator(ui);
+        ui.separator_colored(SEPARATOR);
         ui.text("");
 
-        ui.text("  -- Keybindings --").fg(GRAY_500);
+        let _ = ui.divider_text("Keybindings");
         help_line(ui, "up / down", "Navigate sessions");
         help_line(ui, "[ / ]", "Cycle session summary");
         help_line(ui, "right", "Session detail / history");
@@ -1414,8 +1433,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         help_line(ui, "Esc", "Quit");
         ui.text("");
 
-        ui.text("  -- Settings (up/down navigate, enter/space toggle, +/- adjust) --")
-            .fg(GRAY_500);
+        let _ = ui.divider_text("Settings");
         help_line(ui, "sort_by", app.sort_mode.label());
 
         let selected_scope = app.help_selected == 0;
@@ -1424,7 +1442,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         } else {
             slt::Color::Reset
         };
-        ui.row(|ui| {
+        let _ = ui.row(|ui| {
             ui.styled(
                 format!(
                     "{}{: <18}",
@@ -1451,7 +1469,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         } else {
             slt::Color::Reset
         };
-        ui.row(|ui| {
+        let _ = ui.row(|ui| {
             ui.styled(
                 format!(
                     "{}{: <18}",
@@ -1473,25 +1491,26 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         });
 
         ui.text("");
-        ui.text("  -- Config File --").fg(GRAY_500);
+        let _ = ui.divider_text("Config File");
         ui.text(format!("  {config_path_str}")).fg(GRAY_400);
 
-        ui.container().grow(1).col(|_| {});
-        render_separator(ui);
-        ui.text(" up/down navigate | enter/space toggle | +/- adjust | esc/q close")
-            .fg(GRAY_500);
+        let _ = ui.container().grow(1).col(|_| {});
+        ui.separator_colored(SEPARATOR);
+        let _ = ui.help(&[
+            ("↑↓", "navigate"),
+            ("Enter", "toggle"),
+            ("+/-", "adjust"),
+            ("Esc", "close"),
+        ]);
     });
 }
 
 fn help_line(ui: &mut slt::Context, key: &str, desc: &str) {
-    ui.row(|ui| {
-        ui.text(format!("  {:<18}", key)).fg(BRIGHT_WHITE);
-        ui.text(desc).fg(GRAY_400);
+    ui.line(|ui| {
+        ui.text("  ");
+        let _ = ui.key_hint(key);
+        ui.text(format!("  {desc}")).fg(GRAY_400);
     });
-}
-
-fn render_separator(ui: &mut slt::Context) {
-    ui.text("─".repeat(ui.width() as usize)).fg(SEPARATOR);
 }
 
 fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
@@ -1534,7 +1553,7 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
                 summary_text,
             );
 
-            ui.row(|ui| {
+            let _ = ui.row(|ui| {
                 ui.styled(indicator.to_string(), indicator_style);
                 render_chunks(ui, &chunks);
             });
@@ -1557,7 +1576,7 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
                 summary_text,
             );
 
-            ui.row(|ui| {
+            let _ = ui.row(|ui| {
                 ui.styled(
                     indicator.to_string(),
                     slt::Style::new().fg(slt::Color::White).bg(bg),
@@ -1583,7 +1602,7 @@ fn render_session_list_compact(ui: &mut slt::Context, app: &App) {
         };
         let indicator = if is_selected { "> " } else { "  " };
 
-        ui.row(|ui| {
+        let _ = ui.row(|ui| {
             ui.styled(
                 indicator.to_string(),
                 slt::Style::new().fg(slt::Color::White).bg(bg),
