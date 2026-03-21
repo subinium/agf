@@ -66,7 +66,11 @@ fn main() -> anyhow::Result<()> {
 
             let best = &sessions[results[0].index];
             if let Some(cmd) = action::generate_command(best, model::Action::Resume, None) {
-                println!("{cmd}");
+                if let Ok(file) = std::env::var("AGF_CMD_FILE") {
+                    std::fs::write(&file, &cmd)?;
+                } else {
+                    println!("{cmd}");
+                }
             }
             return Ok(());
         }
