@@ -42,14 +42,6 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Handle --version / -V / version before clap (args_conflicts_with_subcommands blocks it)
-    if let Some(arg) = std::env::args().nth(1) {
-        if arg == "--version" || arg == "-V" || arg == "version" {
-            eprintln!("agf {}", env!("CARGO_PKG_VERSION"));
-            return Ok(());
-        }
-    }
-
     let cli = Cli::parse();
 
     match cli.command {

@@ -2,50 +2,181 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-use serde::Deserialize;
-use walkdir::WalkDir;
+use rusqlite::Connection;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
-#[derive(Deserialize)]
-struct SessionMeta {
-    #[serde(rename = "type")]
-    entry_type: Option<String>,
-    payload: Option<SessionPayload>,
-}
-
-#[derive(Deserialize)]
-struct SessionPayload {
-    id: Option<String>,
-    cwd: Option<String>,
-    timestamp: Option<String>,
-    git: Option<GitInfo>,
-}
-
-#[derive(Deserialize)]
-struct GitInfo {
-    branch: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct HistoryEntry {
-    session_id: Option<String>,
-    ts: Option<f64>,
-    text: Option<String>,
-}
-
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let codex_dir = crate::config::codex_dir()?;
-    let sessions_dir = codex_dir.join("sessions");
 
     // Collect summaries from history.jsonl (keyed by session_id, newest-first)
     let summaries = read_history_summaries(&codex_dir);
 
+    // Primary: read from SQLite (state_*.sqlite)
+    let mut sessions = scan_sqlite(&codex_dir, &summaries);
+
+    // Fallback: if SQLite found nothing, try JSONL walkdir
+    if sessions.is_empty() {
+        sessions = scan_jsonl(&codex_dir, &summaries);
+    }
+
+    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(sessions)
+}
+
+/// Read sessions from Codex SQLite database (state_*.sqlite).
+/// This is the primary source — covers CLI, desktop app (vscode), and exec sessions.
+fn scan_sqlite(
+    codex_dir: &std::path::Path,
+    summaries: &HashMap<String, Vec<String>>,
+) -> Vec<Session> {
+    // Find the latest state_*.sqlite file
+    let db_path = match find_state_db(codex_dir) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let conn =
+        match Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+    let mut stmt = match conn.prepare(
+        "SELECT id, cwd, title, updated_at, git_branch, first_user_message
+         FROM threads
+         WHERE archived = 0 AND cwd != ''
+         ORDER BY updated_at DESC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let rows = match stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2).unwrap_or_default(),
+            row.get::<_, i64>(3).unwrap_or(0),
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5).unwrap_or_default(),
+        ))
+    }) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut sessions = Vec::new();
+    for row in rows.flatten() {
+        let (session_id, cwd, title, updated_at, git_branch, first_msg) = row;
+
+        if session_id.is_empty() || cwd.is_empty() {
+            continue;
+        }
+
+        let project_name = std::path::Path::new(&cwd)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        // updated_at is Unix seconds — convert to millis
+        let timestamp = updated_at * 1000;
+
+        // Build summaries: prefer history.jsonl, fall back to title/first_msg
+        let session_summaries = if let Some(s) = summaries.get(&session_id) {
+            s.clone()
+        } else {
+            // Use first line of title (can be very long), or first_user_message
+            let summary =
+                first_line_truncated(&title, 200).or_else(|| first_line_truncated(&first_msg, 200));
+            match summary {
+                Some(s) => vec![s],
+                None => Vec::new(),
+            }
+        };
+
+        sessions.push(Session {
+            agent: Agent::Codex,
+            session_id,
+            project_name,
+            project_path: cwd,
+            summaries: session_summaries,
+            timestamp,
+            git_branch,
+            worktree: None,
+        });
+    }
+
+    sessions
+}
+
+/// Find the latest state_*.sqlite file in the codex directory.
+fn find_state_db(codex_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(codex_dir).ok()?;
+    let mut candidates: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("state_") && n.ends_with(".sqlite"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    // Sort descending by name so state_5 > state_4 etc.
+    candidates.sort_by(|a, b| b.cmp(a));
+    candidates.into_iter().next()
+}
+
+/// Extract first line of text, truncated to max_len chars. Returns None if empty.
+fn first_line_truncated(s: &str, max_len: usize) -> Option<String> {
+    let line = s.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return None;
+    }
+    if line.len() > max_len {
+        Some(format!("{}…", &line[..max_len]))
+    } else {
+        Some(line.to_string())
+    }
+}
+
+/// Fallback: scan JSONL session files via walkdir (legacy format).
+fn scan_jsonl(
+    codex_dir: &std::path::Path,
+    summaries: &HashMap<String, Vec<String>>,
+) -> Vec<Session> {
+    use serde::Deserialize;
+    use walkdir::WalkDir;
+
+    #[derive(Deserialize)]
+    struct SessionMeta {
+        #[serde(rename = "type")]
+        entry_type: Option<String>,
+        payload: Option<SessionPayload>,
+    }
+
+    #[derive(Deserialize)]
+    struct SessionPayload {
+        id: Option<String>,
+        cwd: Option<String>,
+        timestamp: Option<String>,
+        git: Option<GitInfo>,
+    }
+
+    #[derive(Deserialize)]
+    struct GitInfo {
+        branch: Option<String>,
+    }
+
+    let sessions_dir = codex_dir.join("sessions");
     let mut sessions = Vec::new();
 
     if !sessions_dir.exists() {
-        return Ok(sessions);
+        return sessions;
     }
 
     for entry in WalkDir::new(&sessions_dir)
@@ -57,7 +188,6 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             continue;
         }
 
-        // Only the first line contains session_meta — no need to read the whole file.
         let first_line = match read_first_line(path) {
             Some(line) => line,
             None => continue,
@@ -101,7 +231,6 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             .unwrap_or(0);
 
         let git_branch = payload.git.and_then(|g| g.branch);
-
         let session_summaries = summaries.get(&session_id).cloned().unwrap_or_default();
 
         sessions.push(Session {
@@ -116,8 +245,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         });
     }
 
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    Ok(sessions)
+    sessions
 }
 
 /// Read only the first non-empty line of a file without loading the rest.
@@ -135,6 +263,13 @@ fn read_first_line(path: &std::path::Path) -> Option<String> {
             return Some(line);
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+struct HistoryEntry {
+    session_id: Option<String>,
+    ts: Option<f64>,
+    text: Option<String>,
 }
 
 fn read_history_summaries(codex_dir: &std::path::Path) -> HashMap<String, Vec<String>> {
