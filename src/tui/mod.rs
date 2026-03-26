@@ -63,6 +63,7 @@ pub struct App {
     pub summary_search_count: usize,
     pub include_summaries: bool,
     pub help_selected: usize,
+    pub search_textarea: slt::TextareaState,
     fuzzy: FuzzyMatcher,
 }
 
@@ -99,6 +100,14 @@ impl App {
         let filtered_indices: Vec<usize> = (0..sessions.len()).collect();
         let match_positions: Vec<Vec<u32>> = vec![Vec::new(); sessions.len()];
         let query = initial_query.unwrap_or_default();
+        let search_textarea = {
+            let mut ta = slt::TextareaState::new();
+            if !query.is_empty() {
+                ta.lines = vec![query.clone()];
+                ta.cursor_col = query.chars().count();
+            }
+            ta
+        };
         let mut app = Self {
             sessions,
             filtered_indices,
@@ -123,6 +132,7 @@ impl App {
             summary_search_count,
             include_summaries,
             help_selected: 0,
+            search_textarea,
             fuzzy: FuzzyMatcher::new(),
         };
         if !app.query.is_empty() {
@@ -296,7 +306,7 @@ impl App {
         let mut result: Option<String> = None;
         let app = self;
         slt::run_with(
-            slt::RunConfig::default().title("agf"),
+            slt::RunConfig::default().title("agf").mouse(true),
             |ui: &mut slt::Context| {
                 app.viewport_height = (ui.height() as usize).saturating_sub(4).max(1);
                 app.adjust_scroll();
@@ -325,6 +335,17 @@ fn agent_color(agent: Agent) -> slt::Color {
 }
 
 fn ui_browse(ui: &mut slt::Context, app: &mut App) {
+    // --- Consume keys that conflict with textarea BEFORE rendering ---
+    // Consume Esc/Enter/Up/Down so textarea doesn't process them
+    let esc = ui.consume_key_code(slt::KeyCode::Esc);
+    let enter = ui.consume_key_code(slt::KeyCode::Enter);
+    let up = ui.consume_key_code(slt::KeyCode::Up);
+    let down = ui.consume_key_code(slt::KeyCode::Down);
+    let right = ui.consume_key_code(slt::KeyCode::Right);
+    let tab = ui.consume_key_code(slt::KeyCode::Tab);
+    let backtab = ui.consume_key_code(slt::KeyCode::BackTab);
+
+    // Ctrl+letter: consume the char so textarea doesn't insert it
     let ctrl_up =
         ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
     let ctrl_down =
@@ -332,28 +353,92 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     let ctrl_sort = ui.key_mod('s', slt::KeyModifiers::CONTROL);
     let ctrl_bulk = ui.key_mod('d', slt::KeyModifiers::CONTROL);
     let ctrl_clear = ui.key_mod('u', slt::KeyModifiers::CONTROL);
+    let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
+    // Consume ctrl chars to prevent textarea insertion
+    if ctrl_up {
+        ui.consume_key('p');
+        ui.consume_key('k');
+    }
+    if ctrl_down {
+        ui.consume_key('n');
+        ui.consume_key('j');
+    }
+    if ctrl_sort {
+        ui.consume_key('s');
+    }
+    if ctrl_bulk {
+        ui.consume_key('d');
+    }
+    if ctrl_clear {
+        ui.consume_key('u');
+    }
+    if ctrl_right {
+        ui.consume_key('l');
+    }
 
-    if ui.key_code(slt::KeyCode::Esc) {
+    // Consume special chars that have bindings
+    let help = ui.consume_key('?');
+    let summary_prev = ui.consume_key('[');
+    let summary_next = ui.consume_key(']');
+
+    // --- Handle key actions ---
+    if esc {
         ui.quit();
     }
-
-    if ui.key('?') {
+    if help {
         app.mode = Mode::Help;
     }
-
-    if ui.key('[') {
+    if summary_prev {
         app.cycle_summary(true);
     }
-    if ui.key(']') {
+    if summary_next {
         app.cycle_summary(false);
     }
-
-    if (ui.key_code(slt::KeyCode::Up) || ctrl_up) && app.selected > 0 {
+    if (up || ctrl_up) && app.selected > 0 {
         app.selected -= 1;
         app.adjust_scroll();
     }
+    if (down || ctrl_down)
+        && !app.filtered_indices.is_empty()
+        && app.selected < app.filtered_indices.len() - 1
+    {
+        app.selected += 1;
+        app.adjust_scroll();
+    }
+    if enter && app.selected_session().is_some() {
+        app.action_index = 0;
+        app.mode = Mode::ActionSelect;
+    }
+    if (right || ctrl_right) && app.selected_session().is_some() {
+        app.mode = Mode::Preview;
+    }
+    if ctrl_sort {
+        app.sort_mode = app.sort_mode.next();
+        app.apply_sort();
+    }
+    if ctrl_bulk {
+        app.selected_set.clear();
+        app.mode = Mode::BulkDelete;
+    }
+    if tab {
+        app.cycle_agent_filter(true);
+    }
+    if backtab {
+        app.cycle_agent_filter(false);
+    }
+    if ctrl_clear {
+        app.search_textarea.lines = vec![String::new()];
+        app.search_textarea.cursor_col = 0;
+        app.query.clear();
+        app.update_filter();
+    }
 
-    if (ui.key_code(slt::KeyCode::Down) || ctrl_down)
+    // Mouse: scroll
+    if ui.scroll_up() && app.selected > 0 {
+        app.selected -= 1;
+        app.adjust_scroll();
+    }
+    if ui.scroll_down()
         && !app.filtered_indices.is_empty()
         && app.selected < app.filtered_indices.len() - 1
     {
@@ -361,115 +446,53 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         app.adjust_scroll();
     }
 
-    if ui.key_code(slt::KeyCode::Enter) && app.selected_session().is_some() {
-        app.action_index = 0;
-        app.mode = Mode::ActionSelect;
-    }
-
-    if (ui.key_code(slt::KeyCode::Right) || ui.key_mod('l', slt::KeyModifiers::CONTROL))
-        && app.selected_session().is_some()
-    {
-        app.mode = Mode::Preview;
-    }
-
-    if ctrl_sort {
-        app.sort_mode = app.sort_mode.next();
-        app.apply_sort();
-    }
-
-    if ctrl_bulk {
-        app.selected_set.clear();
-        app.mode = Mode::BulkDelete;
-    }
-
-    if ui.key_code(slt::KeyCode::Tab) {
-        app.cycle_agent_filter(true);
-    }
-
-    if ui.key_code(slt::KeyCode::BackTab) {
-        app.cycle_agent_filter(false);
-    }
-
-    if ctrl_clear {
-        app.query.clear();
-        app.update_filter();
-    }
-
-    if ui.key_code(slt::KeyCode::Backspace) {
-        app.query.pop();
-        app.update_filter();
-    }
-
-    let mut blocked_chars = HashSet::new();
-    if ctrl_up {
-        blocked_chars.insert('p');
-        blocked_chars.insert('k');
-    }
-    if ctrl_down {
-        blocked_chars.insert('n');
-        blocked_chars.insert('j');
-    }
-    if ctrl_sort {
-        blocked_chars.insert('s');
-    }
-    if ctrl_bulk {
-        blocked_chars.insert('d');
-    }
-    if ctrl_clear {
-        blocked_chars.insert('u');
-    }
-    if ui.key_mod('l', slt::KeyModifiers::CONTROL) {
-        blocked_chars.insert('l');
-    }
-
-    let mut query_changed = false;
-    for code in 32u8..=126u8 {
-        let c = code as char;
-        if c == '?' || c == '[' || c == ']' {
-            continue;
-        }
-        if blocked_chars.contains(&c) {
-            continue;
-        }
-        if ui.key(c) {
-            app.query.push(c);
-            query_changed = true;
+    // Mouse: click on session row (search=1 + separator=1, list starts at y=2)
+    if let Some((_x, y)) = ui.mouse_down() {
+        let y = y as usize;
+        if y >= 2 {
+            let clicked_vi = app.scroll_offset + (y - 2);
+            if clicked_vi < app.filtered_indices.len() {
+                app.selected = clicked_vi;
+                app.adjust_scroll();
+                app.action_index = 0;
+                app.mode = Mode::ActionSelect;
+            }
         }
     }
-    if query_changed {
-        app.update_filter();
-    }
 
+    // --- Render ---
+    // Consistent 2-char left margin for all sections (matches "> " indicator width)
     let is_compact = matches!(ui.breakpoint(), slt::Breakpoint::Xs);
     let _ = ui.col(|ui| {
-        let _ = ui
-            .bordered(slt::Border::Rounded)
-            .border_fg(SEPARATOR)
-            .min_h(3)
-            .max_h(3)
-            .col(|ui| {
-                let _ = ui.row(|ui| {
-                    ui.text("> ").bold().fg(YELLOW);
-                    ui.text(&app.query).fg(slt::Color::White);
-                    ui.text("_").fg(YELLOW);
-                    ui.spacer();
-                    match app.agent_filter {
-                        Some(agent) => {
-                            let _ = ui.badge_colored(&agent.to_string(), agent_color(agent));
-                        }
-                        None => {
-                            let _ = ui.badge("All");
-                        }
-                    };
-                });
-            });
+        // Top spacing
+        ui.text("");
 
-        let _ = ui.container().grow(1).col(|ui| {
+        // Search bar: "  " indent + textarea + badge
+        let _ = ui.container().pl(2).pr(1).row(|ui| {
+            let _ = ui.container().grow(1).row(|ui| {
+                let _ = ui.textarea(&mut app.search_textarea, 1);
+            });
+            match app.agent_filter {
+                Some(agent) => {
+                    let _ = ui.badge_colored(&agent.to_string(), agent_color(agent));
+                }
+                None => {
+                    let _ = ui.badge("All");
+                }
+            };
+        });
+
+        ui.separator_colored(SEPARATOR);
+
+        // Session list (rows have "> " or "  " prefix built-in)
+        let _ = ui.container().grow(1).pr(1).col(|ui| {
             if app.filtered_indices.is_empty() {
-                let _ = ui.empty_state(
-                    "No sessions found",
-                    "Try a different search or agent filter",
-                );
+                let _ = ui.container().pl(2).col(|ui| {
+                    let _ = ui.empty_state(
+                        "No sessions found",
+                        "Try a different search or agent filter",
+                    );
+                });
             } else if is_compact {
                 render_session_list_compact(ui, app);
             } else {
@@ -477,10 +500,11 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
             }
         });
 
+        // Sort info (same 2-char indent)
         let total = app.sessions.len();
         let filtered = app.filtered_indices.len();
-        ui.line(|ui| {
-            ui.text(format!(" {filtered}/{total}")).fg(GRAY_500);
+        let _ = ui.container().pl(2).pr(1).row(|ui| {
+            ui.text(format!("{filtered}/{total}")).fg(GRAY_500);
             if let Some(agent) = app.agent_filter {
                 ui.text(" ").fg(GRAY_500);
                 let _ = ui.badge_colored(&agent.to_string(), agent_color(agent));
@@ -488,30 +512,63 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
             ui.text(format!(" sort:{}", app.sort_mode.label()))
                 .fg(GRAY_500);
         });
-        let _ = ui.help(&[
-            ("↑↓", "nav"),
-            ("Tab", "agent"),
-            ("[ ]", "summary"),
-            ("→", "detail"),
-            ("Enter", "select"),
-            ("^S", "sort"),
-            ("^D", "delete"),
-            ("?", "help"),
-            ("Esc", "quit"),
-        ]);
+
+        // Separator between content and statusbar
+        ui.separator_colored(SEPARATOR);
+
+        // Help bar (dim, right-aligned)
+        let _ = ui.container().pr(1).row(|ui| {
+            ui.spacer();
+            let _ = ui.help_colored(
+                &[
+                    ("↑↓", "nav"),
+                    ("Tab", "agent"),
+                    ("[/]", "summary"),
+                    ("→", "detail"),
+                    ("Enter", "select"),
+                    ("^S", "sort"),
+                    ("^D", "delete"),
+                    ("?", "help"),
+                    ("Esc", "quit"),
+                ],
+                GRAY_500,
+                SEPARATOR,
+            );
+        });
     });
+
+    // Sync textarea → query (textarea stores lines, we use first line only)
+    let textarea_text = app
+        .search_textarea
+        .lines
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    // Strip newlines in case textarea somehow got multi-line
+    let clean_text: String = textarea_text.chars().filter(|c| *c != '\n').collect();
+    if clean_text != app.query {
+        app.query = clean_text;
+        app.update_filter();
+    }
+    // Keep textarea single-line
+    if app.search_textarea.lines.len() > 1 {
+        let merged: String = app.search_textarea.lines.join("");
+        app.search_textarea.lines = vec![merged.clone()];
+        app.search_textarea.cursor_row = 0;
+        app.search_textarea.cursor_col = merged.chars().count();
+    }
 }
 
 fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let actions = Action::MENU;
+    let action_count = actions.len();
 
     if ui.key_code(slt::KeyCode::Esc) {
         app.mode = Mode::Browse;
     }
 
-    let action_count = actions.len();
-
-    if ui.key_code(slt::KeyCode::BackTab) {
+    // Tab/BackTab: wrap-around navigation
+    if ui.consume_key_code(slt::KeyCode::BackTab) {
         app.action_index = (app.action_index + action_count - 1) % action_count;
     } else if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
@@ -521,7 +578,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.action_index -= 1;
     }
 
-    if ui.key_code(slt::KeyCode::Tab) {
+    if ui.consume_key_code(slt::KeyCode::Tab) {
         app.action_index = (app.action_index + 1) % action_count;
     } else if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
@@ -535,6 +592,16 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
         if ui.key(key) {
             app.action_index = i;
+            dispatch_action(ui, app, actions[app.action_index], result);
+        }
+    }
+
+    // Mouse: click on action item
+    if let Some((_x, y)) = ui.mouse_down() {
+        let y = y as usize;
+        if y >= 4 && y < 4 + action_count {
+            let clicked = y - 4;
+            app.action_index = clicked;
             dispatch_action(ui, app, actions[app.action_index], result);
         }
     }
@@ -639,7 +706,13 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.help(&[("Tab", "nav"), ("Enter", "select"), ("Esc", "back")]);
+        let _ = ui.container().pl(1).row(|ui| {
+            let _ = ui.help_colored(
+                &[("Tab", "nav"), ("Enter", "select"), ("Esc", "back")],
+                GRAY_500,
+                SEPARATOR,
+            );
+        });
     });
 }
 
@@ -679,7 +752,8 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         app.mode = Mode::ActionSelect;
     }
 
-    if ui.key_code(slt::KeyCode::BackTab) && option_count > 0 {
+    // Tab/BackTab: wrap-around navigation
+    if ui.consume_key_code(slt::KeyCode::BackTab) && option_count > 0 {
         app.agent_index = (app.agent_index + option_count - 1) % option_count;
     } else if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
@@ -689,7 +763,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         app.agent_index -= 1;
     }
 
-    if ui.key_code(slt::KeyCode::Tab) && option_count > 0 {
+    if ui.consume_key_code(slt::KeyCode::Tab) && option_count > 0 {
         app.agent_index = (app.agent_index + 1) % option_count;
     } else if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
@@ -771,12 +845,18 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.help(&[
-            ("1-9", "select"),
-            ("Tab", "nav"),
-            ("Enter", "mode"),
-            ("Esc", "back"),
-        ]);
+        let _ = ui.container().pl(1).row(|ui| {
+            let _ = ui.help_colored(
+                &[
+                    ("1-9", "select"),
+                    ("Tab", "nav"),
+                    ("Enter", "mode"),
+                    ("Esc", "back"),
+                ],
+                GRAY_500,
+                SEPARATOR,
+            );
+        });
     });
 }
 
@@ -828,6 +908,7 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         app.mode = Mode::AgentSelect;
     }
 
+    // Tab/BackTab: wrap-around navigation
     if ui.key_code(slt::KeyCode::BackTab) && option_count > 0 {
         app.mode_index = (app.mode_index + option_count - 1) % option_count;
     } else if (ui.key_code(slt::KeyCode::Up)
@@ -919,7 +1000,13 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.help(&[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")]);
+        let _ = ui.container().pl(1).row(|ui| {
+            let _ = ui.help_colored(
+                &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
+                GRAY_500,
+                SEPARATOR,
+            );
+        });
     });
 }
 
@@ -944,6 +1031,7 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.mode = Mode::ActionSelect;
     }
 
+    // Tab/BackTab: wrap-around navigation
     if ui.key_code(slt::KeyCode::BackTab) && option_count > 0 {
         app.resume_mode_index = (app.resume_mode_index + option_count - 1) % option_count;
     } else if (ui.key_code(slt::KeyCode::Up)
@@ -1031,7 +1119,13 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.help(&[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")]);
+        let _ = ui.container().pl(1).row(|ui| {
+            let _ = ui.help_colored(
+                &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
+                GRAY_500,
+                SEPARATOR,
+            );
+        });
     });
 }
 
@@ -1112,7 +1206,13 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
                 .fg(RED)
                 .bold();
         });
-        let _ = ui.help(&[("Space", "toggle"), ("Enter", "delete"), ("Esc", "cancel")]);
+        let _ = ui.container().pl(1).row(|ui| {
+            let _ = ui.help_colored(
+                &[("Space", "toggle"), ("Enter", "delete"), ("Esc", "cancel")],
+                GRAY_500,
+                SEPARATOR,
+            );
+        });
     });
 }
 
@@ -1374,7 +1474,13 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.help(&[("Enter", "actions"), ("Esc", "back"), ("Any", "back")]);
+        let _ = ui.container().pl(1).row(|ui| {
+            let _ = ui.help_colored(
+                &[("Enter", "actions"), ("Esc", "back"), ("Any", "back")],
+                GRAY_500,
+                SEPARATOR,
+            );
+        });
     });
 }
 
@@ -1425,100 +1531,113 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
     let config_path_str = config_path.to_string_lossy().to_string();
 
     let _ = ui.col(|ui| {
-        ui.separator_colored(SEPARATOR);
-        ui.text(" Help & Settings").fg(BRIGHT_WHITE).bold();
-        ui.separator_colored(SEPARATOR);
         ui.text("");
+        let _ = ui.container().pl(2).pr(1).col(|ui| {
+            ui.text("Help & Settings").fg(BRIGHT_WHITE).bold();
+        });
+        ui.separator_colored(SEPARATOR);
 
-        let _ = ui.divider_text("Keybindings");
-        help_line(ui, "up / down", "Navigate sessions");
-        help_line(ui, "[ / ]", "Cycle session summary");
-        help_line(ui, "right", "Session detail / history");
-        help_line(ui, "Enter", "Open action menu");
-        help_line(ui, "Tab / Shift+Tab", "Cycle agent filter");
-        help_line(ui, "Ctrl+S", "Cycle sort mode");
-        help_line(ui, "Ctrl+D", "Enter bulk delete mode");
-        help_line(ui, "?", "This help panel");
-        help_line(ui, "Esc", "Quit");
-        ui.text("");
+        let _ = ui.container().pl(2).pr(1).grow(1).col(|ui| {
+            ui.text("").dim();
+            ui.text("Keybindings").fg(GRAY_400).bold();
+            ui.text("").dim();
+            help_line(ui, "↑ / ↓", "Navigate sessions");
+            help_line(ui, "[ / ]", "Cycle summary");
+            help_line(ui, "→", "Session detail");
+            help_line(ui, "Enter", "Action menu");
+            help_line(ui, "Tab", "Cycle agent filter");
+            help_line(ui, "^S", "Cycle sort");
+            help_line(ui, "^D", "Bulk delete");
+            help_line(ui, "?", "Help");
+            help_line(ui, "Esc", "Quit");
 
-        let _ = ui.divider_text("Settings");
-        help_line(ui, "sort_by", app.sort_mode.label());
+            ui.text("");
+            ui.text("Settings").fg(GRAY_400).bold();
+            ui.text("").dim();
 
-        let selected_scope = app.help_selected == 0;
-        let scope_bg = if selected_scope {
-            HIGHLIGHT_BG
-        } else {
-            slt::Color::Reset
-        };
-        let _ = ui.row(|ui| {
-            ui.styled(
-                format!(
-                    "{}{: <18}",
+            // search_scope setting
+            let selected_scope = app.help_selected == 0;
+            let scope_bg = if selected_scope {
+                HIGHLIGHT_BG
+            } else {
+                slt::Color::Reset
+            };
+            let _ = ui.row(|ui| {
+                ui.styled(
                     if selected_scope { "> " } else { "  " },
-                    "search_scope"
-                ),
-                slt::Style::new().fg(BRIGHT_WHITE).bg(scope_bg),
-            );
-            ui.styled(
-                format!("  {search_scope_label}"),
-                slt::Style::new()
-                    .fg(if selected_scope {
-                        BRIGHT_WHITE
-                    } else {
-                        GRAY_400
-                    })
-                    .bg(scope_bg),
-            );
-        });
+                    slt::Style::new().fg(YELLOW).bg(scope_bg),
+                );
+                ui.styled(
+                    format!("{:<22}", "search_scope"),
+                    slt::Style::new().fg(BRIGHT_WHITE).bg(scope_bg),
+                );
+                ui.styled(
+                    search_scope_label,
+                    slt::Style::new()
+                        .fg(if selected_scope {
+                            BRIGHT_WHITE
+                        } else {
+                            GRAY_400
+                        })
+                        .bg(scope_bg),
+                );
+            });
 
-        let selected_count = app.help_selected == 1;
-        let count_bg = if selected_count {
-            HIGHLIGHT_BG
-        } else {
-            slt::Color::Reset
-        };
-        let _ = ui.row(|ui| {
-            ui.styled(
-                format!(
-                    "{}{: <18}",
+            // summary_search_count setting
+            let selected_count = app.help_selected == 1;
+            let count_bg = if selected_count {
+                HIGHLIGHT_BG
+            } else {
+                slt::Color::Reset
+            };
+            let _ = ui.row(|ui| {
+                ui.styled(
                     if selected_count { "> " } else { "  " },
-                    "summary_search_count"
-                ),
-                slt::Style::new().fg(BRIGHT_WHITE).bg(count_bg),
-            );
-            ui.styled(
-                format!("  {}", app.summary_search_count),
-                slt::Style::new()
-                    .fg(if selected_count {
-                        BRIGHT_WHITE
-                    } else {
-                        GRAY_400
-                    })
-                    .bg(count_bg),
-            );
+                    slt::Style::new().fg(YELLOW).bg(count_bg),
+                );
+                ui.styled(
+                    format!("{:<22}", "summary_search_count"),
+                    slt::Style::new().fg(BRIGHT_WHITE).bg(count_bg),
+                );
+                ui.styled(
+                    format!("{}", app.summary_search_count),
+                    slt::Style::new()
+                        .fg(if selected_count {
+                            BRIGHT_WHITE
+                        } else {
+                            GRAY_400
+                        })
+                        .bg(count_bg),
+                );
+            });
+
+            ui.text("");
+            ui.text("Config").fg(GRAY_400).bold();
+            ui.text("").dim();
+            ui.text(format!("  {config_path_str}")).fg(GRAY_500);
         });
 
-        ui.text("");
-        let _ = ui.divider_text("Config File");
-        ui.text(format!("  {config_path_str}")).fg(GRAY_400);
-
-        let _ = ui.container().grow(1).col(|_| {});
         ui.separator_colored(SEPARATOR);
-        let _ = ui.help(&[
-            ("↑↓", "navigate"),
-            ("Enter", "toggle"),
-            ("+/-", "adjust"),
-            ("Esc", "close"),
-        ]);
+        let _ = ui.container().pr(1).row(|ui| {
+            ui.spacer();
+            let _ = ui.help_colored(
+                &[
+                    ("↑↓", "navigate"),
+                    ("Enter", "toggle"),
+                    ("+/-", "adjust"),
+                    ("Esc", "close"),
+                ],
+                GRAY_500,
+                SEPARATOR,
+            );
+        });
     });
 }
 
 fn help_line(ui: &mut slt::Context, key: &str, desc: &str) {
-    ui.line(|ui| {
-        ui.text("  ");
-        let _ = ui.key_hint(key);
-        ui.text(format!("  {desc}")).fg(GRAY_400);
+    let _ = ui.row(|ui| {
+        ui.styled(format!("  {:<16}", key), slt::Style::new().fg(GRAY_500));
+        ui.text(desc).fg(GRAY_400);
     });
 }
 
@@ -1527,6 +1646,15 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
     let end = (app.scroll_offset + visible).min(app.filtered_indices.len());
     let total_width = ui.width() as usize;
     let right_margin = 1usize;
+
+    // Compute max project name width across all filtered sessions for table alignment
+    let name_col_width = app
+        .filtered_indices
+        .iter()
+        .map(|&i| UnicodeWidthStr::width(app.sessions[i].project_name.as_str()))
+        .max()
+        .unwrap_or(0)
+        .min(30); // cap at 30 chars to leave room for summary
 
     for vi in app.scroll_offset..end {
         let session_idx = app.filtered_indices[vi];
@@ -1560,6 +1688,7 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
                 right_margin,
                 None,
                 summary_text,
+                name_col_width,
             );
 
             let _ = ui.row(|ui| {
@@ -1583,6 +1712,7 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
                 right_margin,
                 match_positions,
                 summary_text,
+                name_col_width,
             );
 
             let _ = ui.row(|ui| {
@@ -1617,7 +1747,7 @@ fn render_session_list_compact(ui: &mut slt::Context, app: &App) {
                 slt::Style::new().fg(slt::Color::White).bg(bg),
             );
             ui.styled(
-                format!("{:<12}", session.agent.to_string()),
+                format!("{:<14}", session.agent.to_string()),
                 slt::Style::new()
                     .fg(agent_color(session.agent))
                     .bold()
@@ -1642,12 +1772,13 @@ fn render_session_list_compact(ui: &mut slt::Context, app: &App) {
             }
             ui.styled(
                 format!("{:>12}", session.time_display()),
-                slt::Style::new().fg(VIOLET).bg(bg),
+                slt::Style::new().fg(GRAY_500).bg(bg),
             );
         });
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_session_row(
     session: &Session,
     bg: slt::Color,
@@ -1656,10 +1787,11 @@ fn build_session_row(
     right_margin: usize,
     match_positions: Option<&[u32]>,
     summary_text: Option<&str>,
+    name_col_width: usize,
 ) -> Vec<StyledChunk> {
     let mut chunks: Vec<StyledChunk> = Vec::new();
 
-    let agent_label = format!("{:<12}", session.agent.to_string());
+    let agent_label = format!("{:<14}", session.agent.to_string());
     chunks.push((
         agent_label,
         slt::Style::new()
@@ -1682,15 +1814,19 @@ fn build_session_row(
         .map(UnicodeWidthStr::width)
         .unwrap_or(0);
 
-    let fixed_left = indicator_width + 12;
+    // Use fixed column width for project name (padded to align columns)
+    let fixed_left = indicator_width + 14;
     let max_proj =
         total_width.saturating_sub(fixed_left + right_display_width + git_info_width + 4);
-    let proj_display = if max_proj == 0 {
+    let col_width = name_col_width.min(max_proj);
+    let proj_display = if col_width == 0 {
         String::new()
-    } else if UnicodeWidthStr::width(session.project_name.as_str()) > max_proj {
-        truncate_str(&session.project_name, max_proj)
+    } else if UnicodeWidthStr::width(session.project_name.as_str()) > col_width {
+        truncate_str(&session.project_name, col_width)
     } else {
-        session.project_name.clone()
+        let name_width = UnicodeWidthStr::width(session.project_name.as_str());
+        let pad = col_width.saturating_sub(name_width);
+        format!("{}{}", session.project_name, " ".repeat(pad))
     };
 
     if let Some(positions) = match_positions {
@@ -1731,7 +1867,10 @@ fn build_session_row(
         };
         chunks.push((git_str, slt::Style::new().fg(color).bg(bg)));
     }
-    chunks.push((format!("  {time_str}"), slt::Style::new().fg(VIOLET).bg(bg)));
+    chunks.push((
+        format!("  {time_str}"),
+        slt::Style::new().fg(GRAY_500).bg(bg),
+    ));
     if right_margin > 0 {
         chunks.push((" ".repeat(right_margin), slt::Style::new().bg(bg)));
     }
