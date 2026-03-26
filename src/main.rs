@@ -41,7 +41,16 @@ enum Commands {
     },
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn main() -> anyhow::Result<()> {
+    // Handle --version / -V manually (clap hides it due to args_conflicts_with_subcommands)
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("agf {VERSION}");
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
