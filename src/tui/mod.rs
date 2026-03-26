@@ -509,7 +509,11 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.mode = Mode::Browse;
     }
 
-    if (ui.key_code(slt::KeyCode::Up)
+    let action_count = actions.len();
+
+    if ui.key_code(slt::KeyCode::BackTab) {
+        app.action_index = (app.action_index + action_count - 1) % action_count;
+    } else if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
         || ui.key_mod('k', slt::KeyModifiers::CONTROL))
         && app.action_index > 0
@@ -517,15 +521,17 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.action_index -= 1;
     }
 
-    if (ui.key_code(slt::KeyCode::Down)
+    if ui.key_code(slt::KeyCode::Tab) {
+        app.action_index = (app.action_index + 1) % action_count;
+    } else if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL))
-        && app.action_index < actions.len() - 1
+        && app.action_index < action_count - 1
     {
         app.action_index += 1;
     }
 
-    for i in 0..actions.len().min(9) {
+    for i in 0..action_count.min(9) {
         let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
         if ui.key(key) {
             app.action_index = i;
@@ -533,19 +539,17 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         }
     }
 
-    if ui.key_code(slt::KeyCode::Tab)
-        && actions[app.action_index] == Action::Resume
-        && app.selected_session().is_some()
-    {
-        if let Some(session) = app.selected_session() {
-            app.resume_mode_options = session.agent.resume_mode_options().to_vec();
-            app.resume_mode_index = 0;
-            app.mode = Mode::ResumeSelect;
-        }
-    }
-
     if ui.key_code(slt::KeyCode::Enter) {
-        dispatch_action(ui, app, actions[app.action_index], result);
+        // Resume → go to mode picker; others → dispatch directly
+        if actions[app.action_index] == Action::Resume {
+            if let Some(session) = app.selected_session() {
+                app.resume_mode_options = session.agent.resume_mode_options().to_vec();
+                app.resume_mode_index = 0;
+                app.mode = Mode::ResumeSelect;
+            }
+        } else {
+            dispatch_action(ui, app, actions[app.action_index], result);
+        }
     }
 
     let Some(session) = app.selected_session() else {
@@ -635,11 +639,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        if actions[app.action_index] == Action::Resume {
-            let _ = ui.help(&[("Tab", "mode"), ("Enter", "confirm"), ("Esc", "back")]);
-        } else {
-            let _ = ui.help(&[("Enter", "confirm"), ("Esc", "back")]);
-        }
+        let _ = ui.help(&[("Tab", "nav"), ("Enter", "select"), ("Esc", "back")]);
     });
 }
 
@@ -679,7 +679,9 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         app.mode = Mode::ActionSelect;
     }
 
-    if (ui.key_code(slt::KeyCode::Up)
+    if ui.key_code(slt::KeyCode::BackTab) && option_count > 0 {
+        app.agent_index = (app.agent_index + option_count - 1) % option_count;
+    } else if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
         || ui.key_mod('k', slt::KeyModifiers::CONTROL))
         && app.agent_index > 0
@@ -687,7 +689,9 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         app.agent_index -= 1;
     }
 
-    if (ui.key_code(slt::KeyCode::Down)
+    if ui.key_code(slt::KeyCode::Tab) && option_count > 0 {
+        app.agent_index = (app.agent_index + 1) % option_count;
+    } else if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL))
         && option_count > 0
@@ -704,16 +708,13 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         }
     }
 
-    if ui.key_code(slt::KeyCode::Tab) && app.new_session_options.get(app.agent_index).is_some() {
+    if ui.key_code(slt::KeyCode::Enter) {
+        // Enter → go to permission mode picker
         if let Some(opt) = app.new_session_options.get(app.agent_index) {
             app.mode_options = permission_options_for(opt.agent);
             app.mode_index = 0;
             app.mode = Mode::PermissionSelect;
         }
-    }
-
-    if ui.key_code(slt::KeyCode::Enter) {
-        dispatch_agent_option(ui, app, result);
     }
 
     let Some(session) = app.selected_session() else {
@@ -726,7 +727,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         ui.line(|ui| {
             ui.text(" New session in ").fg(BRIGHT_WHITE);
             ui.text(session.display_path()).fg(GRAY_500);
-            ui.text("  (tab -> permission mode)").fg(GRAY_500);
+            ui.text("  (enter -> permission mode)").fg(GRAY_500);
         });
         ui.separator_colored(SEPARATOR);
         ui.text("");
@@ -772,8 +773,8 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         ui.separator_colored(SEPARATOR);
         let _ = ui.help(&[
             ("1-9", "select"),
-            ("Tab", "mode"),
-            ("Enter", "confirm"),
+            ("Tab", "nav"),
+            ("Enter", "mode"),
             ("Esc", "back"),
         ]);
     });
@@ -827,7 +828,9 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         app.mode = Mode::AgentSelect;
     }
 
-    if (ui.key_code(slt::KeyCode::Up)
+    if ui.key_code(slt::KeyCode::BackTab) && option_count > 0 {
+        app.mode_index = (app.mode_index + option_count - 1) % option_count;
+    } else if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
         || ui.key_mod('k', slt::KeyModifiers::CONTROL))
         && app.mode_index > 0
@@ -835,7 +838,9 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         app.mode_index -= 1;
     }
 
-    if (ui.key_code(slt::KeyCode::Down)
+    if ui.key_code(slt::KeyCode::Tab) && option_count > 0 {
+        app.mode_index = (app.mode_index + 1) % option_count;
+    } else if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL))
         && option_count > 0
@@ -939,7 +944,9 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.mode = Mode::ActionSelect;
     }
 
-    if (ui.key_code(slt::KeyCode::Up)
+    if ui.key_code(slt::KeyCode::BackTab) && option_count > 0 {
+        app.resume_mode_index = (app.resume_mode_index + option_count - 1) % option_count;
+    } else if (ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
         || ui.key_mod('k', slt::KeyModifiers::CONTROL))
         && app.resume_mode_index > 0
@@ -947,7 +954,9 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.resume_mode_index -= 1;
     }
 
-    if (ui.key_code(slt::KeyCode::Down)
+    if ui.key_code(slt::KeyCode::Tab) && option_count > 0 {
+        app.resume_mode_index = (app.resume_mode_index + 1) % option_count;
+    } else if (ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL))
         && option_count > 0
