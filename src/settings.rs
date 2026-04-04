@@ -1,8 +1,8 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     #[serde(default)]
     pub sort_by: Option<String>, // "time", "name", "agent"
@@ -12,6 +12,10 @@ pub struct Settings {
     pub summary_search_count: usize, // number of summaries included in fuzzy search (default 5)
     #[serde(default = "default_search_scope")]
     pub search_scope: String, // "name_path" (default) | "all"
+    #[serde(default)]
+    pub editor: Option<String>, // editor command (e.g. "code", "cursor"). Falls back to $EDITOR/$VISUAL
+    #[serde(default)]
+    pub pinned_sessions: Vec<String>, // session IDs pinned to top of list
 }
 
 fn default_summary_search_count() -> usize {
@@ -29,6 +33,8 @@ impl Default for Settings {
             max_sessions: None,
             summary_search_count: default_summary_search_count(),
             search_scope: default_search_scope(),
+            editor: None,
+            pinned_sessions: Vec::new(),
         }
     }
 }
@@ -48,31 +54,42 @@ impl Settings {
         }
     }
 
-    /// Persist editable fields to config.toml, preserving unrelated keys.
+    /// Persist settings to config.toml.
     pub fn save_editable(&self) {
         let path = config_path();
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
 
-        // Re-parse existing file line by line, replacing or appending the two keys
-        let existing = fs::read_to_string(&path).unwrap_or_default();
-        let mut lines: Vec<String> = existing
-            .lines()
-            .filter(|l| {
-                let t = l.trim_start();
-                !t.starts_with("search_scope") && !t.starts_with("summary_search_count")
-            })
-            .map(|l| l.to_string())
-            .collect();
+        // Load existing config and merge editable fields
+        let mut existing: toml::Table = fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or_default();
 
-        lines.push(format!("search_scope = {:?}", self.search_scope));
-        lines.push(format!(
-            "summary_search_count = {}",
-            self.summary_search_count
-        ));
+        existing.insert(
+            "search_scope".to_string(),
+            toml::Value::String(self.search_scope.clone()),
+        );
+        existing.insert(
+            "summary_search_count".to_string(),
+            toml::Value::Integer(self.summary_search_count as i64),
+        );
+        if !self.pinned_sessions.is_empty() {
+            existing.insert(
+                "pinned_sessions".to_string(),
+                toml::Value::Array(
+                    self.pinned_sessions
+                        .iter()
+                        .map(|s| toml::Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
+        } else {
+            existing.remove("pinned_sessions");
+        }
 
-        let _ = fs::write(&path, lines.join("\n") + "\n");
+        let _ = fs::write(&path, existing.to_string());
     }
 }
 

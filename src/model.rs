@@ -225,28 +225,33 @@ impl Session {
 pub enum Action {
     Resume,
     NewSession,
+    Open,
     Cd,
+    Pin,
     Delete,
     Back,
 }
 
 impl Action {
-    pub const MENU: [Action; 5] = [
+    pub const MENU: [Action; 6] = [
         Action::Resume,
         Action::NewSession,
+        Action::Open,
         Action::Cd,
+        Action::Pin,
         Action::Delete,
-        Action::Back,
     ];
 }
 
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Action::Resume => write!(f, "Resume session"),
-            Action::NewSession => write!(f, "New session"),
-            Action::Cd => write!(f, "cd to directory"),
-            Action::Delete => write!(f, "Delete session"),
+            Action::Resume => write!(f, "Resume Session"),
+            Action::NewSession => write!(f, "New Session"),
+            Action::Open => write!(f, "Open in Editor"),
+            Action::Cd => write!(f, "Go to Directory"),
+            Action::Pin => write!(f, "Pin Session"),
+            Action::Delete => write!(f, "Delete Session"),
             Action::Back => write!(f, "← Back"),
         }
     }

@@ -22,6 +22,7 @@ const CYAN: slt::Color = slt::Color::Rgb(34, 211, 238);
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
     Browse,
+    GroupedBrowse,
     ActionSelect,
     AgentSelect,
     PermissionSelect,
@@ -30,6 +31,13 @@ pub enum Mode {
     BulkDelete,
     Preview,
     Help,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectGroup {
+    pub project_path: String,
+    pub project_name: String,
+    pub sessions: Vec<usize>, // indices into App.sessions
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +72,14 @@ pub struct App {
     pub include_summaries: bool,
     pub help_selected: usize,
     pub search_textarea: slt::TextareaState,
+    pub cwd: Option<String>,
+    pub agent_counts: HashMap<Agent, usize>,
+    pub pinned_sessions: Vec<String>,
+    pub settings: crate::settings::Settings,
+    pub groups: Vec<ProjectGroup>,
+    pub group_expanded: HashSet<String>,
+    pub grouped_selected: usize,
+    pub grouped_scroll: usize,
     fuzzy: FuzzyMatcher,
 }
 
@@ -73,11 +89,12 @@ impl App {
         initial_query: Option<String>,
         summary_search_count: usize,
         include_summaries: bool,
+        cwd: Option<String>,
+        pinned_sessions: Vec<String>,
     ) -> Self {
         let agents = installed_agents();
 
-        let mut agent_counts: std::collections::HashMap<Agent, usize> =
-            std::collections::HashMap::new();
+        let mut agent_counts: HashMap<Agent, usize> = HashMap::new();
         for s in &sessions {
             *agent_counts.entry(s.agent).or_insert(0) += 1;
         }
@@ -108,6 +125,7 @@ impl App {
             }
             ta
         };
+        let settings = crate::settings::Settings::load();
         let mut app = Self {
             sessions,
             filtered_indices,
@@ -133,6 +151,14 @@ impl App {
             include_summaries,
             help_selected: 0,
             search_textarea,
+            cwd,
+            agent_counts,
+            pinned_sessions,
+            settings,
+            groups: Vec::new(),
+            group_expanded: HashSet::new(),
+            grouped_selected: 0,
+            grouped_scroll: 0,
             fuzzy: FuzzyMatcher::new(),
         };
         if !app.query.is_empty() {
@@ -156,6 +182,23 @@ impl App {
                     .then(b.timestamp.cmp(&a.timestamp))
             }),
         }
+
+        // Boost: pinned first, then $PWD matches (stable sort preserves primary order within groups)
+        let pinned = self.pinned_sessions.clone();
+        let cwd = self.cwd.clone();
+        self.sessions.sort_by(|a, b| {
+            let rank = |s: &Session| -> u8 {
+                if pinned.contains(&s.session_id) {
+                    0
+                } else if cwd.as_ref().is_some_and(|c| s.project_path == *c) {
+                    1
+                } else {
+                    2
+                }
+            };
+            rank(a).cmp(&rank(b))
+        });
+
         self.update_filter();
     }
 
@@ -230,16 +273,14 @@ impl App {
     }
 
     pub fn save_settings(&self) {
-        let settings = crate::settings::Settings {
-            sort_by: None,
-            max_sessions: None,
-            summary_search_count: self.summary_search_count,
-            search_scope: if self.include_summaries {
-                "all".to_string()
-            } else {
-                "name_path".to_string()
-            },
+        let mut settings = self.settings.clone();
+        settings.summary_search_count = self.summary_search_count;
+        settings.search_scope = if self.include_summaries {
+            "all".to_string()
+        } else {
+            "name_path".to_string()
         };
+        settings.pinned_sessions = self.pinned_sessions.clone();
         settings.save_editable();
     }
 
@@ -258,6 +299,78 @@ impl App {
         if self.scroll_offset > max_offset {
             self.scroll_offset = max_offset;
         }
+    }
+
+    pub fn build_groups(&mut self) {
+        let mut map: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for &idx in &self.filtered_indices {
+            let s = &self.sessions[idx];
+            map.entry(s.project_path.clone()).or_default().push(idx);
+        }
+        self.groups = map
+            .into_iter()
+            .map(|(path, sessions)| {
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                ProjectGroup {
+                    project_path: path,
+                    project_name: name,
+                    sessions,
+                }
+            })
+            .collect();
+        // Sort groups: most recent session first
+        self.groups.sort_by(|a, b| {
+            let a_ts = a
+                .sessions
+                .first()
+                .map(|&i| self.sessions[i].timestamp)
+                .unwrap_or(0);
+            let b_ts = b
+                .sessions
+                .first()
+                .map(|&i| self.sessions[i].timestamp)
+                .unwrap_or(0);
+            b_ts.cmp(&a_ts)
+        });
+    }
+
+    /// Count total visible rows in grouped view (headers + expanded children)
+    fn grouped_row_count(&self) -> usize {
+        self.groups
+            .iter()
+            .map(|g| {
+                if self.group_expanded.contains(&g.project_path) {
+                    1 + g.sessions.len()
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+
+    /// Map a flat row index to (group_index, None) for header or (group_index, Some(child_index))
+    fn grouped_row_at(&self, row: usize) -> Option<(usize, Option<usize>)> {
+        let mut current = 0;
+        for (gi, g) in self.groups.iter().enumerate() {
+            if current == row {
+                return Some((gi, None));
+            }
+            current += 1;
+            if self.group_expanded.contains(&g.project_path) {
+                for ci in 0..g.sessions.len() {
+                    if current == row {
+                        return Some((gi, Some(ci)));
+                    }
+                    current += 1;
+                }
+            }
+        }
+        None
     }
 
     fn agents_with_sessions(&self) -> Vec<Agent> {
@@ -312,6 +425,7 @@ impl App {
                 app.adjust_scroll();
                 match app.mode {
                     Mode::Browse => ui_browse(ui, app),
+                    Mode::GroupedBrowse => ui_grouped_browse(ui, app),
                     Mode::ActionSelect => ui_action_select(ui, app, &mut result),
                     Mode::AgentSelect => ui_agent_select(ui, app, &mut result),
                     Mode::PermissionSelect => ui_permission_select(ui, app, &mut result),
@@ -354,6 +468,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     let ctrl_bulk = ui.key_mod('d', slt::KeyModifiers::CONTROL);
     let ctrl_clear = ui.key_mod('u', slt::KeyModifiers::CONTROL);
     let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
+    let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
     // Consume ctrl chars to prevent textarea insertion
     if ctrl_up {
         ui.consume_key('p');
@@ -374,6 +489,9 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     }
     if ctrl_right {
         ui.consume_key('l');
+    }
+    if ctrl_group {
+        ui.consume_key('g');
     }
 
     // Consume special chars that have bindings
@@ -419,6 +537,12 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     if ctrl_bulk {
         app.selected_set.clear();
         app.mode = Mode::BulkDelete;
+    }
+    if ctrl_group {
+        app.build_groups();
+        app.grouped_selected = 0;
+        app.grouped_scroll = 0;
+        app.mode = Mode::GroupedBrowse;
     }
     if tab {
         app.cycle_agent_filter(true);
@@ -474,10 +598,12 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
             });
             match app.agent_filter {
                 Some(agent) => {
-                    let _ = ui.badge_colored(&agent.to_string(), agent_color(agent));
+                    let count = app.agent_counts.get(&agent).copied().unwrap_or(0);
+                    let _ = ui.badge_colored(&format!("{agent} ({count})"), agent_color(agent));
                 }
                 None => {
-                    let _ = ui.badge("All");
+                    let total = app.sessions.len();
+                    let _ = ui.badge(&format!("All ({total})"));
                 }
             };
         });
@@ -527,6 +653,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
                     ("→", "detail"),
                     ("Enter", "select"),
                     ("^S", "sort"),
+                    ("^G", "group"),
                     ("^D", "delete"),
                     ("?", "help"),
                     ("Esc", "quit"),
@@ -557,6 +684,256 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         app.search_textarea.cursor_row = 0;
         app.search_textarea.cursor_col = merged.chars().count();
     }
+}
+
+fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
+    let esc = ui.consume_key_code(slt::KeyCode::Esc);
+    let enter = ui.consume_key_code(slt::KeyCode::Enter);
+    let up = ui.consume_key_code(slt::KeyCode::Up);
+    let down = ui.consume_key_code(slt::KeyCode::Down);
+    let space = ui.consume_key(' ');
+    let ctrl_up =
+        ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
+    let ctrl_down =
+        ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
+    let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
+    if ctrl_up {
+        ui.consume_key('p');
+        ui.consume_key('k');
+    }
+    if ctrl_down {
+        ui.consume_key('n');
+        ui.consume_key('j');
+    }
+    if ctrl_group {
+        ui.consume_key('g');
+    }
+
+    if esc || ctrl_group {
+        app.mode = Mode::Browse;
+        return;
+    }
+
+    let total_rows = app.grouped_row_count();
+    if (up || ctrl_up) && app.grouped_selected > 0 {
+        app.grouped_selected -= 1;
+    }
+    if (down || ctrl_down) && app.grouped_selected + 1 < total_rows {
+        app.grouped_selected += 1;
+    }
+
+    // Enter/Space on header: toggle expand. Enter on child: open action menu.
+    if enter || space {
+        if let Some((gi, child)) = app.grouped_row_at(app.grouped_selected) {
+            match child {
+                None => {
+                    let path = app.groups[gi].project_path.clone();
+                    if app.group_expanded.contains(&path) {
+                        app.group_expanded.remove(&path);
+                    } else {
+                        app.group_expanded.insert(path);
+                    }
+                }
+                Some(ci) => {
+                    let session_idx = app.groups[gi].sessions[ci];
+                    // Find this session in filtered_indices to set app.selected
+                    if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
+                        app.selected = vi;
+                        app.action_index = 0;
+                        app.mode = Mode::ActionSelect;
+                    }
+                }
+            }
+        }
+    }
+
+    // Scroll
+    let visible = app.viewport_height.max(1);
+    if app.grouped_selected < app.grouped_scroll {
+        app.grouped_scroll = app.grouped_selected;
+    } else if app.grouped_selected >= app.grouped_scroll + visible {
+        app.grouped_scroll = app.grouped_selected - visible + 1;
+    }
+
+    // --- Render ---
+    let _ = ui.col(|ui| {
+        ui.text("");
+        let _ = ui.container().pl(2).pr(1).row(|ui| {
+            ui.text("Project View").fg(BRIGHT_WHITE).bold();
+            ui.spacer();
+            let total_projects = app.groups.len();
+            let total_sessions = app.filtered_indices.len();
+            ui.text(format!(
+                "{total_projects} projects, {total_sessions} sessions"
+            ))
+            .fg(GRAY_500);
+        });
+        ui.separator_colored(SEPARATOR);
+
+        let _ = ui.container().grow(1).pr(1).col(|ui| {
+            if app.groups.is_empty() {
+                let _ = ui.container().pl(2).col(|ui| {
+                    let _ = ui.empty_state("No projects", "Try a different filter");
+                });
+                return;
+            }
+
+            let total_width = ui.width() as usize;
+            let end = (app.grouped_scroll + visible).min(total_rows);
+            let mut row_idx = 0;
+            for group in app.groups.iter() {
+                let expanded = app.group_expanded.contains(&group.project_path);
+                let session_count = group.sessions.len();
+
+                // Get most recent timestamp for the group
+                let latest_time = group
+                    .sessions
+                    .first()
+                    .map(|&i| app.sessions[i].time_display())
+                    .unwrap_or_default();
+                // Agents in this group
+                let mut agent_set: Vec<Agent> = Vec::new();
+                for &idx in &group.sessions {
+                    let a = app.sessions[idx].agent;
+                    if !agent_set.contains(&a) {
+                        agent_set.push(a);
+                    }
+                }
+
+                // Header row
+                if row_idx >= app.grouped_scroll && row_idx < end {
+                    let is_selected = row_idx == app.grouped_selected;
+                    let bg = if is_selected {
+                        HIGHLIGHT_BG
+                    } else {
+                        slt::Color::Reset
+                    };
+                    let arrow = if expanded { "\u{25be}" } else { "\u{25b8}" };
+                    let display_path = if let Some(home) = dirs::home_dir() {
+                        if let Some(rest) =
+                            group.project_path.strip_prefix(home.to_str().unwrap_or(""))
+                        {
+                            format!("~{rest}")
+                        } else {
+                            group.project_path.clone()
+                        }
+                    } else {
+                        group.project_path.clone()
+                    };
+
+                    let _ = ui.row(|ui| {
+                        ui.styled(format!(" {arrow} "), slt::Style::new().fg(GRAY_400).bg(bg));
+                        ui.styled(
+                            group.project_name.clone(),
+                            slt::Style::new().fg(BRIGHT_WHITE).bold().bg(bg),
+                        );
+                        ui.styled(
+                            format!(" ({session_count})"),
+                            slt::Style::new().fg(YELLOW).bg(bg),
+                        );
+                        // Show agent badges inline
+                        for a in &agent_set {
+                            ui.styled(
+                                format!(" {a}"),
+                                slt::Style::new().fg(agent_color(*a)).bg(bg),
+                            );
+                        }
+                        ui.styled("  ".to_string(), slt::Style::new().bg(bg));
+                        ui.styled(display_path, slt::Style::new().fg(GRAY_500).bg(bg));
+                        ui.spacer();
+                        ui.styled(
+                            format!("  {latest_time} "),
+                            slt::Style::new().fg(VIOLET).bg(bg),
+                        );
+                    });
+                }
+                row_idx += 1;
+
+                // Child rows (if expanded)
+                if expanded {
+                    for (ci, &session_idx) in group.sessions.iter().enumerate() {
+                        if row_idx >= app.grouped_scroll && row_idx < end {
+                            let s = &app.sessions[session_idx];
+                            let is_selected = row_idx == app.grouped_selected;
+                            let bg = if is_selected {
+                                HIGHLIGHT_BG
+                            } else {
+                                slt::Color::Reset
+                            };
+                            let is_last = ci == group.sessions.len() - 1;
+                            let tree_char = if is_last { "  └─ " } else { "  ├─ " };
+                            let is_pinned = app.pinned_sessions.contains(&s.session_id);
+                            let pin_str = if is_pinned { "*" } else { " " };
+
+                            // Calculate available space for summary
+                            let fixed_width = 5 + 1 + 12 + 2 + 16; // tree + pin + agent + gap + time
+                            let git_width = s.git_branch.as_ref().map(|b| b.len() + 2).unwrap_or(0);
+                            let summary_max =
+                                total_width.saturating_sub(fixed_width + git_width + 2);
+
+                            let summary = s
+                                .summaries
+                                .first()
+                                .map(|t| truncate_str(t, summary_max.max(10)))
+                                .unwrap_or_default();
+
+                            let _ = ui.row(|ui| {
+                                ui.styled(
+                                    tree_char.to_string(),
+                                    slt::Style::new().fg(SEPARATOR).bg(bg),
+                                );
+                                if is_pinned {
+                                    ui.styled(
+                                        pin_str.to_string(),
+                                        slt::Style::new().fg(YELLOW).bold().bg(bg),
+                                    );
+                                } else {
+                                    ui.styled(pin_str.to_string(), slt::Style::new().bg(bg));
+                                }
+                                ui.styled(
+                                    format!("{:<12}", s.agent.to_string()),
+                                    slt::Style::new().fg(agent_color(s.agent)).bold().bg(bg),
+                                );
+                                if !summary.is_empty() {
+                                    ui.styled(
+                                        format!("  {summary}"),
+                                        slt::Style::new().fg(GRAY_400).bg(bg),
+                                    );
+                                }
+                                ui.spacer();
+                                if let Some(branch) = &s.git_branch {
+                                    ui.styled(
+                                        branch.to_string(),
+                                        slt::Style::new().fg(GREEN_400).bg(bg),
+                                    );
+                                }
+                                ui.styled(
+                                    format!("  {} ", s.time_display()),
+                                    slt::Style::new().fg(GRAY_500).bg(bg),
+                                );
+                            });
+                        }
+                        row_idx += 1;
+                    }
+                }
+            }
+        });
+
+        ui.separator_colored(SEPARATOR);
+        let _ = ui.container().pr(1).row(|ui| {
+            ui.spacer();
+            let _ = ui.help_colored(
+                &[
+                    ("↑↓", "nav"),
+                    ("Enter/Space", "expand"),
+                    ("^G", "flat view"),
+                    ("Esc", "back"),
+                ],
+                GRAY_500,
+                SEPARATOR,
+            );
+        });
+    });
 }
 
 fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
@@ -654,7 +1031,19 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
                     slt::Color::Reset
                 };
                 let indicator = format!(" {}) ", i + 1);
-                let label = act.to_string();
+                let label = if *act == Action::Pin {
+                    let is_pinned = app
+                        .selected_session()
+                        .map(|s| app.pinned_sessions.contains(&s.session_id))
+                        .unwrap_or(false);
+                    if is_pinned {
+                        "Unpin Session".to_string()
+                    } else {
+                        "Pin Session".to_string()
+                    }
+                } else {
+                    act.to_string()
+                };
                 let base_style = if *act == Action::Delete {
                     slt::Style::new().fg(RED).bg(bg)
                 } else if *act == Action::Back {
@@ -733,6 +1122,19 @@ fn dispatch_action(
         Action::Delete => {
             app.delete_index = 1;
             app.mode = Mode::DeleteConfirm;
+        }
+        Action::Pin => {
+            if let Some(session) = app.selected_session() {
+                let id = session.session_id.clone();
+                if let Some(pos) = app.pinned_sessions.iter().position(|s| s == &id) {
+                    app.pinned_sessions.remove(pos);
+                } else {
+                    app.pinned_sessions.push(id);
+                }
+                app.save_settings();
+                app.apply_sort();
+            }
+            app.mode = Mode::Browse;
         }
         _ => {
             if let Some(session) = app.selected_session().cloned() {
@@ -1696,7 +2098,13 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
                 render_chunks(ui, &chunks);
             });
         } else {
-            let indicator = if is_selected { "> " } else { "  " };
+            let is_pinned = app.pinned_sessions.contains(&session.session_id);
+            let indicator = match (is_selected, is_pinned) {
+                (true, true) => ">*",
+                (true, false) => "> ",
+                (false, true) => " *",
+                (false, false) => "  ",
+            };
             let match_positions = app.match_positions.get(vi).map(Vec::as_slice);
             let summary_offset = app
                 .summary_offsets
@@ -1716,10 +2124,12 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
             );
 
             let _ = ui.row(|ui| {
-                ui.styled(
-                    indicator.to_string(),
-                    slt::Style::new().fg(slt::Color::White).bg(bg),
-                );
+                let ind_style = if is_pinned {
+                    slt::Style::new().fg(YELLOW).bold().bg(bg)
+                } else {
+                    slt::Style::new().fg(slt::Color::White).bg(bg)
+                };
+                ui.styled(indicator.to_string(), ind_style);
                 render_chunks(ui, &chunks);
             });
         }
