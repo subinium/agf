@@ -88,7 +88,7 @@ fn print_text(sessions: &[Session]) {
             by_agent.push((*a_type, count));
         }
     }
-    by_agent.sort_by(|x, y| y.1.cmp(&x.1));
+    by_agent.sort_by_key(|y| std::cmp::Reverse(y.1));
     let max_agent_count = by_agent.first().map(|(_, c)| *c).unwrap_or(1);
 
     let col_width: usize = 14; // fixed column for agent names
@@ -131,7 +131,7 @@ fn print_text(sessions: &[Session]) {
         .into_iter()
         .map(|(name, (count, agent))| (name, count, agent.unwrap_or(Agent::ClaudeCode)))
         .collect();
-    project_list.sort_by(|x, y| y.1.cmp(&x.1));
+    project_list.sort_by_key(|y| std::cmp::Reverse(y.1));
     project_list.truncate(10);
     let max_proj_count = project_list.first().map(|(_, c, _)| *c).unwrap_or(1);
 
@@ -203,11 +203,7 @@ fn print_text(sessions: &[Session]) {
         ("Older", older, (107, 114, 128)),          // gray
     ];
     for (label, count, (r, g, b)) in &time_items {
-        let filled = if max_time > 0 {
-            (count * bar_width) / max_time
-        } else {
-            0
-        };
+        let filled = (count * bar_width).checked_div(max_time).unwrap_or(0);
         let filled = filled.max(if *count > 0 { 1 } else { 0 });
         let empty = bar_width.saturating_sub(filled);
         let pad = 12usize.saturating_sub(label.len());

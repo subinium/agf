@@ -35,6 +35,6 @@ pub fn scan_all() -> Vec<Session> {
         .flat_map(|h| h.join().unwrap_or_default())
         .collect();
 
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
     sessions
 }
