@@ -10,7 +10,7 @@ categories = ["command-line-utilities"]
 readme = "README.md"
 
 [dependencies]
-superlighttui = "0.15"
+superlighttui = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
