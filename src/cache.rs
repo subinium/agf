@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Agent, Session};
 use crate::plugin;
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct CacheFile {
@@ -32,6 +32,7 @@ struct CachedSession {
     timestamp: i64,
     git_branch: Option<String>,
     worktree: Option<String>,
+    recap: Option<String>,
 }
 
 fn cache_path() -> PathBuf {
@@ -76,6 +77,7 @@ fn to_cached(s: &Session) -> CachedSession {
         timestamp: s.timestamp,
         git_branch: s.git_branch.clone(),
         worktree: s.worktree.clone(),
+        recap: s.recap.clone(),
     }
 }
 
@@ -90,6 +92,7 @@ fn from_cached(c: &CachedSession) -> Option<Session> {
         timestamp: c.timestamp,
         git_branch: c.git_branch.clone(),
         worktree: c.worktree.clone(),
+        recap: c.recap.clone(),
     })
 }
 

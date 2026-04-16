@@ -100,6 +100,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             timestamp,
             git_branch: None,
             worktree: None,
+            recap: None,
         });
     }
 

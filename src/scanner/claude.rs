@@ -25,12 +25,18 @@ struct SessionData {
     summaries: Vec<(f64, String)>, // (timestamp, display) pairs
 }
 
-/// Scan ~/.claude/projects/*/<sessionId>.jsonl to detect worktree sessions.
-/// Returns session_id → worktree_name for sessions started inside a worktree.
+/// Metadata extracted from per-session JSONL files.
+struct SessionMeta {
+    worktree: Option<String>,
+    recap: Option<String>, // most recent away_summary, optionally prefixed with aiTitle
+}
+
+/// Scan ~/.claude/projects/*/<sessionId>.jsonl to detect worktree sessions
+/// and extract recap (away_summary / aiTitle) metadata.
 ///
 /// `cwd` in the per-session JSONL is the actual working directory, which for
 /// worktree sessions looks like `<project>/.claude/worktrees/<name>`.
-fn scan_session_worktrees(claude_dir: &std::path::Path) -> HashMap<String, String> {
+fn scan_session_metadata(claude_dir: &std::path::Path) -> HashMap<String, SessionMeta> {
     let projects_dir = claude_dir.join("projects");
 
     let Ok(proj_entries) = fs::read_dir(&projects_dir) else {
@@ -62,24 +68,79 @@ fn scan_session_worktrees(claude_dir: &std::path::Path) -> HashMap<String, Strin
         }
     }
 
-    // Read the first 3 lines of each file in parallel to find worktree sessions.
     file_paths
         .into_par_iter()
         .filter_map(|(session_id, file_path)| {
             let file = fs::File::open(&file_path).ok()?;
-            for line in BufReader::new(file).lines().take(3) {
+            let reader = BufReader::new(file);
+            let mut worktree: Option<String> = None;
+            let mut latest_recap: Option<String> = None;
+            let mut latest_recap_ts: Option<String> = None;
+            let mut ai_title: Option<String> = None;
+
+            for line in reader.lines() {
                 let Ok(line) = line else { continue };
-                if let Ok(val) = serde_json::from_str::<Value>(&line) {
+                let Ok(val) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+
+                // Detect worktree from cwd (only first few lines matter, but we
+                // scan the whole file anyway for away_summary)
+                if worktree.is_none() {
                     if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str()) {
                         if let Some((_, wt)) = cwd.split_once("/.claude/worktrees/") {
                             if !wt.is_empty() {
-                                return Some((session_id, wt.to_string()));
+                                worktree = Some(wt.to_string());
                             }
                         }
                     }
                 }
+
+                // Extract aiTitle
+                if val.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
+                    if let Some(title) = val.get("aiTitle").and_then(|t| t.as_str()) {
+                        ai_title = Some(title.to_string());
+                    }
+                }
+
+                // Extract the most recent away_summary (recap)
+                if val.get("type").and_then(|t| t.as_str()) == Some("system")
+                    && val.get("subtype").and_then(|t| t.as_str()) == Some("away_summary")
+                {
+                    let ts = val
+                        .get("timestamp")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if latest_recap_ts
+                        .as_deref()
+                        .is_none_or(|prev| ts.as_str() > prev)
+                    {
+                        if let Some(content) = val.get("content").and_then(|c| c.as_str()) {
+                            // Strip the "(disable recaps in /config)" suffix
+                            let clean = content
+                                .trim_end_matches("(disable recaps in /config)")
+                                .trim();
+                            latest_recap = Some(clean.to_string());
+                            latest_recap_ts = Some(ts);
+                        }
+                    }
+                }
             }
-            None
+
+            // Build recap: prepend "recap: " and optionally aiTitle
+            let recap = match (ai_title, latest_recap) {
+                (Some(title), Some(summary)) => Some(format!("recap: {title} — {summary}")),
+                (None, Some(summary)) => Some(format!("recap: {summary}")),
+                (Some(title), None) => Some(title),
+                (None, None) => None,
+            };
+
+            if worktree.is_some() || recap.is_some() {
+                Some((session_id, SessionMeta { worktree, recap }))
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -111,7 +172,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         return Ok(Vec::new());
     }
 
-    let worktrees = scan_session_worktrees(&claude_dir);
+    let session_meta = scan_session_metadata(&claude_dir);
     let mut branch_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut sessions_map: HashMap<String, SessionData> = HashMap::new();
 
@@ -180,7 +241,8 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             //   - For worktree sessions this shows the root project's branch (e.g. "main"),
             //     which is displayed in the detail view alongside the worktree name.
             //   - For regular sessions this shows the project's current branch.
-            let worktree = worktrees.get(&session_id).cloned();
+            let meta = session_meta.get(&session_id);
+            let worktree = meta.and_then(|m| m.worktree.clone());
             let git_branch = branch_cache
                 .entry(project_path.clone())
                 .or_insert_with(|| read_git_branch(&project_path))
@@ -191,6 +253,8 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             let summaries: Vec<String> = data.summaries.into_iter().map(|(_, s)| s).collect();
 
+            let recap = meta.and_then(|m| m.recap.clone());
+
             Some(Session {
                 agent: Agent::ClaudeCode,
                 session_id,
@@ -200,6 +264,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 timestamp,
                 git_branch,
                 worktree,
+                recap,
             })
         })
         .collect();

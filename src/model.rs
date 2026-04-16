@@ -155,6 +155,7 @@ pub struct Session {
     pub timestamp: i64, // Unix ms
     pub git_branch: Option<String>,
     pub worktree: Option<String>,
+    pub recap: Option<String>, // Claude Code away_summary, optionally prefixed with aiTitle
 }
 
 impl Session {

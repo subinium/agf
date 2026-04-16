@@ -143,6 +143,7 @@ fn parse_session(path: &Path, project_path: &str, project_name: &str) -> Option<
             timestamp,
             git_branch: None,
             worktree: None,
+            recap: None,
         });
     }
 
@@ -164,6 +165,7 @@ fn parse_session(path: &Path, project_path: &str, project_name: &str) -> Option<
         timestamp,
         git_branch: None,
         worktree: None,
+        recap: None,
     })
 }
 

@@ -70,6 +70,7 @@ pub struct App {
     pub summary_offsets: HashMap<String, usize>,
     pub summary_search_count: usize,
     pub include_summaries: bool,
+    pub show_recap: bool,
     pub help_selected: usize,
     pub search_textarea: slt::TextareaState,
     pub cwd: Option<String>,
@@ -149,6 +150,7 @@ impl App {
             summary_offsets: HashMap::new(),
             summary_search_count,
             include_summaries,
+            show_recap: settings.show_recap,
             help_selected: 0,
             search_textarea,
             cwd,
@@ -281,6 +283,7 @@ impl App {
             "name_path".to_string()
         };
         settings.pinned_sessions = self.pinned_sessions.clone();
+        settings.show_recap = self.show_recap;
         settings.save_editable();
     }
 
@@ -871,9 +874,14 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
                             let summary_max =
                                 total_width.saturating_sub(fixed_width + git_width + 2);
 
-                            let summary = s
-                                .summaries
-                                .first()
+                            let summary_src = if app.show_recap {
+                                s.recap
+                                    .as_deref()
+                                    .or(s.summaries.first().map(String::as_str))
+                            } else {
+                                s.summaries.first().map(String::as_str)
+                            };
+                            let summary = summary_src
                                 .map(|t| truncate_str(t, summary_max.max(10)))
                                 .unwrap_or_default();
 
@@ -895,10 +903,21 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
                                     slt::Style::new().fg(agent_color(s.agent)).bold().bg(bg),
                                 );
                                 if !summary.is_empty() {
-                                    ui.styled(
-                                        format!("  {summary}"),
-                                        slt::Style::new().fg(GRAY_400).bg(bg),
-                                    );
+                                    if let Some(rest) = summary.strip_prefix("recap: ") {
+                                        ui.styled(
+                                            "  recap: ".to_string(),
+                                            slt::Style::new().fg(VIOLET).bg(bg),
+                                        );
+                                        ui.styled(
+                                            rest.to_string(),
+                                            slt::Style::new().fg(GRAY_400).bg(bg),
+                                        );
+                                    } else {
+                                        ui.styled(
+                                            format!("  {summary}"),
+                                            slt::Style::new().fg(GRAY_400).bg(bg),
+                                        );
+                                    }
                                 }
                                 ui.spacer();
                                 if let Some(branch) = &s.git_branch {
@@ -1860,6 +1879,18 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
             });
         }
 
+        if let Some(recap) = &session.recap {
+            ui.line(|ui| {
+                ui.text("  Recap:    ").fg(GRAY_500);
+            });
+            let max_width = (ui.width() as usize).saturating_sub(14);
+            let truncated = truncate_str(recap, max_width);
+            ui.line(|ui| {
+                ui.text("    ").fg(GRAY_500);
+                ui.text(truncated.clone()).fg(GRAY_400);
+            });
+        }
+
         if !session.summaries.is_empty() {
             ui.line(|ui| {
                 ui.text("  History:  ").fg(GRAY_500);
@@ -1898,7 +1929,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
     }
 
     if (ui.key_code(slt::KeyCode::Down) || ui.key_mod('j', slt::KeyModifiers::CONTROL))
-        && app.help_selected < 1
+        && app.help_selected < 2
     {
         app.help_selected += 1;
     }
@@ -1921,6 +1952,16 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
 
     if app.help_selected == 1 && ui.key('-') {
         app.summary_search_count = app.summary_search_count.saturating_sub(1).max(1);
+        app.save_settings();
+    }
+
+    if app.help_selected == 2
+        && (ui.key_code(slt::KeyCode::Enter)
+            || ui.key(' ')
+            || ui.key_code(slt::KeyCode::Left)
+            || ui.key_code(slt::KeyCode::Right))
+    {
+        app.show_recap = !app.show_recap;
         app.save_settings();
     }
 
@@ -2013,6 +2054,39 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
                 );
             });
 
+            // show_recap setting
+            let selected_recap = app.help_selected == 2;
+            let recap_bg = if selected_recap {
+                HIGHLIGHT_BG
+            } else {
+                slt::Color::Reset
+            };
+            let recap_label = if app.show_recap {
+                "on (show recap instead of last prompt)"
+            } else {
+                "off (default)"
+            };
+            let _ = ui.row(|ui| {
+                ui.styled(
+                    if selected_recap { "> " } else { "  " },
+                    slt::Style::new().fg(YELLOW).bg(recap_bg),
+                );
+                ui.styled(
+                    format!("{:<22}", "show_recap"),
+                    slt::Style::new().fg(BRIGHT_WHITE).bg(recap_bg),
+                );
+                ui.styled(
+                    recap_label,
+                    slt::Style::new()
+                        .fg(if selected_recap {
+                            BRIGHT_WHITE
+                        } else {
+                            GRAY_400
+                        })
+                        .bg(recap_bg),
+                );
+            });
+
             ui.text("");
             ui.text("Config").fg(GRAY_400).bold();
             ui.text("").dim();
@@ -2081,7 +2155,14 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
             } else {
                 slt::Style::new().fg(slt::Color::White).bg(bg)
             };
-            let summary_text = session.summaries.first().map(String::as_str);
+            let summary_text = if app.show_recap {
+                session
+                    .recap
+                    .as_deref()
+                    .or(session.summaries.first().map(String::as_str))
+            } else {
+                session.summaries.first().map(String::as_str)
+            };
             let chunks = build_session_row(
                 session,
                 bg,
@@ -2111,7 +2192,14 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
                 .get(&session.session_id)
                 .copied()
                 .unwrap_or(0);
-            let summary_text = session.summaries.get(summary_offset).map(String::as_str);
+            let summary_text = if app.show_recap && summary_offset == 0 {
+                session
+                    .recap
+                    .as_deref()
+                    .or(session.summaries.first().map(String::as_str))
+            } else {
+                session.summaries.get(summary_offset).map(String::as_str)
+            };
             let chunks = build_session_row(
                 session,
                 bg,
@@ -2258,7 +2346,12 @@ fn build_session_row(
             if max_summary > 5 {
                 let truncated = truncate_str(summary, max_summary);
                 chunks.push((sep.to_string(), slt::Style::new().bg(bg)));
-                chunks.push((truncated, slt::Style::new().fg(GRAY_400).bg(bg)));
+                if let Some(rest) = truncated.strip_prefix("recap: ") {
+                    chunks.push(("recap: ".to_string(), slt::Style::new().fg(VIOLET).bg(bg)));
+                    chunks.push((rest.to_string(), slt::Style::new().fg(GRAY_400).bg(bg)));
+                } else {
+                    chunks.push((truncated, slt::Style::new().fg(GRAY_400).bg(bg)));
+                }
             }
         }
     }

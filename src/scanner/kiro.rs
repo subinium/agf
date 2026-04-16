@@ -57,6 +57,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 timestamp: updated_at,
                 git_branch: None,
                 worktree: None,
+                recap: None,
             }
         })
         .collect();

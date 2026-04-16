@@ -106,6 +106,7 @@ fn scan_sqlite(
             timestamp,
             git_branch,
             worktree: None,
+            recap: None,
         });
     }
 
@@ -242,6 +243,7 @@ fn scan_jsonl(
             timestamp,
             git_branch,
             worktree: None,
+            recap: None,
         });
     }
 

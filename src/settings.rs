@@ -16,6 +16,8 @@ pub struct Settings {
     pub editor: Option<String>, // editor command (e.g. "code", "cursor"). Falls back to $EDITOR/$VISUAL
     #[serde(default)]
     pub pinned_sessions: Vec<String>, // session IDs pinned to top of list
+    #[serde(default)]
+    pub show_recap: bool, // show Claude Code recap (away_summary) instead of last prompt
 }
 
 fn default_summary_search_count() -> usize {
@@ -35,6 +37,7 @@ impl Default for Settings {
             search_scope: default_search_scope(),
             editor: None,
             pinned_sessions: Vec::new(),
+            show_recap: false,
         }
     }
 }
@@ -87,6 +90,11 @@ impl Settings {
             );
         } else {
             existing.remove("pinned_sessions");
+        }
+        if self.show_recap {
+            existing.insert("show_recap".to_string(), toml::Value::Boolean(true));
+        } else {
+            existing.remove("show_recap");
         }
 
         let _ = fs::write(&path, existing.to_string());
