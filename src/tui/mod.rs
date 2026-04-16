@@ -171,7 +171,9 @@ impl App {
 
     pub fn apply_sort(&mut self) {
         match self.sort_mode {
-            SortMode::Time => self.sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)),
+            SortMode::Time => self
+                .sessions
+                .sort_by_key(|s| std::cmp::Reverse(s.timestamp)),
             SortMode::Name => self.sessions.sort_by(|a, b| {
                 a.project_name
                     .to_lowercase()

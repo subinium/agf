@@ -99,7 +99,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
 
     // Sort by timestamp desc, keep only the most recent session per project
     // (pi --resume only resumes the latest session for a directory)
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
     let mut seen = HashSet::new();
     sessions.retain(|s| seen.insert(s.project_path.clone()));
 

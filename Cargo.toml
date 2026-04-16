@@ -1,6 +1,6 @@
 [package]
 name = "agf"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 description = "AI Agent Session Finder TUI — find, resume, and manage Claude Code, Codex, OpenCode, Gemini, Kiro, pi, and Cursor CLI sessions"
 license = "MIT"
@@ -28,5 +28,7 @@ sha2 = "0.10"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "fat"
+codegen-units = 1
 strip = true
+panic = "abort"

@@ -14,6 +14,8 @@ mod stats;
 mod tui;
 mod watch;
 
+use std::io::IsTerminal;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -156,12 +158,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or("");
 
             let cmd = action::resume_with_flags(chosen, flags);
-            if let Ok(file) = std::env::var("AGF_CMD_FILE") {
-                std::fs::write(&file, &cmd)?;
-            } else {
-                println!("{cmd}");
-            }
-            return Ok(());
+            return deliver_command(&cmd);
         }
         Some(Commands::List {
             agent,
@@ -233,14 +230,64 @@ fn main() -> anyhow::Result<()> {
         app.apply_sort();
     }
     if let Some(cmd) = app.run()? {
-        // Write command to AGF_CMD_FILE (temp file) — the shell wrapper evals it
-        if let Ok(file) = std::env::var("AGF_CMD_FILE") {
-            std::fs::write(&file, &cmd)?;
-        } else {
-            // Fallback for direct invocation (e.g., `agf resume`)
-            println!("{cmd}");
-        }
+        deliver_command(&cmd)?;
     }
 
+    Ok(())
+}
+
+/// Deliver a generated shell command to the parent context.
+///
+/// Priority:
+/// 1. `AGF_CMD_FILE` set  → write to file (shell wrapper eval path; normal install).
+/// 2. Interactive TTY     → exec the command via `sh -c` so Resume / New Session /
+///    Open runs immediately in the current terminal without requiring the user
+///    to copy-paste a printed command.
+/// 3. Non-interactive     → print to stdout (scripting-friendly fallback).
+///
+/// A command whose only effect is `cd` (no ` && `) needs shell integration to
+/// persist in the parent shell. We warn and still print the command so the
+/// user sees something actionable.
+fn deliver_command(cmd: &str) -> anyhow::Result<()> {
+    if let Ok(file) = std::env::var("AGF_CMD_FILE") {
+        std::fs::write(&file, cmd)?;
+        return Ok(());
+    }
+
+    let is_cd_only = !cmd.contains(" && ");
+
+    if is_cd_only {
+        eprintln!("⚠  Shell integration not active — `cd` won't persist in your shell.");
+        eprintln!("   Run `agf setup` to install the wrapper, then restart your shell.");
+        println!("{cmd}");
+        return Ok(());
+    }
+
+    if std::io::stdout().is_terminal() {
+        return exec_via_shell(cmd);
+    }
+
+    // Piped / redirected: preserve the printable contract so callers can capture output.
+    println!("{cmd}");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn exec_via_shell(cmd: &str) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new("sh").arg("-c").arg(cmd).exec();
+    // `exec` only returns on failure.
+    Err(anyhow::anyhow!("failed to exec shell: {err}"))
+}
+
+#[cfg(not(unix))]
+fn exec_via_shell(cmd: &str) -> anyhow::Result<()> {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .status()?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
     Ok(())
 }

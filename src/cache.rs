@@ -144,7 +144,7 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
         }
     }
 
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
     (sessions, stale)
 }
 
@@ -215,5 +215,5 @@ pub fn scan_stale_agents(stale: &[Agent], existing: &mut Vec<Session>) {
         }
     }
 
-    existing.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    existing.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
 }

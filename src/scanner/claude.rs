@@ -269,6 +269,6 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         })
         .collect();
 
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
     Ok(sessions)
 }

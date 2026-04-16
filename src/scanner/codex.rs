@@ -21,7 +21,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         sessions = scan_jsonl(&codex_dir, &summaries);
     }
 
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
     Ok(sessions)
 }
 
