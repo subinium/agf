@@ -1983,11 +1983,7 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         ui.separator_colored(SEPARATOR);
         let _ = ui.container().pl(1).row(|ui| {
             let _ = ui.help_colored(
-                &[
-                    ("↑↓", "cycle"),
-                    ("Enter", "actions"),
-                    ("Esc/←", "back"),
-                ],
+                &[("↑↓", "cycle"), ("Enter", "actions"), ("Esc/←", "back")],
                 GRAY_500,
                 SEPARATOR,
             );

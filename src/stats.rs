@@ -193,10 +193,10 @@ fn print_text(sessions: &[Session]) {
         .unwrap_or(1);
 
     let time_items = [
-        ("Last 24h", today, (52, 211, 153)),        // green
-        ("Last 7d", this_week, (139, 92, 246)),     // violet
-        ("Last 30d", this_month, (59, 130, 246)),   // blue
-        ("Older", older, (107, 114, 128)),          // gray
+        ("Last 24h", today, (52, 211, 153)),      // green
+        ("Last 7d", this_week, (139, 92, 246)),   // violet
+        ("Last 30d", this_month, (59, 130, 246)), // blue
+        ("Older", older, (107, 114, 128)),        // gray
     ];
     for (label, count, (r, g, b)) in &time_items {
         let filled = (count * bar_width).checked_div(max_time).unwrap_or(0);
