@@ -9,6 +9,7 @@ pub fn generate_command(
 
     match action {
         Action::Resume => {
+            // NOTE: Pi/Kiro CLI only resume latest; session_id ignored.
             let cmd = session.agent.resume_cmd(&session.session_id);
             Some(format!("cd {escaped_path} && {cmd}"))
         }
@@ -61,6 +62,7 @@ pub fn detect_editor() -> String {
 
 pub fn resume_with_flags(session: &Session, flags: &str) -> String {
     let escaped_path = shell_escape(&session.project_path);
+    // NOTE: Pi/Kiro CLI only resume latest; session_id ignored.
     let base_cmd = session.agent.resume_cmd(&session.session_id);
     format!("cd {escaped_path} && {base_cmd}{flags}")
 }

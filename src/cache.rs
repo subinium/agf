@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -97,14 +96,28 @@ fn from_cached(c: &CachedSession) -> Option<Session> {
 }
 
 fn get_max_mtime(paths: &[PathBuf]) -> u64 {
-    paths
-        .iter()
-        .filter_map(|p| fs::metadata(p).ok())
-        .filter_map(|m| m.modified().ok())
-        .filter_map(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .max()
-        .unwrap_or(0)
+    use walkdir::WalkDir;
+    let mut max = 0u64;
+    for p in paths {
+        if !p.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(p)
+            .max_depth(4)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if let Ok(m) = entry.metadata() {
+                if let Ok(t) = m.modified() {
+                    if let Ok(d) = t.duration_since(std::time::SystemTime::UNIX_EPOCH) {
+                        max = max.max(d.as_secs());
+                    }
+                }
+            }
+        }
+    }
+    max
 }
 
 /// Load cached sessions. Returns (sessions, stale_agents).
@@ -118,14 +131,33 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
 
     let cache: CacheFile = match serde_json::from_str::<CacheFile>(&content) {
         Ok(c) if c.version == CACHE_VERSION => c,
-        _ => return (Vec::new(), Agent::all().to_vec()),
+        Ok(c) => {
+            if std::env::var("AGF_DEBUG").is_ok() {
+                eprintln!(
+                    "[agf] cache version {} != {} → rescanning",
+                    c.version, CACHE_VERSION
+                );
+            }
+            return (Vec::new(), Agent::all().to_vec());
+        }
+        Err(e) => {
+            if std::env::var("AGF_DEBUG").is_ok() {
+                eprintln!("[agf] cache parse failed: {e} → rescanning");
+            }
+            return (Vec::new(), Agent::all().to_vec());
+        }
     };
 
+    let installed: std::collections::HashSet<Agent> =
+        crate::config::installed_agents().into_iter().collect();
     let plugins = plugin::all_plugins();
     let mut sessions = Vec::new();
     let mut stale = Vec::new();
 
     for p in &plugins {
+        if !installed.contains(&p.agent()) {
+            continue;
+        }
         let key = agent_to_str(p.agent());
         let current_mtime = get_max_mtime(&p.data_sources());
 
@@ -155,10 +187,15 @@ pub fn write_cache(sessions: &[Session]) {
         let _ = fs::create_dir_all(parent);
     }
 
+    let installed: std::collections::HashSet<Agent> =
+        crate::config::installed_agents().into_iter().collect();
     let plugins = plugin::all_plugins();
     let mut agents: HashMap<String, AgentCache> = HashMap::new();
 
     for p in &plugins {
+        if !installed.contains(&p.agent()) {
+            continue;
+        }
         let key = agent_to_str(p.agent()).to_string();
         let agent_sessions: Vec<CachedSession> = sessions
             .iter()
@@ -181,7 +218,10 @@ pub fn write_cache(sessions: &[Session]) {
     };
 
     if let Ok(json) = serde_json::to_string(&cache) {
-        let _ = fs::write(&path, json);
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, json).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
     }
 }
 
@@ -189,18 +229,26 @@ pub fn write_cache(sessions: &[Session]) {
 pub fn scan_stale_agents(stale: &[Agent], existing: &mut Vec<Session>) {
     use std::thread;
 
+    let installed: std::collections::HashSet<Agent> =
+        crate::config::installed_agents().into_iter().collect();
+    let stale: Vec<Agent> = stale
+        .iter()
+        .copied()
+        .filter(|a| installed.contains(a))
+        .collect();
+
     let handles: Vec<_> = stale
         .iter()
         .map(|agent| {
             let agent = *agent;
-            thread::spawn(move || {
-                let plugins = plugin::all_plugins();
-                for p in &plugins {
-                    if p.agent() == agent {
-                        return p.scan();
-                    }
-                }
-                Vec::new()
+            thread::spawn(move || match agent {
+                Agent::ClaudeCode => crate::scanner::claude::scan().unwrap_or_default(),
+                Agent::Codex => crate::scanner::codex::scan().unwrap_or_default(),
+                Agent::OpenCode => crate::scanner::opencode::scan().unwrap_or_default(),
+                Agent::Pi => crate::scanner::pi::scan().unwrap_or_default(),
+                Agent::Kiro => crate::scanner::kiro::scan().unwrap_or_default(),
+                Agent::CursorAgent => crate::scanner::cursor_agent::scan().unwrap_or_default(),
+                Agent::Gemini => crate::scanner::gemini::scan().unwrap_or_default(),
             })
         })
         .collect();

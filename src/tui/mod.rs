@@ -81,6 +81,9 @@ pub struct App {
     pub group_expanded: HashSet<String>,
     pub grouped_selected: usize,
     pub grouped_scroll: usize,
+    /// Cached max project-name column width across the current filtered list.
+    /// Computed in `update_filter()`; invalidated in `apply_sort()`.
+    pub name_col_width_cache: Option<usize>,
     fuzzy: FuzzyMatcher,
 }
 
@@ -92,6 +95,7 @@ impl App {
         include_summaries: bool,
         cwd: Option<String>,
         pinned_sessions: Vec<String>,
+        settings: crate::settings::Settings,
     ) -> Self {
         let agents = installed_agents();
 
@@ -126,7 +130,7 @@ impl App {
             }
             ta
         };
-        let settings = crate::settings::Settings::load();
+        let show_recap = settings.show_recap;
         let mut app = Self {
             sessions,
             filtered_indices,
@@ -150,7 +154,7 @@ impl App {
             summary_offsets: HashMap::new(),
             summary_search_count,
             include_summaries,
-            show_recap: settings.show_recap,
+            show_recap,
             help_selected: 0,
             search_textarea,
             cwd,
@@ -161,6 +165,7 @@ impl App {
             group_expanded: HashSet::new(),
             grouped_selected: 0,
             grouped_scroll: 0,
+            name_col_width_cache: None,
             fuzzy: FuzzyMatcher::new(),
         };
         if !app.query.is_empty() {
@@ -170,6 +175,10 @@ impl App {
     }
 
     pub fn apply_sort(&mut self) {
+        // Snapshot the currently selected session's id so we can restore the
+        // cursor position after the underlying Vec is reordered.
+        let pivot_id = self.selected_session().map(|s| s.session_id.clone());
+
         match self.sort_mode {
             SortMode::Time => self
                 .sessions
@@ -203,7 +212,22 @@ impl App {
             rank(a).cmp(&rank(b))
         });
 
+        // Sessions reordered → cached column width no longer valid.
+        self.name_col_width_cache = None;
+
         self.update_filter();
+
+        // Restore the selection to the same session after reordering.
+        if let Some(id) = pivot_id {
+            if let Some(new_pos) = self
+                .filtered_indices
+                .iter()
+                .position(|&i| self.sessions[i].session_id == id)
+            {
+                self.selected = new_pos;
+                self.adjust_scroll();
+            }
+        }
     }
 
     pub fn update_filter(&mut self) {
@@ -222,13 +246,11 @@ impl App {
             self.match_positions = vec![Vec::new(); agent_filtered.len()];
             self.filtered_indices = agent_filtered;
         } else {
-            let subset: Vec<Session> = agent_filtered
-                .iter()
-                .map(|&i| self.sessions[i].clone())
-                .collect();
-
+            // No-clone fuzzy search: fuzzy::filter iterates `sessions` via the
+            // provided indices slice so we don't need to materialize a subset.
             let results = self.fuzzy.filter(
-                &subset,
+                &self.sessions,
+                &agent_filtered,
                 &self.query,
                 self.summary_search_count,
                 self.include_summaries,
@@ -243,6 +265,16 @@ impl App {
         } else if self.selected >= self.filtered_indices.len() {
             self.selected = self.filtered_indices.len() - 1;
         }
+
+        // Recompute the cached project-name column width for the new filter set.
+        let name_col_width = self
+            .filtered_indices
+            .iter()
+            .map(|&i| UnicodeWidthStr::width(self.sessions[i].project_name.as_str()))
+            .max()
+            .unwrap_or(0)
+            .min(30); // cap at 30 chars to leave room for summary
+        self.name_col_width_cache = Some(name_col_width);
 
         self.adjust_scroll();
     }
@@ -379,14 +411,12 @@ impl App {
     }
 
     fn agents_with_sessions(&self) -> Vec<Agent> {
-        let mut seen = HashSet::new();
-        for s in &self.sessions {
-            seen.insert(s.agent);
-        }
+        // Reuse the pre-built agent_counts map: an agent is "present" iff it
+        // has at least one session (count > 0).
         Agent::all()
             .iter()
             .copied()
-            .filter(|a| seen.contains(a))
+            .filter(|a| self.agent_counts.get(a).is_some_and(|&n| n > 0))
             .collect()
     }
 
@@ -990,7 +1020,18 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
         if ui.key(key) {
             app.action_index = i;
-            dispatch_action(ui, app, actions[app.action_index], result);
+            // Number-key Resume should mirror the Enter flow: open the mode
+            // picker instead of dispatching Resume directly. Other actions
+            // dispatch immediately.
+            if actions[app.action_index] == Action::Resume {
+                if let Some(session) = app.selected_session() {
+                    app.resume_mode_options = session.agent.resume_mode_options().to_vec();
+                    app.resume_mode_index = 0;
+                    app.mode = Mode::ResumeSelect;
+                }
+            } else {
+                dispatch_action(ui, app, actions[app.action_index], result);
+            }
         }
     }
 
@@ -1000,7 +1041,15 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         if y >= 4 && y < 4 + action_count {
             let clicked = y - 4;
             app.action_index = clicked;
-            dispatch_action(ui, app, actions[app.action_index], result);
+            if actions[app.action_index] == Action::Resume {
+                if let Some(session) = app.selected_session() {
+                    app.resume_mode_options = session.agent.resume_mode_options().to_vec();
+                    app.resume_mode_index = 0;
+                    app.mode = Mode::ResumeSelect;
+                }
+            } else {
+                dispatch_action(ui, app, actions[app.action_index], result);
+            }
         }
     }
 
@@ -1650,14 +1699,13 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
         }
     }
 
-    if ui.key_code(slt::KeyCode::Up)
-        || ui.key_code(slt::KeyCode::Down)
-        || ui.key_code(slt::KeyCode::Left)
+    // Horizontal toggle only: Yes/No is a horizontal choice. Up/Down would
+    // be confusing (and easy to hit accidentally), so only Left/Right and
+    // Ctrl-h/l toggle.
+    if ui.key_code(slt::KeyCode::Left)
         || ui.key_code(slt::KeyCode::Right)
-        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
+        || ui.key('h')
+        || ui.key('l')
         || ui.key_mod('h', slt::KeyModifiers::CONTROL)
         || ui.key_mod('l', slt::KeyModifiers::CONTROL)
     {
@@ -1671,15 +1719,19 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
                 indices.sort_unstable_by(|a, b| b.cmp(a));
                 for idx in indices {
                     if idx < app.sessions.len() {
+                        let agent = app.sessions[idx].agent;
                         let _ = crate::delete::delete_session(&app.sessions[idx]);
                         app.sessions.remove(idx);
+                        decrement_agent_count(&mut app.agent_counts, agent);
                     }
                 }
                 app.selected_set.clear();
                 app.update_filter();
             } else if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
+                let agent = app.sessions[idx].agent;
                 let _ = crate::delete::delete_session(&app.sessions[idx]);
                 app.sessions.remove(idx);
+                decrement_agent_count(&mut app.agent_counts, agent);
                 app.update_filter();
             }
             app.mode = Mode::Browse;
@@ -1821,17 +1873,37 @@ fn render_bulk_delete_confirm(ui: &mut slt::Context, app: &App) {
 }
 
 fn ui_preview(ui: &mut slt::Context, app: &mut App) {
+    // Only Esc dismisses the preview. Enter opens the action menu.
+    // Left (or Ctrl-h) also goes back so users have a symmetrical "exit"
+    // gesture to the Right-to-enter they used to get here.
     if ui.key_code(slt::KeyCode::Esc)
         || ui.key_code(slt::KeyCode::Left)
-        || ui.key_code(slt::KeyCode::Right)
         || ui.key_mod('h', slt::KeyModifiers::CONTROL)
     {
         app.mode = Mode::Browse;
-    } else if ui.key_code(slt::KeyCode::Enter) {
+        return;
+    }
+    if ui.key_code(slt::KeyCode::Enter) {
         app.action_index = 0;
         app.mode = Mode::ActionSelect;
-    } else if any_key_pressed(ui) {
-        app.mode = Mode::Browse;
+        return;
+    }
+
+    // Up/Down (and Ctrl-p/n, Ctrl-k/j) cycle to the previous/next session
+    // within the current filter, keeping the preview open.
+    let up = ui.key_code(slt::KeyCode::Up)
+        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL);
+    let down = ui.key_code(slt::KeyCode::Down)
+        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL);
+    if up && app.selected > 0 {
+        app.selected -= 1;
+        app.adjust_scroll();
+    }
+    if down && !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
+        app.selected += 1;
+        app.adjust_scroll();
     }
 
     let Some(session) = app.selected_session() else {
@@ -1911,7 +1983,11 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         ui.separator_colored(SEPARATOR);
         let _ = ui.container().pl(1).row(|ui| {
             let _ = ui.help_colored(
-                &[("Enter", "actions"), ("Esc", "back"), ("Any", "back")],
+                &[
+                    ("↑↓", "cycle"),
+                    ("Enter", "actions"),
+                    ("Esc/←", "back"),
+                ],
                 GRAY_500,
                 SEPARATOR,
             );
@@ -2125,14 +2201,17 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
     let total_width = ui.width() as usize;
     let right_margin = 1usize;
 
-    // Compute max project name width across all filtered sessions for table alignment
-    let name_col_width = app
-        .filtered_indices
-        .iter()
-        .map(|&i| UnicodeWidthStr::width(app.sessions[i].project_name.as_str()))
-        .max()
-        .unwrap_or(0)
-        .min(30); // cap at 30 chars to leave room for summary
+    // Use the cached project-name column width computed in update_filter().
+    // Fallback path only runs if the cache was never populated (first frame
+    // before any filter), which is cheap since the list is small.
+    let name_col_width = app.name_col_width_cache.unwrap_or_else(|| {
+        app.filtered_indices
+            .iter()
+            .map(|&i| UnicodeWidthStr::width(app.sessions[i].project_name.as_str()))
+            .max()
+            .unwrap_or(0)
+            .min(30)
+    });
 
     for vi in app.scroll_offset..end {
         let session_idx = app.filtered_indices[vi];
@@ -2427,35 +2506,15 @@ fn highlight_text(
     chunks
 }
 
-fn any_key_pressed(ui: &slt::Context) -> bool {
-    if ui.key_code(slt::KeyCode::Esc)
-        || ui.key_code(slt::KeyCode::Enter)
-        || ui.key_code(slt::KeyCode::Backspace)
-        || ui.key_code(slt::KeyCode::Tab)
-        || ui.key_code(slt::KeyCode::BackTab)
-        || ui.key_code(slt::KeyCode::Up)
-        || ui.key_code(slt::KeyCode::Down)
-        || ui.key_code(slt::KeyCode::Left)
-        || ui.key_code(slt::KeyCode::Right)
-        || ui.key_code(slt::KeyCode::Home)
-        || ui.key_code(slt::KeyCode::End)
-        || ui.key_code(slt::KeyCode::PageUp)
-        || ui.key_code(slt::KeyCode::PageDown)
-        || ui.key_code(slt::KeyCode::Delete)
-    {
-        return true;
-    }
-    for code in 1u8..=12u8 {
-        if ui.key_code(slt::KeyCode::F(code)) {
-            return true;
+/// Decrement the per-agent session count after a delete. Removes the entry
+/// when the count drops to zero so `agents_with_sessions` stops listing it.
+fn decrement_agent_count(counts: &mut HashMap<Agent, usize>, agent: Agent) {
+    if let Some(n) = counts.get_mut(&agent) {
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            counts.remove(&agent);
         }
     }
-    for code in 32u8..=126u8 {
-        if ui.key(code as char) {
-            return true;
-        }
-    }
-    false
 }
 
 fn truncate_str(s: &str, max_width: usize) -> String {

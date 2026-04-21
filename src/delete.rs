@@ -10,6 +10,12 @@ use crate::model::{Agent, Session};
 /// Delete a session's data files. Returns Ok(()) on success.
 /// Only removes session data, NOT the project directory.
 pub fn delete_session(session: &Session) -> Result<(), io::Error> {
+    // Defense in depth: never accept a session_id that could escape the intended
+    // directory via path traversal. Agent scanners should already sanitize IDs.
+    debug_assert!(
+        !session.session_id.contains('/') && !session.session_id.contains(".."),
+        "session_id must not contain path separators or parent traversal",
+    );
     match session.agent {
         Agent::ClaudeCode => delete_claude_session(session),
         Agent::Codex => delete_codex_session(session),

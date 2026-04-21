@@ -112,6 +112,9 @@ fn scan_session_metadata(claude_dir: &std::path::Path) -> HashMap<String, Sessio
                         .and_then(|t| t.as_str())
                         .unwrap_or("")
                         .to_string();
+                    // Lexicographic comparison of RFC3339 timestamps with a
+                    // fixed format (e.g. `2026-04-21T12:34:56.789Z`) is
+                    // monotonic, so string order == chronological order.
                     if latest_recap_ts
                         .as_deref()
                         .is_none_or(|prev| ts.as_str() > prev)
@@ -149,14 +152,10 @@ fn scan_session_metadata(claude_dir: &std::path::Path) -> HashMap<String, Sessio
 /// Returns `None` if the directory is not a git repo or is in detached HEAD state.
 fn read_git_branch(project_path: &str) -> Option<String> {
     let head_path = std::path::Path::new(project_path).join(".git").join("HEAD");
-    let path = head_path.to_path_buf();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(fs::read_to_string(&path).ok());
-    });
-    let content = rx
-        .recv_timeout(std::time::Duration::from_millis(100))
-        .ok()??;
+    // `.git/HEAD` is a small (~30 byte) plain text file; a direct read is
+    // fast enough that the earlier thread+channel 100 ms timeout was
+    // unnecessary paranoia.
+    let content = fs::read_to_string(&head_path).ok()?;
     let branch = content.trim().strip_prefix("ref: refs/heads/")?.to_string();
     if branch.is_empty() {
         None

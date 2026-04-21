@@ -1,4 +1,5 @@
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use crate::model::{Agent, Session};
@@ -25,6 +26,7 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
     };
 
     let (tx, rx) = mpsc::channel::<(Vec<Session>, Vec<Agent>)>();
+    let refreshing = Arc::new(AtomicBool::new(false));
 
     slt::run_with(
         slt::RunConfig::default().title("agf watch").mouse(true),
@@ -36,14 +38,18 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
                 state.last_refresh = Instant::now();
             }
 
-            // Trigger background refresh
-            if state.last_refresh.elapsed() >= Duration::from_secs(interval_secs) {
+            // Trigger background refresh (guard against overlapping scans)
+            if state.last_refresh.elapsed() >= Duration::from_secs(interval_secs)
+                && !refreshing.swap(true, Ordering::SeqCst)
+            {
                 state.last_refresh = Instant::now();
                 let tx = tx.clone();
+                let r = Arc::clone(&refreshing);
                 std::thread::spawn(move || {
                     let sessions = scanner::scan_all();
                     let running = detect_running_agents();
                     let _ = tx.send((sessions, running));
+                    r.store(false, Ordering::SeqCst);
                 });
             }
 
@@ -167,7 +173,7 @@ fn detect_running_agents() -> Vec<Agent> {
         .copied()
         .filter(|agent| {
             std::process::Command::new("pgrep")
-                .args(["-f", agent.cli_name()])
+                .args(["-x", agent.cli_name()])
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false)
@@ -176,9 +182,11 @@ fn detect_running_agents() -> Vec<Agent> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let char_count = s.chars().count();
+    if char_count <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{prefix}…")
     }
 }

@@ -122,7 +122,7 @@ fn print_text(sessions: &[Session]) {
             .entry(s.project_name.clone())
             .or_insert((0, None));
         entry.0 += 1;
-        // Keep most common agent for color
+        // Keep first-seen agent (project color)
         if entry.1.is_none() {
             entry.1 = Some(s.agent);
         }
@@ -144,11 +144,7 @@ fn print_text(sessions: &[Session]) {
 
     for (name, count, agent) in &project_list {
         let (r, g, b) = agent.color();
-        let display = if name.len() > max_name_len {
-            format!("{}…", &name[..max_name_len - 1])
-        } else {
-            name.clone()
-        };
+        let display = truncate(name, max_name_len);
         let filled = (count * bar_width) / max_proj_count;
         let filled = filled.max(if *count > 0 { 1 } else { 0 });
         let empty = bar_width.saturating_sub(filled);
@@ -197,9 +193,9 @@ fn print_text(sessions: &[Session]) {
         .unwrap_or(1);
 
     let time_items = [
-        ("Today", today, (52, 211, 153)),           // green
-        ("This week", this_week, (139, 92, 246)),   // violet
-        ("This month", this_month, (59, 130, 246)), // blue
+        ("Last 24h", today, (52, 211, 153)),        // green
+        ("Last 7d", this_week, (139, 92, 246)),     // violet
+        ("Last 30d", this_month, (59, 130, 246)),   // blue
         ("Older", older, (107, 114, 128)),          // gray
     ];
     for (label, count, (r, g, b)) in &time_items {
@@ -266,5 +262,15 @@ fn print_json(sessions: &[Session]) {
     });
     if let Ok(s) = serde_json::to_string_pretty(&json) {
         println!("{s}");
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max {
+        s.to_string()
+    } else {
+        let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{prefix}…")
     }
 }

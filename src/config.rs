@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::error::AgfError;
 use crate::model::Agent;
@@ -41,12 +42,29 @@ pub fn kiro_data_dir() -> Result<PathBuf, AgfError> {
         .ok_or(AgfError::NoHomeDir)
 }
 
+/// Cached set of executable names found in `$PATH`. Built once per process so
+/// `is_agent_installed` does not fork a `which` subprocess per agent.
+fn path_executables() -> &'static HashSet<String> {
+    static CACHE: OnceLock<HashSet<String>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut set = HashSet::new();
+        if let Some(path) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path) {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            set.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        set
+    })
+}
+
 pub fn is_agent_installed(agent: Agent) -> bool {
-    Command::new("which")
-        .arg(agent.cli_name())
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    path_executables().contains(agent.cli_name())
 }
 
 pub fn installed_agents() -> Vec<Agent> {

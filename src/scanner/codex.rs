@@ -6,6 +6,7 @@ use rusqlite::Connection;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
+use crate::scanner::{first_line_truncated, read_first_line};
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let codex_dir = crate::config::codex_dir()?;
@@ -132,19 +133,6 @@ fn find_state_db(codex_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     candidates.into_iter().next()
 }
 
-/// Extract first line of text, truncated to max_len chars. Returns None if empty.
-fn first_line_truncated(s: &str, max_len: usize) -> Option<String> {
-    let line = s.lines().next().unwrap_or("").trim();
-    if line.is_empty() {
-        return None;
-    }
-    if line.len() > max_len {
-        Some(format!("{}…", &line[..max_len]))
-    } else {
-        Some(line.to_string())
-    }
-}
-
 /// Fallback: scan JSONL session files via walkdir (legacy format).
 fn scan_jsonl(
     codex_dir: &std::path::Path,
@@ -248,23 +236,6 @@ fn scan_jsonl(
     }
 
     sessions
-}
-
-/// Read only the first non-empty line of a file without loading the rest.
-fn read_first_line(path: &std::path::Path) -> Option<String> {
-    let file = File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line).ok()?;
-        if n == 0 {
-            return None;
-        }
-        if !line.trim().is_empty() {
-            return Some(line);
-        }
-    }
 }
 
 #[derive(serde::Deserialize)]

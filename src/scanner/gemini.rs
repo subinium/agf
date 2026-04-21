@@ -113,7 +113,7 @@ fn resolve_project(dir_name: &str, path_map: &HashMap<String, String>) -> (Strin
     }
 
     // Unknown hash: no path available, use truncated hash as display name
-    let short = format!("{}…", &dir_name[..dir_name.len().min(8)]);
+    let short = format!("{}…", crate::scanner::char_prefix(dir_name, 8));
     (String::new(), short)
 }
 
@@ -180,8 +180,13 @@ fn read_capped(path: &Path) -> Option<String> {
 
     let mut buf = vec![0u8; MAX_FILE_BYTES];
     let n = file.read(&mut buf).ok()?;
-    buf.truncate(n);
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    // Trim `n` to the last complete UTF-8 boundary so a mid-codepoint cut
+    // doesn't produce replacement characters in the tail.
+    let valid_len = std::str::from_utf8(&buf[..n])
+        .map(|_| n)
+        .unwrap_or_else(|e| e.valid_up_to());
+    let text = String::from_utf8_lossy(&buf[..valid_len]);
+    Some(text.into_owned())
 }
 
 /// Extract the first user message text from a fully-parsed JSON value.

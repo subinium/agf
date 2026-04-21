@@ -114,7 +114,8 @@ fn main() -> anyhow::Result<()> {
                 sessions = list::filter_by_agent(sessions, agent_name);
             }
             let mut fuzzy = fuzzy::FuzzyMatcher::new();
-            let results = fuzzy.filter(&sessions, &query, 5, false);
+            let all_indices: Vec<usize> = (0..sessions.len()).collect();
+            let results = fuzzy.filter(&sessions, &all_indices, &query, 5, false);
 
             if results.is_empty() {
                 eprintln!("No session matching '{query}'");
@@ -125,7 +126,7 @@ fn main() -> anyhow::Result<()> {
                 // Interactive: show top N and let user pick
                 let top_n = results.iter().take(n).collect::<Vec<_>>();
                 for (i, r) in top_n.iter().enumerate() {
-                    let s = &sessions[r.index];
+                    let s = &sessions[all_indices[r.index]];
                     eprintln!(
                         "  {}) {} | {} | {}",
                         i + 1,
@@ -139,9 +140,9 @@ fn main() -> anyhow::Result<()> {
                 std::io::stdin().read_line(&mut input)?;
                 let pick: usize = input.trim().parse().unwrap_or(1);
                 let idx = pick.saturating_sub(1).min(top_n.len() - 1);
-                &sessions[top_n[idx].index]
+                &sessions[all_indices[top_n[idx].index]]
             } else {
-                &sessions[results[0].index]
+                &sessions[all_indices[results[0].index]]
             };
 
             // Build resume command with optional mode flags
@@ -190,50 +191,98 @@ fn main() -> anyhow::Result<()> {
     }
 
     let config = settings::Settings::load();
-    // Use cache for faster TUI startup
-    let (mut sessions, stale_agents) = cache::load_cache();
-    if !stale_agents.is_empty() {
-        cache::scan_stale_agents(&stale_agents, &mut sessions);
-        cache::write_cache(&sessions);
-    }
 
-    // Apply max_sessions limit from config
-    if let Some(max) = config.max_sessions {
-        sessions.truncate(max);
-    }
+    // Enter alt-screen BEFORE scanning so the user doesn't see their shell prompt
+    // during the first-run scan (which can take 200ms-3s). The guard is scoped so
+    // it drops before `deliver_command()` runs — that path may `exec sh -c` and
+    // inherits terminal state.
+    let cmd_opt = {
+        let guard = AltScreenGuard::new();
 
-    if sessions.is_empty() {
-        eprintln!("No agent sessions found.");
-        return Ok(());
-    }
+        // Use cache for faster TUI startup
+        let (mut sessions, stale_agents) = cache::load_cache();
+        if !stale_agents.is_empty() {
+            cache::scan_stale_agents(&stale_agents, &mut sessions);
+            cache::write_cache(&sessions);
+        }
 
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.to_str().map(|s| s.to_string()));
-    let include_summaries = config.search_scope == "all";
-    let mut app = tui::App::new(
-        sessions,
-        cli.query,
-        config.summary_search_count,
-        include_summaries,
-        cwd,
-        config.pinned_sessions.clone(),
-    );
+        // Apply max_sessions limit from config
+        if let Some(max) = config.max_sessions {
+            sessions.truncate(max);
+        }
 
-    // Apply sort_by from config
-    if let Some(ref sort_by) = config.sort_by {
-        app.sort_mode = match sort_by.as_str() {
-            "name" => model::SortMode::Name,
-            "agent" => model::SortMode::Agent,
-            _ => model::SortMode::Time,
-        };
-        app.apply_sort();
-    }
-    if let Some(cmd) = app.run()? {
+        if sessions.is_empty() {
+            // Drop guard early so the message lands on the real terminal.
+            drop(guard);
+            eprintln!("No agent sessions found.");
+            return Ok(());
+        }
+
+        // Keep the guard alive for the full TUI session.
+        let _guard = guard;
+
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()));
+        let include_summaries = config.search_scope == "all";
+        let mut app = tui::App::new(
+            sessions,
+            cli.query,
+            config.summary_search_count,
+            include_summaries,
+            cwd,
+            config.pinned_sessions.clone(),
+            config.clone(),
+        );
+
+        // Apply sort_by from config
+        if let Some(ref sort_by) = config.sort_by {
+            app.sort_mode = match sort_by.as_str() {
+                "name" => model::SortMode::Name,
+                "agent" => model::SortMode::Agent,
+                _ => model::SortMode::Time,
+            };
+            app.apply_sort();
+        }
+        app.run()?
+    };
+
+    if let Some(cmd) = cmd_opt {
         deliver_command(&cmd)?;
     }
 
     Ok(())
+}
+
+/// RAII guard that enters the alternate screen and hides the cursor on
+/// construction, and restores both on drop. Uses raw ANSI escape codes to
+/// avoid taking a direct dependency on crossterm.
+///
+/// Safe to nest: SLT's `run_with` also enters the alt-screen via the same
+/// VT control sequence; entering twice is idempotent at the terminal level.
+struct AltScreenGuard;
+
+impl AltScreenGuard {
+    fn new() -> Self {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        // ESC[?1049h  enter alt-screen buffer
+        // ESC[?25l    hide cursor
+        let _ = out.write_all(b"\x1b[?1049h\x1b[?25l");
+        let _ = out.flush();
+        Self
+    }
+}
+
+impl Drop for AltScreenGuard {
+    fn drop(&mut self) {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        // ESC[?1049l  leave alt-screen buffer
+        // ESC[?25h    show cursor
+        let _ = out.write_all(b"\x1b[?1049l\x1b[?25h");
+        let _ = out.flush();
+    }
 }
 
 /// Deliver a generated shell command to the parent context.

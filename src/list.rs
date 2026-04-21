@@ -1,5 +1,7 @@
 use std::io::{self, IsTerminal, Write};
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::model::Session;
 
 pub enum OutputFormat {
@@ -76,7 +78,7 @@ fn print_table(sessions: &[Session]) {
 
     let max_project = sessions
         .iter()
-        .map(|s| s.project_name.len())
+        .map(|s| UnicodeWidthStr::width(s.project_name.as_str()))
         .max()
         .unwrap_or(7)
         .clamp(7, 25);
@@ -187,10 +189,12 @@ fn csv_escape(s: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let char_count = s.chars().count();
+    if char_count <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{prefix}…")
     }
 }
 

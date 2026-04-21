@@ -33,14 +33,14 @@ pub fn setup() -> anyhow::Result<()> {
             eprintln!("  eval \"$(agf init zsh)\"   # for zsh");
             eprintln!("  eval \"$(agf init bash)\"  # for bash");
             eprintln!("  agf init fish | source    # for fish");
-            return Ok(());
+            return Err(anyhow::anyhow!("unsupported shell: {shell_name}"));
         }
     };
 
-    // Check if already configured
+    // Check if already configured (match the marker we write below, not a loose substring)
     if rc_file.exists() {
         let content = fs::read_to_string(&rc_file)?;
-        if content.contains("agf init") {
+        if content.contains("# agf - AI Agent Session Finder") {
             eprintln!("Already configured in {}", rc_file.display());
             eprintln!("Restart your shell or run: source {}", rc_file.display());
             return Ok(());

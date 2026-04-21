@@ -52,7 +52,16 @@ impl Settings {
     pub fn load() -> Self {
         let path = config_path();
         match fs::read_to_string(&path) {
-            Ok(content) => toml::from_str(&content).unwrap_or_default(),
+            Ok(content) => match toml::from_str::<Settings>(&content) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "[agf] config parse error at {}: {e} — using defaults",
+                        path.display()
+                    );
+                    Self::default()
+                }
+            },
             Err(_) => Self::default(),
         }
     }
@@ -97,7 +106,11 @@ impl Settings {
             existing.remove("show_recap");
         }
 
-        let _ = fs::write(&path, existing.to_string());
+        let content = existing.to_string();
+        let tmp = path.with_extension("toml.tmp");
+        if fs::write(&tmp, &content).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
     }
 }
 

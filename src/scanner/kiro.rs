@@ -3,6 +3,8 @@ use rusqlite::Connection;
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
+use super::truncate;
+
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let db_path = crate::config::kiro_data_dir()?.join("data.sqlite3");
 
@@ -93,5 +95,3 @@ fn extract_summary(value: &str) -> Option<String> {
     }
     None
 }
-
-use super::truncate;

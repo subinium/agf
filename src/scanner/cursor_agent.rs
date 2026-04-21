@@ -6,6 +6,8 @@ use walkdir::WalkDir;
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
+use super::truncate;
+
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let cursor_dir = crate::config::cursor_dir()?;
     let projects_dir = cursor_dir.join("projects");
@@ -199,5 +201,3 @@ fn solve(parts: &[&str], idx: usize, current: &Path) -> Option<PathBuf> {
     }
     None
 }
-
-use super::truncate;

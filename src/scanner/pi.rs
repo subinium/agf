@@ -1,11 +1,11 @@
 use std::collections::HashSet;
-use std::fs;
 
 use serde::Deserialize;
 use walkdir::WalkDir;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
+use crate::scanner::read_first_line;
 
 #[derive(Deserialize)]
 struct PiSessionHeader {
@@ -33,18 +33,13 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             continue;
         }
 
-        // Read just enough for the first line
-        let content = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        // Read just the first line rather than loading the whole JSONL.
+        let first_line = match read_first_line(path) {
+            Some(line) => line,
+            None => continue,
         };
 
-        let first_line = match content.lines().next() {
-            Some(line) if !line.trim().is_empty() => line.trim(),
-            _ => continue,
-        };
-
-        let header: PiSessionHeader = match serde_json::from_str(first_line) {
+        let header: PiSessionHeader = match serde_json::from_str(first_line.trim()) {
             Ok(h) => h,
             Err(_) => continue,
         };
