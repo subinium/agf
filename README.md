@@ -152,8 +152,25 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 
 ## Requirements
 
-- macOS or Linux
+- macOS, Linux, or Windows (PowerShell 5.1+ / PowerShell 7+)
 - One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`
+
+### Shells
+
+`agf setup` auto-detects your shell and installs the wrapper. Supported shells:
+
+- **zsh / bash** — appends to `~/.zshrc` or `~/.bashrc`
+- **fish** — writes to `~/.config/fish/config.fish`
+- **PowerShell** (Windows or cross-platform `pwsh`) — writes to `$PROFILE.CurrentUserAllHosts` (`Documents\PowerShell\profile.ps1` on Windows, `~/.config/powershell/profile.ps1` elsewhere)
+
+If auto-detection misses your shell, run the matching `agf init` form manually:
+
+```bash
+eval "$(agf init zsh)"                               # zsh
+eval "$(agf init bash)"                              # bash
+agf init fish | source                               # fish
+agf init powershell | Out-String | Invoke-Expression # PowerShell
+```
 
 ## Contributing
 

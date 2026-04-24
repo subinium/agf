@@ -36,7 +36,7 @@ struct Cli {
 enum Commands {
     /// Output shell wrapper function for the given shell
     Init {
-        /// Shell type: zsh, bash, or fish
+        /// Shell type: zsh, bash, fish, or powershell (alias: pwsh)
         shell: String,
     },
     /// Auto-detect shell and add agf to your shell config
@@ -303,9 +303,8 @@ fn deliver_command(cmd: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let is_cd_only = !cmd.contains(" && ");
-
-    if is_cd_only {
+    let shell = shell::CommandShell::from_env();
+    if shell.is_cd_only(cmd) {
         eprintln!("⚠  Shell integration not active — `cd` won't persist in your shell.");
         eprintln!("   Run `agf setup` to install the wrapper, then restart your shell.");
         println!("{cmd}");
@@ -313,7 +312,7 @@ fn deliver_command(cmd: &str) -> anyhow::Result<()> {
     }
 
     if std::io::stdout().is_terminal() {
-        return exec_via_shell(cmd);
+        return exec_via_shell(cmd, shell);
     }
 
     // Piped / redirected: preserve the printable contract so callers can capture output.
@@ -322,17 +321,19 @@ fn deliver_command(cmd: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-fn exec_via_shell(cmd: &str) -> anyhow::Result<()> {
+fn exec_via_shell(cmd: &str, shell: shell::CommandShell) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new("sh").arg("-c").arg(cmd).exec();
+    let (exe, args) = shell.exec_parts();
+    let err = std::process::Command::new(exe).args(args).arg(cmd).exec();
     // `exec` only returns on failure.
     Err(anyhow::anyhow!("failed to exec shell: {err}"))
 }
 
 #[cfg(not(unix))]
-fn exec_via_shell(cmd: &str) -> anyhow::Result<()> {
-    let status = std::process::Command::new("sh")
-        .arg("-c")
+fn exec_via_shell(cmd: &str, shell: shell::CommandShell) -> anyhow::Result<()> {
+    let (exe, args) = shell.exec_parts();
+    let status = std::process::Command::new(exe)
+        .args(args)
         .arg(cmd)
         .status()?;
     if !status.success() {
