@@ -250,6 +250,13 @@ end"#;
 // commands (Set-Location + `; if ($?) { ... }` rather than `cd ... && ...`).
 // Invoke-Expression runs in the caller's scope, so `Set-Location` persists
 // after the wrapper returns — matching the POSIX `eval` semantics.
+//
+// `Get-Content -Encoding UTF8` is required: the agf binary writes the command
+// file as raw UTF-8, and Windows PowerShell 5.1's default read encoding is
+// the system ANSI code page (e.g. CP949 on Korean Windows, CP1252 on
+// Western). Without the explicit encoding, non-ASCII project paths round-trip
+// as mojibake and `Set-Location` fails. PS 7+ already defaults to UTF-8;
+// specifying it is a no-op there.
 const POWERSHELL_WRAPPER: &str = r#"function agf {
     $__agfExe = Get-Command -Name agf -CommandType Application -ErrorAction SilentlyContinue |
                 Select-Object -First 1
@@ -264,7 +271,7 @@ const POWERSHELL_WRAPPER: &str = r#"function agf {
         & $__agfExe.Source @args
         $__agfExit = $LASTEXITCODE
         if ($__agfExit -eq 0 -and (Test-Path -LiteralPath $__agfTmp)) {
-            $__agfResult = Get-Content -Raw -LiteralPath $__agfTmp
+            $__agfResult = Get-Content -Raw -LiteralPath $__agfTmp -Encoding UTF8
             if ($__agfResult) {
                 Invoke-Expression $__agfResult
             }
