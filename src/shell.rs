@@ -15,8 +15,14 @@ pub enum CommandShell {
 
 impl CommandShell {
     pub fn from_env() -> Self {
-        match std::env::var("AGF_SHELL").as_deref() {
-            Ok("powershell") | Ok("pwsh") => Self::PowerShell,
+        Self::from_name(std::env::var("AGF_SHELL").ok().as_deref())
+    }
+
+    /// Pure helper behind `from_env` — classifies a shell name string.
+    /// Exposed so tests can drive it without mutating process env.
+    fn from_name(name: Option<&str>) -> Self {
+        match name {
+            Some("powershell") | Some("pwsh") => Self::PowerShell,
             _ => Self::Posix,
         }
     }
@@ -60,6 +66,20 @@ impl CommandShell {
         match self {
             Self::Posix => !cmd.contains(" && "),
             Self::PowerShell => !cmd.contains("; if ($?) {"),
+        }
+    }
+
+    /// Executable name and leading args used to evaluate a generated command
+    /// string in this shell's syntax (e.g. `("sh", &["-c"])`).
+    pub fn exec_parts(&self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            Self::Posix => ("sh", &["-c"]),
+            // On Unix, `pwsh` is the cross-platform binary; on Windows either
+            // `pwsh` or the 5.1 `powershell.exe` work with the same flags.
+            #[cfg(unix)]
+            Self::PowerShell => ("pwsh", &["-NoProfile", "-Command"]),
+            #[cfg(not(unix))]
+            Self::PowerShell => ("powershell", &["-NoProfile", "-Command"]),
         }
     }
 }
@@ -152,14 +172,13 @@ fn powershell_profile_path() -> PathBuf {
     if cfg!(windows) {
         let docs = dirs::document_dir()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
-        let ps7 = docs.join("PowerShell");
         let ps5 = docs.join("WindowsPowerShell");
-        let dir = if ps7.exists() {
-            ps7
-        } else if ps5.exists() {
+        // Prefer PS 7 (`PowerShell`); fall back to PS 5.1 only when its dir
+        // exists and PS 7's does not. Created on demand by setup().
+        let dir = if ps5.exists() && !docs.join("PowerShell").exists() {
             ps5
         } else {
-            ps7
+            docs.join("PowerShell")
         };
         dir.join("profile.ps1")
     } else {
@@ -252,9 +271,7 @@ const POWERSHELL_WRAPPER: &str = r#"function agf {
         }
     }
     finally {
-        if (Test-Path -LiteralPath $__agfTmp) {
-            Remove-Item -Force -LiteralPath $__agfTmp -ErrorAction SilentlyContinue
-        }
+        Remove-Item -Force -LiteralPath $__agfTmp -ErrorAction SilentlyContinue
         Remove-Item -Path Env:AGF_CMD_FILE -ErrorAction SilentlyContinue
         Remove-Item -Path Env:AGF_SHELL -ErrorAction SilentlyContinue
     }
@@ -300,21 +317,17 @@ mod tests {
     }
 
     #[test]
-    fn from_env_reads_agf_shell() {
-        let prev = std::env::var("AGF_SHELL").ok();
-
-        std::env::set_var("AGF_SHELL", "powershell");
-        assert_eq!(CommandShell::from_env(), CommandShell::PowerShell);
-
-        std::env::set_var("AGF_SHELL", "pwsh");
-        assert_eq!(CommandShell::from_env(), CommandShell::PowerShell);
-
-        std::env::remove_var("AGF_SHELL");
-        assert_eq!(CommandShell::from_env(), CommandShell::Posix);
-
-        match prev {
-            Some(v) => std::env::set_var("AGF_SHELL", v),
-            None => std::env::remove_var("AGF_SHELL"),
-        }
+    fn from_name_classifies_shells() {
+        assert_eq!(
+            CommandShell::from_name(Some("powershell")),
+            CommandShell::PowerShell
+        );
+        assert_eq!(
+            CommandShell::from_name(Some("pwsh")),
+            CommandShell::PowerShell
+        );
+        assert_eq!(CommandShell::from_name(Some("bash")), CommandShell::Posix);
+        assert_eq!(CommandShell::from_name(Some("")), CommandShell::Posix);
+        assert_eq!(CommandShell::from_name(None), CommandShell::Posix);
     }
 }

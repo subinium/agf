@@ -1290,7 +1290,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
                 let indicator = format!(" {}) ", i + 1);
                 let preview = if let Some(s) = app.selected_session() {
                     let base = opt.agent.new_session_cmd();
-                    format!("cd {} && {base}", s.display_path())
+                    crate::shell::CommandShell::from_env().cd_and(&s.display_path(), base)
                 } else {
                     String::new()
                 };

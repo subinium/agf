@@ -34,7 +34,7 @@ pub fn action_preview(session: &Session, action: Action) -> String {
         Action::Resume => session.agent.resume_cmd(&session.session_id),
         Action::NewSession => "choose agent CLI...".to_string(),
         Action::Open => format!("{} .", detect_editor()),
-        Action::Cd => format!("cd {}", session.display_path()),
+        Action::Cd => CommandShell::from_env().cd_only(&session.display_path()),
         Action::Pin => "toggle pin".to_string(),
         Action::Delete => "remove session data".to_string(),
         Action::Back => "return to session list".to_string(),

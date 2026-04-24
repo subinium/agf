@@ -42,15 +42,9 @@ pub fn kiro_data_dir() -> Result<PathBuf, AgfError> {
         .ok_or(AgfError::NoHomeDir)
 }
 
-/// Cached set of executable names found in `$PATH`. Built once per process so
-/// `is_agent_installed` does not fork a `which` subprocess per agent.
-///
-/// On Windows the set is populated case-insensitively and additionally
-/// contains the *stem* of any file whose extension is in `%PATHEXT%`
-/// (e.g. both `claude.exe` and `claude` land in the set). Agents are
-/// registered with bare names like `claude`, so without stemming the
-/// lookup misses on Windows where the real file is `claude.exe` /
-/// `claude.cmd` / `claude.ps1`.
+/// Cached set of executable names found in `$PATH`, built once per process.
+/// On Windows entries are lower-cased and `%PATHEXT%` stems are inserted
+/// alongside the full filename so bare-name lookups match `.exe`/`.cmd`/etc.
 fn path_executables() -> &'static HashSet<String> {
     static CACHE: OnceLock<HashSet<String>> = OnceLock::new();
     CACHE.get_or_init(|| {
@@ -106,9 +100,6 @@ pub fn is_agent_installed(agent: Agent) -> bool {
     let name = agent.cli_name();
     let execs = path_executables();
     if cfg!(windows) {
-        // Names in the set are lower-cased on Windows to match the
-        // case-insensitive filesystem; cli_name() is already lowercase for
-        // all built-in agents, but normalize defensively.
         execs.contains(&name.to_lowercase())
     } else {
         execs.contains(name)

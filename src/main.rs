@@ -323,31 +323,19 @@ fn deliver_command(cmd: &str) -> anyhow::Result<()> {
 #[cfg(unix)]
 fn exec_via_shell(cmd: &str, shell: shell::CommandShell) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
-    let err = match shell {
-        shell::CommandShell::PowerShell => std::process::Command::new("pwsh")
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(cmd)
-            .exec(),
-        shell::CommandShell::Posix => std::process::Command::new("sh").arg("-c").arg(cmd).exec(),
-    };
+    let (exe, args) = shell.exec_parts();
+    let err = std::process::Command::new(exe).args(args).arg(cmd).exec();
     // `exec` only returns on failure.
     Err(anyhow::anyhow!("failed to exec shell: {err}"))
 }
 
 #[cfg(not(unix))]
 fn exec_via_shell(cmd: &str, shell: shell::CommandShell) -> anyhow::Result<()> {
-    let status = match shell {
-        shell::CommandShell::PowerShell => std::process::Command::new("powershell")
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(cmd)
-            .status()?,
-        shell::CommandShell::Posix => std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .status()?,
-    };
+    let (exe, args) = shell.exec_parts();
+    let status = std::process::Command::new(exe)
+        .args(args)
+        .arg(cmd)
+        .status()?;
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
