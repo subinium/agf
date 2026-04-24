@@ -44,16 +44,24 @@ pub fn kiro_data_dir() -> Result<PathBuf, AgfError> {
 
 /// Cached set of executable names found in `$PATH`. Built once per process so
 /// `is_agent_installed` does not fork a `which` subprocess per agent.
+///
+/// On Windows the set is populated case-insensitively and additionally
+/// contains the *stem* of any file whose extension is in `%PATHEXT%`
+/// (e.g. both `claude.exe` and `claude` land in the set). Agents are
+/// registered with bare names like `claude`, so without stemming the
+/// lookup misses on Windows where the real file is `claude.exe` /
+/// `claude.cmd` / `claude.ps1`.
 fn path_executables() -> &'static HashSet<String> {
     static CACHE: OnceLock<HashSet<String>> = OnceLock::new();
     CACHE.get_or_init(|| {
+        let pathext = windows_pathext();
         let mut set = HashSet::new();
         if let Some(path) = std::env::var_os("PATH") {
             for dir in std::env::split_paths(&path) {
                 if let Ok(entries) = std::fs::read_dir(&dir) {
                     for entry in entries.flatten() {
                         if let Some(name) = entry.file_name().to_str() {
-                            set.insert(name.to_string());
+                            insert_executable_name(&mut set, name, &pathext);
                         }
                     }
                 }
@@ -63,8 +71,48 @@ fn path_executables() -> &'static HashSet<String> {
     })
 }
 
+/// Return the list of PATHEXT suffixes (lower-cased, each beginning with `.`)
+/// on Windows; empty on other platforms.
+fn windows_pathext() -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    std::env::var("PATHEXT")
+        .unwrap_or_else(|_| String::from(".COM;.EXE;.BAT;.CMD"))
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect()
+}
+
+/// Insert `filename` into `set`. On Windows, also insert its lower-cased
+/// stem (without a `PATHEXT` suffix). On other platforms, insert verbatim.
+fn insert_executable_name(set: &mut HashSet<String>, filename: &str, pathext: &[String]) {
+    if cfg!(windows) {
+        let lower = filename.to_lowercase();
+        for ext in pathext {
+            if let Some(stem) = lower.strip_suffix(ext.as_str()) {
+                set.insert(stem.to_string());
+                break;
+            }
+        }
+        set.insert(lower);
+    } else {
+        set.insert(filename.to_string());
+    }
+}
+
 pub fn is_agent_installed(agent: Agent) -> bool {
-    path_executables().contains(agent.cli_name())
+    let name = agent.cli_name();
+    let execs = path_executables();
+    if cfg!(windows) {
+        // Names in the set are lower-cased on Windows to match the
+        // case-insensitive filesystem; cli_name() is already lowercase for
+        // all built-in agents, but normalize defensively.
+        execs.contains(&name.to_lowercase())
+    } else {
+        execs.contains(name)
+    }
 }
 
 pub fn installed_agents() -> Vec<Agent> {
@@ -73,4 +121,43 @@ pub fn installed_agents() -> Vec<Agent> {
         .copied()
         .filter(|a| is_agent_installed(*a))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn insert_executable_name_adds_stem_on_windows() {
+        let pathext: Vec<String> = [".com", ".exe", ".bat", ".cmd"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut set = HashSet::new();
+        insert_executable_name(&mut set, "Claude.EXE", &pathext);
+        // Full lower-cased name and stem both present.
+        assert!(set.contains("claude.exe"));
+        assert!(set.contains("claude"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn insert_executable_name_no_stem_when_ext_missing() {
+        let pathext: Vec<String> = [".exe"].iter().map(|s| s.to_string()).collect();
+        let mut set = HashSet::new();
+        insert_executable_name(&mut set, "README.md", &pathext);
+        assert!(set.contains("readme.md"));
+        // No bare "readme" stem should be inserted — .md is not in PATHEXT.
+        assert!(!set.contains("readme"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn insert_executable_name_verbatim_on_unix() {
+        let mut set = HashSet::new();
+        insert_executable_name(&mut set, "claude", &[]);
+        assert!(set.contains("claude"));
+        assert_eq!(set.len(), 1);
+    }
 }
