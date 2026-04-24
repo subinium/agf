@@ -1,28 +1,30 @@
 use crate::model::{Action, Agent, Session};
+use crate::shell::CommandShell;
 
 pub fn generate_command(
     session: &Session,
     action: Action,
     new_agent: Option<Agent>,
 ) -> Option<String> {
-    let escaped_path = shell_escape(&session.project_path);
+    let shell = CommandShell::from_env();
+    let quoted_path = shell.quote(&session.project_path);
 
     match action {
         Action::Resume => {
             // NOTE: Pi/Kiro CLI only resume latest; session_id ignored.
             let cmd = session.agent.resume_cmd(&session.session_id);
-            Some(format!("cd {escaped_path} && {cmd}"))
+            Some(shell.cd_and(&quoted_path, &cmd))
         }
         Action::NewSession => {
             let agent = new_agent.unwrap_or(session.agent);
             let cmd = agent.new_session_cmd();
-            Some(format!("cd {escaped_path} && {cmd}"))
+            Some(shell.cd_and(&quoted_path, cmd))
         }
         Action::Open => {
             let editor = detect_editor();
-            Some(format!("cd {escaped_path} && {editor} ."))
+            Some(shell.cd_and(&quoted_path, &format!("{editor} .")))
         }
-        Action::Cd => Some(format!("cd {escaped_path}")),
+        Action::Cd => Some(shell.cd_only(&quoted_path)),
         Action::Delete | Action::Back | Action::Pin => None,
     }
 }
@@ -61,18 +63,16 @@ pub fn detect_editor() -> String {
 }
 
 pub fn resume_with_flags(session: &Session, flags: &str) -> String {
-    let escaped_path = shell_escape(&session.project_path);
+    let shell = CommandShell::from_env();
+    let quoted_path = shell.quote(&session.project_path);
     // NOTE: Pi/Kiro CLI only resume latest; session_id ignored.
     let base_cmd = session.agent.resume_cmd(&session.session_id);
-    format!("cd {escaped_path} && {base_cmd}{flags}")
+    shell.cd_and(&quoted_path, &format!("{base_cmd}{flags}"))
 }
 
 pub fn new_session_with_flags(session: &Session, agent: Agent, flags: &str) -> Option<String> {
-    let escaped_path = shell_escape(&session.project_path);
+    let shell = CommandShell::from_env();
+    let quoted_path = shell.quote(&session.project_path);
     let base = agent.new_session_cmd();
-    Some(format!("cd {escaped_path} && {base}{flags}"))
-}
-
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    Some(shell.cd_and(&quoted_path, &format!("{base}{flags}")))
 }
