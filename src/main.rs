@@ -199,23 +199,30 @@ fn main() -> anyhow::Result<()> {
     let cmd_opt = {
         let guard = AltScreenGuard::new();
 
-        // Use cache for faster TUI startup
+        // Load whatever the cache has — even if stale, we open the TUI on it
+        // immediately so cold starts feel instant. Stale agents refresh in
+        // the background and stream their results into the running TUI.
         let (mut sessions, stale_agents) = cache::load_cache();
-        if !stale_agents.is_empty() {
-            cache::scan_stale_agents(&stale_agents, &mut sessions);
-            cache::write_cache(&sessions);
-        }
 
-        // Apply max_sessions limit from config
-        if let Some(max) = config.max_sessions {
-            sessions.truncate(max);
-        }
-
-        if sessions.is_empty() {
-            // Drop guard early so the message lands on the real terminal.
+        // Cold cache + no installed agents: nothing we can ever scan.
+        if sessions.is_empty() && stale_agents.is_empty() {
             drop(guard);
             eprintln!("No agent sessions found.");
             return Ok(());
+        }
+
+        let scan_rx = if !stale_agents.is_empty() {
+            Some(cache::start_stale_scan(&stale_agents))
+        } else {
+            None
+        };
+        let scanning_agents: std::collections::HashSet<model::Agent> =
+            stale_agents.iter().copied().collect();
+
+        // Apply max_sessions limit from config (the streamed-in agents will
+        // also re-truncate after each ingest in App::ingest_scan_result).
+        if let Some(max) = config.max_sessions {
+            sessions.truncate(max);
         }
 
         // Keep the guard alive for the full TUI session.
@@ -233,6 +240,8 @@ fn main() -> anyhow::Result<()> {
             cwd,
             config.pinned_sessions.clone(),
             config.clone(),
+            scan_rx,
+            scanning_agents,
         );
 
         // Apply sort_by from config
@@ -244,7 +253,11 @@ fn main() -> anyhow::Result<()> {
             };
             app.apply_sort();
         }
-        app.run()?
+        let result = app.run()?;
+        // Persist whatever sessions accumulated during the TUI lifetime so
+        // the next launch reflects all scans that completed before exit.
+        cache::write_cache(&app.sessions);
+        result
     };
 
     if let Some(cmd) = cmd_opt {

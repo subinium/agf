@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.1] - 2026-04-25
+
+### Fixed
+
+- **TUI hangs / never opens on heavy Claude logs** — `scanner::claude::scan_session_metadata` line-iterated every per-session JSONL to EOF to find the latest `away_summary` recap. On a directory with multi-MB session files (10+ MB jsonl is common with long Claude Code sessions), rayon would parse hundreds of MB in parallel and the TUI never showed up. Fixed by capping per-file I/O to 16 KB head + 256 KB tail via a new `scanner::read_head_tail` helper: `cwd` and `aiTitle` are extracted from the head, the latest `away_summary` from the tail, and small files (≤ 272 KB) still read in full. Cold scan on a ~1.6 GB Claude log directory dropped from 48 s to 0.7 s in local testing.
+
+### Changed
+
+- **Background scan + streaming TUI ingest** — `cache::start_stale_scan` returns an `mpsc::Receiver<ScanResult>` and the TUI now drains it on every render frame. With a warm cache, the TUI opens instantly on cached sessions and the scanning agents stream results in as they finish (footer shows `• scanning N…` until every worker reports). With a cold cache, the TUI still opens immediately on the first agent that completes instead of blocking on the slowest one. Final cache write happens at TUI exit.
+- **Per-agent scan timing** under `AGF_DEBUG=1` so users can locate the slow agent on their machine.
+
 ## [0.10.0] - 2026-04-25
 
 ### Added

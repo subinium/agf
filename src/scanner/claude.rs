@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 
 use rayon::prelude::*;
 
@@ -9,6 +9,19 @@ use serde_json::Value;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
+use crate::scanner::read_head_tail;
+
+/// Per-file I/O cap for `scan_session_metadata`. Files larger than the sum
+/// fall back to head + tail reads; smaller files are read in full. Sized so
+/// that:
+///   * `cwd` (logged once at session start, ~1 KB into the file) is always
+///     in the head slice;
+///   * `aiTitle` (emitted while the agent is forming project context, within
+///     the first few hundred lines) fits in the head slice;
+///   * `away_summary` recaps (appended on every idle, latest one wins) are
+///     reliably in the tail slice — 256 KB ≈ thousands of recap lines.
+const HEAD_BYTES: u64 = 16 * 1024;
+const TAIL_BYTES: u64 = 256 * 1024;
 
 #[derive(Deserialize)]
 struct ClaudeEntry {
@@ -71,64 +84,38 @@ fn scan_session_metadata(claude_dir: &std::path::Path) -> HashMap<String, Sessio
     file_paths
         .into_par_iter()
         .filter_map(|(session_id, file_path)| {
-            let file = fs::File::open(&file_path).ok()?;
-            let reader = BufReader::new(file);
+            let ht = read_head_tail(&file_path, HEAD_BYTES, TAIL_BYTES)?;
+
             let mut worktree: Option<String> = None;
-            let mut latest_recap: Option<String> = None;
-            let mut latest_recap_ts: Option<String> = None;
             let mut ai_title: Option<String> = None;
 
-            for line in reader.lines() {
-                let Ok(line) = line else { continue };
-                let Ok(val) = serde_json::from_str::<Value>(&line) else {
+            // Head slice: scan for worktree (cwd) + aiTitle. First-match
+            // semantics for both, matching the pre-cap behavior.
+            for line in ht.head.lines() {
+                if worktree.is_some() && ai_title.is_some() {
+                    break;
+                }
+                let Ok(val) = serde_json::from_str::<Value>(line) else {
                     continue;
                 };
+                extract_worktree(&val, &mut worktree);
+                extract_ai_title(&val, &mut ai_title);
+            }
 
-                // Detect worktree from cwd (only first few lines matter, but we
-                // scan the whole file anyway for away_summary)
-                if worktree.is_none() {
-                    if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str()) {
-                        if let Some((_, wt)) = cwd.split_once("/.claude/worktrees/") {
-                            if !wt.is_empty() {
-                                worktree = Some(wt.to_string());
-                            }
-                        }
-                    }
-                }
-
-                // Extract aiTitle
-                if val.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
-                    if let Some(title) = val.get("aiTitle").and_then(|t| t.as_str()) {
-                        ai_title = Some(title.to_string());
-                    }
-                }
-
-                // Extract the most recent away_summary (recap)
-                if val.get("type").and_then(|t| t.as_str()) == Some("system")
-                    && val.get("subtype").and_then(|t| t.as_str()) == Some("away_summary")
-                {
-                    let ts = val
-                        .get("timestamp")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    // Lexicographic comparison of RFC3339 timestamps with a
-                    // fixed format (e.g. `2026-04-21T12:34:56.789Z`) is
-                    // monotonic, so string order == chronological order.
-                    if latest_recap_ts
-                        .as_deref()
-                        .is_none_or(|prev| ts.as_str() > prev)
-                    {
-                        if let Some(content) = val.get("content").and_then(|c| c.as_str()) {
-                            // Strip the "(disable recaps in /config)" suffix
-                            let clean = content
-                                .trim_end_matches("(disable recaps in /config)")
-                                .trim();
-                            latest_recap = Some(clean.to_string());
-                            latest_recap_ts = Some(ts);
-                        }
-                    }
-                }
+            // Tail slice: scan for the latest away_summary. For small files
+            // (`!truncated`) the head already contains every line, so skip
+            // the redundant tail pass.
+            let mut latest_recap: Option<String> = None;
+            let mut latest_recap_ts: Option<String> = None;
+            let scan_tail = if ht.truncated { &ht.tail } else { &ht.head };
+            for line in scan_tail.lines() {
+                let Ok(val) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                // Late aiTitle wins on small files; tail-late aiTitle on
+                // truncated files is rare but harmless to capture.
+                extract_ai_title(&val, &mut ai_title);
+                extract_recap(&val, &mut latest_recap, &mut latest_recap_ts);
             }
 
             // Build recap: prepend "recap: " and optionally aiTitle
@@ -146,6 +133,60 @@ fn scan_session_metadata(claude_dir: &std::path::Path) -> HashMap<String, Sessio
             }
         })
         .collect()
+}
+
+fn extract_worktree(val: &Value, worktree: &mut Option<String>) {
+    if worktree.is_some() {
+        return;
+    }
+    if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str()) {
+        if let Some((_, wt)) = cwd.split_once("/.claude/worktrees/") {
+            if !wt.is_empty() {
+                *worktree = Some(wt.to_string());
+            }
+        }
+    }
+}
+
+fn extract_ai_title(val: &Value, ai_title: &mut Option<String>) {
+    if val.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
+        if let Some(title) = val.get("aiTitle").and_then(|t| t.as_str()) {
+            *ai_title = Some(title.to_string());
+        }
+    }
+}
+
+fn extract_recap(
+    val: &Value,
+    latest_recap: &mut Option<String>,
+    latest_recap_ts: &mut Option<String>,
+) {
+    if val.get("type").and_then(|t| t.as_str()) != Some("system")
+        || val.get("subtype").and_then(|t| t.as_str()) != Some("away_summary")
+    {
+        return;
+    }
+    let ts = val
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Lexicographic comparison of RFC3339 timestamps with a fixed format
+    // (e.g. `2026-04-21T12:34:56.789Z`) is monotonic, so string order ==
+    // chronological order.
+    if latest_recap_ts
+        .as_deref()
+        .is_none_or(|prev| ts.as_str() > prev)
+    {
+        if let Some(content) = val.get("content").and_then(|c| c.as_str()) {
+            // Strip the "(disable recaps in /config)" suffix
+            let clean = content
+                .trim_end_matches("(disable recaps in /config)")
+                .trim();
+            *latest_recap = Some(clean.to_string());
+            *latest_recap_ts = Some(ts);
+        }
+    }
 }
 
 /// Read the current git branch from the project root's `.git/HEAD`.

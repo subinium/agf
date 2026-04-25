@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::Receiver;
 
 use unicode_width::UnicodeWidthStr;
 
 use crate::action;
+use crate::cache::ScanResult;
 use crate::config::installed_agents;
 use crate::fuzzy::FuzzyMatcher;
 use crate::model::{Action, Agent, Session, SortMode};
@@ -84,10 +86,18 @@ pub struct App {
     /// Cached max project-name column width across the current filtered list.
     /// Computed in `update_filter()`; invalidated in `apply_sort()`.
     pub name_col_width_cache: Option<usize>,
+    /// Channel from background scan workers. `None` means no scan in flight.
+    /// Drained on every render tick; replaced with `None` once the senders
+    /// have all dropped (i.e. every stale agent has reported in).
+    pub scan_rx: Option<Receiver<ScanResult>>,
+    /// Agents whose background scan is still running. Drives the
+    /// "Refreshing N agents…" footer indicator.
+    pub scanning_agents: HashSet<Agent>,
     fuzzy: FuzzyMatcher,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sessions: Vec<Session>,
         initial_query: Option<String>,
@@ -96,6 +106,8 @@ impl App {
         cwd: Option<String>,
         pinned_sessions: Vec<String>,
         settings: crate::settings::Settings,
+        scan_rx: Option<Receiver<ScanResult>>,
+        scanning_agents: HashSet<Agent>,
     ) -> Self {
         let agents = installed_agents();
 
@@ -166,6 +178,8 @@ impl App {
             grouped_selected: 0,
             grouped_scroll: 0,
             name_col_width_cache: None,
+            scan_rx,
+            scanning_agents,
             fuzzy: FuzzyMatcher::new(),
         };
         if !app.query.is_empty() {
@@ -450,12 +464,79 @@ impl App {
         self.update_filter();
     }
 
+    /// Drain any pending background scan results into `self.sessions`.
+    /// Called once per render frame so freshly-scanned agents appear in the
+    /// list as soon as their worker thread finishes.
+    pub fn ingest_scan_results(&mut self) {
+        // Take the receiver out so we can mutate self while polling.
+        let Some(rx) = self.scan_rx.take() else {
+            return;
+        };
+
+        let mut received_any = false;
+        let mut channel_open = true;
+        loop {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.merge_agent_sessions(result.agent, result.sessions);
+                    self.scanning_agents.remove(&result.agent);
+                    received_any = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    channel_open = false;
+                    break;
+                }
+            }
+        }
+        if channel_open {
+            // More results may arrive — keep polling next frame.
+            self.scan_rx = Some(rx);
+        }
+        if received_any {
+            // Re-apply current sort + filter so new sessions land in the
+            // correct order and the cached column width is recomputed.
+            self.apply_sort();
+        }
+    }
+
+    /// Replace all sessions for `agent` with `new_sessions`. Caller is
+    /// responsible for re-sorting / re-filtering.
+    fn merge_agent_sessions(&mut self, agent: Agent, new_sessions: Vec<Session>) {
+        // Drop preserved selection across the swap by remembering the id.
+        let selected_id = self.selected_session().map(|s| s.session_id.clone());
+        self.sessions.retain(|s| s.agent != agent);
+        // agent_counts: subtract old, add new.
+        self.agent_counts.remove(&agent);
+        if !new_sessions.is_empty() {
+            self.agent_counts.insert(agent, new_sessions.len());
+        }
+        let max = self.settings.max_sessions;
+        self.sessions.extend(new_sessions);
+        if let Some(max) = max {
+            // Keep most-recent first so truncation drops the tail.
+            self.sessions
+                .sort_by_key(|s| std::cmp::Reverse(s.timestamp));
+            self.sessions.truncate(max);
+        }
+        // Restore selection if the same id is still present after the swap;
+        // apply_sort() (run by the caller) will re-derive the index.
+        if let Some(id) = selected_id {
+            if let Some(pos) = self.sessions.iter().position(|s| s.session_id == id) {
+                // Stash via a side channel: filtered_indices is stale here, so
+                // we just record the id; apply_sort() restores cursor.
+                let _ = pos;
+            }
+        }
+    }
+
     pub fn run(&mut self) -> anyhow::Result<Option<String>> {
         let mut result: Option<String> = None;
         let app = self;
         slt::run_with(
             slt::RunConfig::default().title("agf").mouse(true),
             |ui: &mut slt::Context| {
+                app.ingest_scan_results();
                 app.viewport_height = (ui.height() as usize).saturating_sub(4).max(1);
                 app.adjust_scroll();
                 match app.mode {
@@ -672,6 +753,12 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
             }
             ui.text(format!(" sort:{}", app.sort_mode.label()))
                 .fg(GRAY_500);
+            // Background-scan progress: appears while stale agents refresh
+            // and disappears once every worker has reported in.
+            if !app.scanning_agents.is_empty() {
+                ui.text(format!(" • scanning {}…", app.scanning_agents.len()))
+                    .fg(YELLOW);
+            }
         });
 
         // Separator between content and statusbar

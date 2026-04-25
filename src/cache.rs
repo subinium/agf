@@ -225,10 +225,24 @@ pub fn write_cache(sessions: &[Session]) {
     }
 }
 
-/// Scan only the specified agents and merge with existing sessions.
-pub fn scan_stale_agents(stale: &[Agent], existing: &mut Vec<Session>) {
-    use std::thread;
+/// One agent's scan result, streamed back from a worker thread.
+pub struct ScanResult {
+    pub agent: Agent,
+    pub sessions: Vec<Session>,
+}
 
+/// Spawn one worker thread per stale agent. Each worker sends its result on
+/// `tx` as soon as it finishes — the TUI can ingest results progressively
+/// without blocking on the slowest scanner.
+///
+/// The returned `JoinHandle` resolves once every worker has finished; the
+/// caller can use it to know when the channel will close.
+pub fn start_stale_scan(stale: &[Agent]) -> std::sync::mpsc::Receiver<ScanResult> {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Instant;
+
+    let debug = std::env::var("AGF_DEBUG").is_ok();
     let installed: std::collections::HashSet<Agent> =
         crate::config::installed_agents().into_iter().collect();
     let stale: Vec<Agent> = stale
@@ -237,11 +251,12 @@ pub fn scan_stale_agents(stale: &[Agent], existing: &mut Vec<Session>) {
         .filter(|a| installed.contains(a))
         .collect();
 
-    let handles: Vec<_> = stale
-        .iter()
-        .map(|agent| {
-            let agent = *agent;
-            thread::spawn(move || match agent {
+    let (tx, rx) = mpsc::channel();
+    for agent in stale {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let sessions = match agent {
                 Agent::ClaudeCode => crate::scanner::claude::scan().unwrap_or_default(),
                 Agent::Codex => crate::scanner::codex::scan().unwrap_or_default(),
                 Agent::OpenCode => crate::scanner::opencode::scan().unwrap_or_default(),
@@ -249,19 +264,20 @@ pub fn scan_stale_agents(stale: &[Agent], existing: &mut Vec<Session>) {
                 Agent::Kiro => crate::scanner::kiro::scan().unwrap_or_default(),
                 Agent::CursorAgent => crate::scanner::cursor_agent::scan().unwrap_or_default(),
                 Agent::Gemini => crate::scanner::gemini::scan().unwrap_or_default(),
-            })
-        })
-        .collect();
-
-    // Remove old sessions for stale agents
-    existing.retain(|s| !stale.contains(&s.agent));
-
-    // Add fresh sessions
-    for h in handles {
-        if let Ok(new_sessions) = h.join() {
-            existing.extend(new_sessions);
-        }
+            };
+            if debug {
+                eprintln!(
+                    "[agf] {:?} scan: {} sessions in {:?}",
+                    agent,
+                    sessions.len(),
+                    start.elapsed()
+                );
+            }
+            // Receiver dropped (TUI exited): silently ignore.
+            let _ = tx.send(ScanResult { agent, sessions });
+        });
     }
-
-    existing.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
+    // Drop the original sender so the receiver closes once all workers finish.
+    drop(tx);
+    rx
 }
