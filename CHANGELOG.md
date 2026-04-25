@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.0] - 2026-04-25
+
+### Added
+
+- **Windows / PowerShell support** (#22, by @MilkClouds) — `agf init powershell` (alias `pwsh`) emits a wrapper compatible with Windows PowerShell 5.1 and PowerShell 7+; `agf setup` auto-detects PowerShell on Windows and writes to `$PROFILE.CurrentUserAllHosts`. A new `CommandShell` (Posix / PowerShell), selected via the `AGF_SHELL` env var the wrapper sets, routes `action::*` and the TUI new-session preview through shell-specific quoting (`''` vs `'\''`) and `cd_and` (`Set-Location ...; if ($?) { ... }` vs `cd ... && ...`). POSIX behavior is unchanged when `AGF_SHELL` is unset.
+- **Windows agent detection** — `is_agent_installed` now matches `%PATHEXT%`-aware stems on Windows, so `claude.exe` / `claude.cmd` / `claude.ps1` resolve correctly. Previously every agent read as "not installed" on Windows and the TUI showed "No agent sessions found" even when sessions existed on disk.
+- **UTF-8 round-trip in PowerShell wrapper** — wrapper reads `AGF_CMD_FILE` with `-Encoding UTF8`, fixing CP949/CP1252 mojibake on Windows PowerShell 5.1 (Korean Windows etc.) so non-ASCII project paths `Set-Location` correctly.
+- **CI runs on Windows** — `windows-latest` job added so PATHEXT stemming, PowerShell command synthesis, and the wrapper UTF-8 contract cannot silently regress.
+- **Release ships Windows x86_64 binary** — `release.yml` matrix gains `x86_64-pc-windows-msvc`; tagged releases now include `agf-x86_64-pc-windows-msvc.zip` alongside the existing macOS/Linux tarballs.
+
+### Changed
+
+- **`CommandShell::from_env` cached via `OnceLock`** — the wrapper sets `AGF_SHELL` once before exec'ing `agf`, so the value is immutable for the process lifetime; caching collapses repeated env lookups on the TUI render path and at every `action::*` call.
+
 ## [0.9.0] - 2026-04-21
 
 ### Fixed
