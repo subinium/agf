@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// Which shell's command syntax is in effect for the current invocation.
 ///
@@ -14,8 +15,13 @@ pub enum CommandShell {
 }
 
 impl CommandShell {
+    /// Resolve the active shell once per process. The wrapper sets
+    /// `AGF_SHELL` before exec'ing `agf`, so the value never changes for the
+    /// lifetime of this binary — caching avoids per-frame env lookups in the
+    /// TUI render path and per-call lookups in `action.rs`.
     pub fn from_env() -> Self {
-        Self::from_name(std::env::var("AGF_SHELL").ok().as_deref())
+        static CACHE: OnceLock<CommandShell> = OnceLock::new();
+        *CACHE.get_or_init(|| Self::from_name(std::env::var("AGF_SHELL").ok().as_deref()))
     }
 
     /// Pure helper behind `from_env` — classifies a shell name string.
