@@ -256,7 +256,9 @@ fn main() -> anyhow::Result<()> {
         let result = app.run()?;
         // Persist whatever sessions accumulated during the TUI lifetime so
         // the next launch reflects all scans that completed before exit.
-        cache::write_cache(&app.sessions);
+        // Agents still scanning at exit keep their prior cache entry so we
+        // don't accidentally persist "empty + fresh-mtime" for them.
+        cache::write_cache(&app.sessions, &app.scanning_agents);
         result
     };
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.10.2] - 2026-04-25
+
+### Fixed
+
+- **Cache write race on early TUI exit (regression in 0.10.1)** — v0.10.1 introduced streaming background scans; if the user exited the TUI before a worker finished, `cache::write_cache` persisted that agent as `(empty session list, fresh mtime)`, hiding its sessions on the next launch until file mtime changed again. `write_cache` now takes the still-scanning agent set and carries the prior cache entry verbatim for those agents — only completed scans replace cache state.
+
 ## [0.10.1] - 2026-04-25
 
 ### Fixed

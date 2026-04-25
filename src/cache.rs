@@ -181,7 +181,13 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
 }
 
 /// Write all sessions to cache, grouped by agent.
-pub fn write_cache(sessions: &[Session]) {
+///
+/// `skip_agents` lists agents whose background scan did not complete this
+/// run (e.g. the user exited the TUI before the worker finished); for those
+/// we preserve the prior cache entry verbatim so we don't accidentally
+/// persist an empty session list with a fresh `mtime`, which would mark the
+/// agent "fresh" on the next launch and hide its sessions.
+pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet<Agent>) {
     let path = cache_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -192,8 +198,33 @@ pub fn write_cache(sessions: &[Session]) {
     let plugins = plugin::all_plugins();
     let mut agents: HashMap<String, AgentCache> = HashMap::new();
 
+    // Carry over prior cache entries for in-flight agents.
+    if !skip_agents.is_empty() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(prior) = serde_json::from_str::<CacheFile>(&content) {
+                if prior.version == CACHE_VERSION {
+                    for skip in skip_agents {
+                        let key = agent_to_str(*skip).to_string();
+                        if let Some(entry) = prior.agents.get(&key) {
+                            agents.insert(
+                                key,
+                                AgentCache {
+                                    mtime: entry.mtime,
+                                    sessions: entry.sessions.iter().map(clone_cached).collect(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     for p in &plugins {
         if !installed.contains(&p.agent()) {
+            continue;
+        }
+        if skip_agents.contains(&p.agent()) {
             continue;
         }
         let key = agent_to_str(p.agent()).to_string();
@@ -222,6 +253,20 @@ pub fn write_cache(sessions: &[Session]) {
         if fs::write(&tmp, json).is_ok() {
             let _ = fs::rename(&tmp, &path);
         }
+    }
+}
+
+fn clone_cached(c: &CachedSession) -> CachedSession {
+    CachedSession {
+        agent: c.agent.clone(),
+        session_id: c.session_id.clone(),
+        project_name: c.project_name.clone(),
+        project_path: c.project_path.clone(),
+        summaries: c.summaries.clone(),
+        timestamp: c.timestamp,
+        git_branch: c.git_branch.clone(),
+        worktree: c.worktree.clone(),
+        recap: c.recap.clone(),
     }
 }
 
