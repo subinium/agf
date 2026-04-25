@@ -15,12 +15,10 @@ Built with [SuperLightTUI (SLT)](https://github.com/subinium/SuperLightTUI) — 
 ## Quick Start
 
 ```bash
-# Homebrew (macOS/Linux)
-brew install subinium/tap/agf
-
-# Cargo (any platform)
 cargo install agf
 ```
+
+Requires a Rust toolchain (`rustup` recommended). Prebuilt binaries for macOS, Linux, and Windows are also available on the [Releases page](https://github.com/subinium/agf/releases).
 
 Then run `agf setup` and restart your shell. Type `agf` to launch.
 
