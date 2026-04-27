@@ -2,10 +2,10 @@
 name = "agf"
 version = "0.10.2"
 edition = "2021"
-description = "AI Agent Session Finder TUI — find, resume, and manage Claude Code, Codex, OpenCode, Gemini, Kiro, pi, and Cursor CLI sessions"
+description = "Find and resume local AI coding-agent sessions across Claude Code, Codex, Gemini, Cursor CLI, OpenCode, Kiro, and pi"
 license = "MIT"
 repository = "https://github.com/subinium/agf"
-keywords = ["tui", "cli", "ai", "agent", "claude"]
+keywords = ["tui", "cli", "agent", "session", "claude"]
 categories = ["command-line-utilities"]
 readme = "README.md"
 

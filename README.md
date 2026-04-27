@@ -5,22 +5,22 @@
 [![crates.io](https://img.shields.io/crates/v/agf.svg)](https://crates.io/crates/agf)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> A fast TUI to find, resume, and manage your AI coding agent sessions.
-> Supports **Claude Code**, **Codex**, **OpenCode**, **pi**, **Kiro**, **Cursor CLI**, and **Gemini** — all in one place.
+> Find the AI coding session you meant to resume.
 
-Built with [SuperLightTUI (SLT)](https://github.com/subinium/SuperLightTUI) — an immediate-mode terminal UI library for Rust.
+`agf` is a local-first fuzzy finder for AI coding-agent sessions.
+Search local sessions across **Claude Code**, **Codex**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, and **pi** — then resume the right one in a keystroke.
 
 ![agf demo](./assets/demo.gif)
 
-## Quick Start
+## Install
 
 ```bash
 cargo install agf
+agf setup
+agf
 ```
 
 Requires a Rust toolchain (`rustup` recommended). Prebuilt binaries for macOS, Linux, and Windows are also available on the [Releases page](https://github.com/subinium/agf/releases).
-
-Then run `agf setup` and restart your shell. Type `agf` to launch.
 
 ### Quick Resume (no TUI)
 
@@ -30,33 +30,68 @@ agf resume project-name   # fuzzy-matches and resumes the best match directly
 
 ## Why agf?
 
-If you use AI coding agents, you've probably done this:
+AI coding agents are great at keeping context — until you lose the terminal.
 
-1. Forget which project you were working on
-2. `cd` into the wrong directory
-3. Try to remember the session ID
-4. Give up and start a new session
+You switch projects, close a tab, forget the session ID, or resume the wrong agent.
+Then you either dig through history files or start over.
 
-`agf` fixes that. It scans all your agent sessions, shows them in a searchable list, and lets you resume with one keystroke.
+`agf` gives you one searchable list of local agent sessions and resumes the right one.
+
+## Supported agents
+
+`agf` reads the session files each agent already stores locally. No account, no cloud sync, no extra agent process.
+
+| Agent | Resume command | Local session source |
+|:---|:---|:---|
+| [Claude Code](https://github.com/anthropics/claude-code) | `claude --resume <id>` | `~/.claude/history.jsonl` + `~/.claude/projects/` |
+| [Codex](https://github.com/openai/codex) | `codex resume <id>` | `~/.codex/sessions/**/*.jsonl` |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` |
+| [Cursor CLI](https://docs.cursor.com/agent) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/*.txt` |
+| [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
+| [Kiro](https://kiro.dev) | `kiro-cli chat --resume` | `~/Library/Application Support/kiro-cli/data.sqlite3` |
+| [pi](https://github.com/badlogic/pi-mono) | `pi --resume` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
+
+<details>
+<summary>Full session storage paths</summary>
+
+| Agent | Format | Default Path |
+|:---|:---|:---|
+| Claude Code | JSONL | `~/.claude/history.jsonl` (sessions)<br>`~/.claude/projects/*/` (worktree detection) |
+| Codex | JSONL | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| OpenCode | SQLite | `~/.local/share/opencode/opencode.db` |
+| pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |
+| Kiro | SQLite | macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`<br>Linux: `~/.local/share/kiro-cli/data.sqlite3` |
+| Cursor CLI | SQLite + TXT | `~/.cursor/chats/*/<id>/store.db`<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` |
+| Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
+
+</details>
 
 ## Features
 
-- **Unified view** — Claude Code, Codex, OpenCode, pi, Kiro, Cursor CLI, and Gemini sessions in one list
-- **Fuzzy search** — find any session by project name or summary
-- **One-key resume** — select a session and hit Enter
-- **Agent filter** — Tab to cycle through agents
-- **Smart cd** — jump to any project directory
-- **Bulk delete** — `Ctrl+D` to multi-select and batch-delete sessions
-- **New session** — launch a new agent session with optional permission mode
-- **Quick resume** — `agf resume <query>` to skip the TUI and resume directly
-- **Unicode search** — Korean (한글) and CJK input supported
-- **Mouse support** — click to select sessions, scroll wheel navigation
-- **Resume mode picker** — Tab on Resume to choose permission/approval mode (yolo, plan, etc.)
-- **Auto-detection** — only shows agents installed on your system
-- **Git branch** — shows the current branch of each project's working directory
-- **Worktree support** — detects Claude Code `--worktree` sessions; shows worktree name in the list and parent branch in the detail view
+- **Cross-agent search** — see all supported agents in one list
+- **Fuzzy search** — find sessions by project name, path, branch, or summary
+- **One-key resume** — resume the selected session with the right agent command
+- **Quick resume** — `agf resume <query>` skips the TUI entirely
+- **Bulk delete** — `Ctrl+D` to multi-select and clean up stale sessions
+- **Project awareness** — git branches and Claude Code `--worktree` sessions surface in the UI
 
-## Keybindings
+Also supports Unicode/CJK search, mouse navigation, agent filters, permission/approval-mode picker, agent auto-detection, and shell wrappers for zsh, bash, fish, and PowerShell.
+
+## Basic controls
+
+| Key | Action |
+|:---|:---|
+| Type anything | Fuzzy search |
+| `↑` `↓` / `Ctrl+K` `Ctrl+J` | Navigate |
+| `Enter` | Open action menu |
+| `Tab` / `Shift+Tab` | Cycle agent filter |
+| `→` / `Ctrl+L` | Preview session |
+| `Ctrl+D` | Bulk delete |
+| `?` | Help / settings |
+| `Esc` | Quit |
+
+<details>
+<summary>Full keybindings</summary>
 
 ### Browse
 
@@ -91,7 +126,9 @@ If you use AI coding agents, you've probably done this:
 | `Enter` | Launch with default mode |
 | `Esc` | Back |
 
-## Config
+</details>
+
+## Configuration
 
 Optional. Create `~/.config/agf/config.toml`:
 
@@ -104,56 +141,7 @@ summary_search_count = 5    # number of summaries included when search_scope = "
 
 You can also edit `search_scope` and `summary_search_count` interactively by pressing `?` in the TUI.
 
-## Supported Agents
-
-| Agent | Resume Command | Data Source |
-|:---|:---|:---|
-| [Claude Code](https://github.com/anthropics/claude-code) | `claude --resume <id>` | `~/.claude/history.jsonl` + `~/.claude/projects/` |
-| [Codex](https://github.com/openai/codex) | `codex resume <id>` | `~/.codex/sessions/**/*.jsonl` |
-| [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
-| [pi](https://github.com/badlogic/pi-mono) | `pi --resume` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
-| [Kiro](https://kiro.dev) | `kiro-cli chat --resume` | `~/Library/Application Support/kiro-cli/data.sqlite3` |
-| [Cursor CLI](https://docs.cursor.com/agent) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/*.txt` |
-| [Gemini](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` |
-
-### Session Storage Paths
-
-| Agent | Format | Default Path |
-|:---|:---|:---|
-| Claude Code | JSONL | `~/.claude/history.jsonl` (sessions)<br>`~/.claude/projects/*/` (worktree detection) |
-| Codex | JSONL | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
-| OpenCode | SQLite | `~/.local/share/opencode/opencode.db` |
-| pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |
-| Kiro | SQLite | macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`<br>Linux: `~/.local/share/kiro-cli/data.sqlite3` |
-| Cursor CLI | SQLite + TXT | `~/.cursor/chats/*/<id>/store.db`<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` |
-| Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
-
-## Install (other methods)
-
-<details>
-<summary>From source</summary>
-
-```bash
-git clone https://github.com/subinium/agf.git
-cd agf
-cargo install --path .
-agf setup
-```
-
-</details>
-
-## Upgrading
-
-After upgrading, run `agf setup` again (or restart your shell) to apply the latest shell wrapper.
-
-See [CHANGELOG.md](CHANGELOG.md) for full details.
-
-## Requirements
-
-- macOS, Linux, or Windows (PowerShell 5.1+ / PowerShell 7+)
-- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`
-
-### Shells
+## Shell integration
 
 `agf setup` auto-detects your shell and installs the wrapper. Supported shells:
 
@@ -170,20 +158,39 @@ agf init fish | source                               # fish
 agf init powershell | Out-String | Invoke-Expression # PowerShell
 ```
 
+After upgrading, run `agf setup` again (or restart your shell) to apply the latest wrapper.
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
+## Requirements
+
+- macOS, Linux, or Windows (PowerShell 5.1+ / PowerShell 7+)
+- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`
+
+## Install from source
+
+```bash
+git clone https://github.com/subinium/agf.git
+cd agf
+cargo install --path .
+agf setup
+```
+
+## Limitations
+
+`agf` works best with agents that store resumable sessions locally.
+
+**Amp** is not supported yet because its sessions are stored remotely, which makes it hard to reliably resolve local project paths from session metadata. We are monitoring upstream changes and will add support when feasible.
+
+## Built with
+
+`agf` is written in Rust and built with [SuperLightTUI (SLT)](https://github.com/subinium/SuperLightTUI) — an immediate-mode terminal UI library for Rust.
+
 ## Contributing
 
 Issues and PRs are welcome.
-
-### Contributors
 
 [![Contributors](https://contrib.rocks/image?repo=subinium/agf)](https://github.com/subinium/agf/graphs/contributors)
 
 ## License
 
 [MIT](LICENSE)
-
----
-
-### Agent Support Roadmap
-
-**Amp** is not yet supported. Amp stores sessions on a remote server, making it difficult to reliably resolve project paths from session metadata. We are monitoring upstream changes and will add support when feasible.
