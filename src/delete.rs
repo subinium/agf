@@ -110,24 +110,64 @@ fn remove_dirs_matching_name(base: &Path, name: &str) -> Result<(), io::Error> {
 // Codex
 // ---------------------------------------------------------------------------
 
-/// Codex session files live under `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
-/// We find the file whose first line's `payload.id` matches and delete it.
-/// We also rewrite `~/.codex/history.jsonl` excluding matching `session_id` entries.
+/// Codex session data lives in three places (any combination may be present
+/// depending on Codex CLI version):
+///   * `state_*.sqlite` `threads` row (primary source for current Codex CLI),
+///   * `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` rollout file,
+///   * `~/.codex/history.jsonl` per-prompt summary entries.
+///
+/// We delete from all three so the session does not reappear after the next
+/// `agf` scan via the SQLite path.
 fn delete_codex_session(session: &Session) -> Result<(), io::Error> {
     let codex_dir = config::codex_dir().map_err(io::Error::other)?;
 
-    // 1. Find and delete the session rollout file
+    // 1. Delete the SQLite row(s). Codex may have multiple `state_*.sqlite`
+    //    files (e.g. across CLI upgrades); remove the row from every one
+    //    that contains it so the session cannot be revived from a stale db.
+    delete_codex_sqlite_rows(&codex_dir, &session.session_id)?;
+
+    // 2. Find and delete the session rollout file
     let sessions_dir = codex_dir.join("sessions");
     if sessions_dir.exists() {
         delete_codex_session_file(&sessions_dir, &session.session_id)?;
     }
 
-    // 2. Rewrite history.jsonl excluding lines with matching session_id
+    // 3. Rewrite history.jsonl excluding lines with matching session_id
     let history_path = codex_dir.join("history.jsonl");
     if history_path.exists() {
         rewrite_jsonl_excluding(&history_path, "session_id", &session.session_id)?;
     }
 
+    Ok(())
+}
+
+/// Remove the `threads` row matching `session_id` from every
+/// `state_*.sqlite` in `codex_dir`. Missing tables / open errors on a single
+/// file are swallowed so one corrupt or older-schema db cannot block the
+/// delete on the others.
+fn delete_codex_sqlite_rows(codex_dir: &Path, session_id: &str) -> Result<(), io::Error> {
+    let entries = match fs::read_dir(codex_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let is_state_db = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("state_") && n.ends_with(".sqlite"))
+            .unwrap_or(false);
+        if !is_state_db {
+            continue;
+        }
+        let conn = match rusqlite::Connection::open(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        // `threads` is the only table the Codex scanner reads from. Older
+        // Codex CLI versions may not have this table — ignore the error.
+        let _ = conn.execute("DELETE FROM threads WHERE id = ?1", [session_id]);
+    }
     Ok(())
 }
 
@@ -354,4 +394,96 @@ fn delete_gemini_session(session: &Session) -> Result<(), io::Error> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_codex_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Create a minimal `state_*.sqlite` mirroring the Codex schema fields
+    /// the scanner reads, then seed two `threads` rows.
+    fn seed_state_db(path: &Path, ids: &[&str]) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                cwd TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0,
+                git_branch TEXT,
+                first_user_message TEXT NOT NULL DEFAULT ''
+            );",
+        )
+        .unwrap();
+        for id in ids {
+            conn.execute("INSERT INTO threads (id, cwd) VALUES (?1, '/tmp/x')", [id])
+                .unwrap();
+        }
+    }
+
+    fn count_thread(path: &Path, id: &str) -> i64 {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn delete_codex_sqlite_rows_removes_target_only() {
+        let dir = make_codex_dir("agf-test-codex-delete-target");
+        let db = dir.join("state_5.sqlite");
+        seed_state_db(&db, &["target-id", "keep-id"]);
+
+        delete_codex_sqlite_rows(&dir, "target-id").unwrap();
+
+        assert_eq!(count_thread(&db, "target-id"), 0);
+        assert_eq!(count_thread(&db, "keep-id"), 1);
+    }
+
+    #[test]
+    fn delete_codex_sqlite_rows_walks_every_state_db() {
+        let dir = make_codex_dir("agf-test-codex-delete-multi");
+        let db4 = dir.join("state_4.sqlite");
+        let db5 = dir.join("state_5.sqlite");
+        seed_state_db(&db4, &["dup-id"]);
+        seed_state_db(&db5, &["dup-id"]);
+
+        delete_codex_sqlite_rows(&dir, "dup-id").unwrap();
+
+        assert_eq!(count_thread(&db4, "dup-id"), 0);
+        assert_eq!(count_thread(&db5, "dup-id"), 0);
+    }
+
+    #[test]
+    fn delete_codex_sqlite_rows_ignores_non_state_files() {
+        let dir = make_codex_dir("agf-test-codex-delete-ignore");
+        // A non-matching file must not crash the walk.
+        fs::write(dir.join("history.jsonl"), b"").unwrap();
+        let db = dir.join("state_1.sqlite");
+        seed_state_db(&db, &["a"]);
+
+        delete_codex_sqlite_rows(&dir, "a").unwrap();
+        assert_eq!(count_thread(&db, "a"), 0);
+    }
+
+    #[test]
+    fn delete_codex_sqlite_rows_tolerates_missing_threads_table() {
+        let dir = make_codex_dir("agf-test-codex-delete-missing-table");
+        let db = dir.join("state_0.sqlite");
+        // Empty db (no `threads` table) — Codex versions without the table
+        // must not abort the delete.
+        rusqlite::Connection::open(&db).unwrap();
+
+        // Should swallow the "no such table: threads" error.
+        delete_codex_sqlite_rows(&dir, "anything").unwrap();
+    }
 }
