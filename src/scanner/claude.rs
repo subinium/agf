@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::BufRead;
 
@@ -44,19 +44,18 @@ struct SessionMeta {
     recap: Option<String>, // most recent away_summary, optionally prefixed with aiTitle
 }
 
-/// Scan ~/.claude/projects/*/<sessionId>.jsonl to detect worktree sessions
-/// and extract recap (away_summary / aiTitle) metadata.
+/// Walk `~/.claude/projects/*/<sessionId>.jsonl` once and return the list of
+/// `(session_id, path)` pairs for every per-session JSONL on disk.
 ///
-/// `cwd` in the per-session JSONL is the actual working directory, which for
-/// worktree sessions looks like `<project>/.claude/worktrees/<name>`.
-fn scan_session_metadata(claude_dir: &std::path::Path) -> HashMap<String, SessionMeta> {
+/// Callers (orphan filtering + `scan_session_metadata`) share this so the
+/// directory tree is only read once per scan.
+fn list_session_files(claude_dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
     let projects_dir = claude_dir.join("projects");
 
     let Ok(proj_entries) = fs::read_dir(&projects_dir) else {
-        return HashMap::new();
+        return Vec::new();
     };
 
-    // Collect all JSONL file paths first, then process in parallel.
     let mut file_paths: Vec<(String, std::path::PathBuf)> = Vec::new();
     for proj_entry in proj_entries.flatten() {
         let proj_path = proj_entry.path();
@@ -81,6 +80,17 @@ fn scan_session_metadata(claude_dir: &std::path::Path) -> HashMap<String, Sessio
         }
     }
 
+    file_paths
+}
+
+/// Scan ~/.claude/projects/*/<sessionId>.jsonl to detect worktree sessions
+/// and extract recap (away_summary / aiTitle) metadata.
+///
+/// `cwd` in the per-session JSONL is the actual working directory, which for
+/// worktree sessions looks like `<project>/.claude/worktrees/<name>`.
+fn scan_session_metadata(
+    file_paths: Vec<(String, std::path::PathBuf)>,
+) -> HashMap<String, SessionMeta> {
     file_paths
         .into_par_iter()
         .filter_map(|(session_id, file_path)| {
@@ -212,7 +222,9 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         return Ok(Vec::new());
     }
 
-    let session_meta = scan_session_metadata(&claude_dir);
+    let session_files = list_session_files(&claude_dir);
+    let existing_ids: HashSet<String> = session_files.iter().map(|(id, _)| id.clone()).collect();
+    let session_meta = scan_session_metadata(session_files);
     let mut branch_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut sessions_map: HashMap<String, SessionData> = HashMap::new();
 
@@ -267,6 +279,14 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             if data.project.is_empty() {
                 return None;
             }
+            // history.jsonl logs `sessionId` on session start, but the actual
+            // transcript file is created lazily by `claude --resume` and may
+            // be deleted by the user later. `claude --resume <id>` errors out
+            // with "No conversation found" for these orphans, so drop them
+            // from the listing rather than offering a dead resume target.
+            if !existing_ids.contains(&session_id) {
+                return None;
+            }
 
             // project in history.jsonl is always the real project root.
             let project_path = data.project.clone();
@@ -311,4 +331,56 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
 
     sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
     Ok(sessions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn make_claude_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("projects")).unwrap();
+        dir
+    }
+
+    fn touch_session(claude_dir: &std::path::Path, project: &str, session_id: &str) {
+        let proj = claude_dir.join("projects").join(project);
+        fs::create_dir_all(&proj).unwrap();
+        let path = proj.join(format!("{session_id}.jsonl"));
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(b"{}\n").unwrap();
+    }
+
+    #[test]
+    fn list_session_files_collects_jsonl_session_ids() {
+        let claude_dir = make_claude_dir("agf-test-list-sessions");
+        touch_session(&claude_dir, "-home-foo", "aaa-111");
+        touch_session(&claude_dir, "-home-foo", "bbb-222");
+        touch_session(&claude_dir, "-home-bar", "ccc-333");
+        // Non-jsonl sibling must be ignored.
+        fs::write(claude_dir.join("projects/-home-foo/notes.txt"), "x").unwrap();
+
+        let ids: HashSet<String> = list_session_files(&claude_dir)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        assert_eq!(
+            ids,
+            ["aaa-111", "bbb-222", "ccc-333"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn list_session_files_returns_empty_when_projects_missing() {
+        let dir = std::env::temp_dir().join("agf-test-no-projects");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(list_session_files(&dir).is_empty());
+    }
 }
