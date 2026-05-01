@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.3] - 2026-05-01
+
+### Fixed
+
+- **scanner/claude: skip sessions whose per-session JSONL is missing** (#27, #29, by @Mert-coderoid) — `~/.claude/history.jsonl` accumulates session IDs forever; Claude Code never trims it when the per-session JSONL under `~/.claude/projects/*/<id>.jsonl` is deleted. Those orphan IDs surfaced in the listing and resume failed with `No conversation found`. `scanner::claude::scan` now filters its output through the set of session IDs that have a JSONL on disk; the directory walk is shared with `scan_session_metadata` so the tree is still read once per scan.
+- **delete/codex: also remove the SQLite `threads` row** (#28, #30, by @Mert-coderoid) — since the Codex scanner moved to `state_*.sqlite` as primary source, deletes that only removed the rollout JSONL and `history.jsonl` entry came back on the next scan. `delete_codex_session` now walks every `state_*.sqlite` in `~/.codex/` and runs `DELETE FROM threads WHERE id = ?1`; older-schema dbs without `threads` are skipped silently.
+- **scanner/codex: prune orphan `threads` rows on scan** (#31, #32, by @Mert-coderoid) — `state_*.sqlite` rows whose rollout JSONL no longer exists kept dominating `agf list` / `agf stats` (e.g. 324 ghost rows for an empty `~/.codex/sessions/`) and could not be resumed. `scan_sqlite` now builds the live session-id set from `~/.codex/sessions/`, excludes orphans from the listing, and `DELETE`s them from every `state_*.sqlite`. A walker error with no live IDs collected falls back to the legacy "surface every row" behavior so a transient I/O failure cannot wipe the table. Note: Codex scans are no longer strictly read-only — they will hard-delete unrecoverable orphan rows.
+
 ## [0.10.2] - 2026-04-25
 
 ### Fixed
