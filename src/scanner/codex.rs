@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 use rusqlite::Connection;
+use walkdir::WalkDir;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
@@ -14,8 +15,20 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     // Collect summaries from history.jsonl (keyed by session_id, newest-first)
     let summaries = read_history_summaries(&codex_dir);
 
+    // Build the set of session IDs whose rollout JSONL still exists on disk.
+    // Used to filter out — and prune from SQLite — `threads` rows that were
+    // left behind when the JSONL was deleted manually (e.g. the user wiped
+    // `~/.codex/sessions/`). Without pruning, those stale rows keep showing
+    // up in `agf list`/`agf stats` forever and cannot be revived.
+    //
+    // `None` means we could not read the sessions tree reliably (permission
+    // denied, transient I/O). In that case we fall back to the legacy
+    // behavior — surface every SQLite row, prune nothing — to avoid
+    // wiping live rows on a flaky filesystem read.
+    let live_session_ids = collect_live_session_ids(&codex_dir);
+
     // Primary: read from SQLite (state_*.sqlite)
-    let mut sessions = scan_sqlite(&codex_dir, &summaries);
+    let mut sessions = scan_sqlite(&codex_dir, &summaries, live_session_ids.as_ref());
 
     // Fallback: if SQLite found nothing, try JSONL walkdir
     if sessions.is_empty() {
@@ -26,11 +39,110 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     Ok(sessions)
 }
 
+/// Walk `~/.codex/sessions/` and return the set of `payload.id` values found
+/// in the first line of each `*.jsonl` rollout file. The Codex rollout
+/// filename is `rollout-*.jsonl` (no session_id in the path), so we have to
+/// open each file's first line to get the id.
+///
+/// Returns `None` only when the sessions directory exists but cannot be
+/// traversed — a transient I/O error there must NOT be interpreted as
+/// "all rows are orphaned", since prune would then nuke the entire
+/// `threads` table. A missing directory is a legitimate empty-set result.
+fn collect_live_session_ids(codex_dir: &std::path::Path) -> Option<HashSet<String>> {
+    let sessions_dir = codex_dir.join("sessions");
+    let mut ids = HashSet::new();
+    if !sessions_dir.exists() {
+        return Some(ids);
+    }
+    let walker = WalkDir::new(&sessions_dir).into_iter();
+    let mut had_walk_error = false;
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => {
+                had_walk_error = true;
+                continue;
+            }
+        };
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let first_line = match read_first_line(path) {
+            Some(line) => line,
+            None => continue,
+        };
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line.trim()) {
+            if let Some(id) = value
+                .get("payload")
+                .and_then(|p| p.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                if !id.is_empty() {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    // If the walk itself failed (permission denied, transient I/O), treat
+    // the live-set as unknown: caller must skip pruning rather than risk
+    // wiping live rows.
+    if had_walk_error && ids.is_empty() {
+        return None;
+    }
+    Some(ids)
+}
+
+/// Delete `threads` rows whose `id` is in `orphan_ids` from every
+/// `state_*.sqlite` under `codex_dir`. Errors on a single db are swallowed
+/// so a corrupt or older-schema file cannot block pruning the others.
+fn prune_orphan_threads(codex_dir: &std::path::Path, orphan_ids: &[String]) {
+    if orphan_ids.is_empty() {
+        return;
+    }
+    let entries = match std::fs::read_dir(codex_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let is_state_db = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("state_") && n.ends_with(".sqlite"))
+            .unwrap_or(false);
+        if !is_state_db {
+            continue;
+        }
+        let conn = match Connection::open(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        for id in orphan_ids {
+            let _ = tx.execute("DELETE FROM threads WHERE id = ?1", [id]);
+        }
+        let _ = tx.commit();
+    }
+}
+
 /// Read sessions from Codex SQLite database (state_*.sqlite).
 /// This is the primary source — covers CLI, desktop app (vscode), and exec sessions.
+///
+/// `live_session_ids` is the set of session IDs whose rollout JSONL exists on
+/// disk. Rows whose id is *not* in this set are treated as orphans (the user
+/// — or some other tool — deleted the JSONL but the SQLite row was left
+/// behind), excluded from the returned list, and pruned from every
+/// `state_*.sqlite` so they do not reappear on the next scan. Orphan rows
+/// are dead weight regardless: Codex cannot resume them once the rollout
+/// JSONL is gone, so removing them from SQLite is not data loss.
 fn scan_sqlite(
     codex_dir: &std::path::Path,
     summaries: &HashMap<String, Vec<String>>,
+    live_session_ids: Option<&HashSet<String>>,
 ) -> Vec<Session> {
     // Find the latest state_*.sqlite file
     let db_path = match find_state_db(codex_dir) {
@@ -69,11 +181,22 @@ fn scan_sqlite(
     };
 
     let mut sessions = Vec::new();
+    let mut orphan_ids: Vec<String> = Vec::new();
     for row in rows.flatten() {
         let (session_id, cwd, title, updated_at, git_branch, first_msg) = row;
 
         if session_id.is_empty() || cwd.is_empty() {
             continue;
+        }
+
+        // Only filter/prune when we have a trustworthy live set. If the
+        // sessions tree could not be enumerated (`None`), surface the row
+        // as-is — better stale than nuked.
+        if let Some(live) = live_session_ids {
+            if !live.contains(&session_id) {
+                orphan_ids.push(session_id);
+                continue;
+            }
         }
 
         let project_name = std::path::Path::new(&cwd)
@@ -111,6 +234,14 @@ fn scan_sqlite(
         });
     }
 
+    // Drop the read-only connection before re-opening read-write for prune.
+    drop(stmt);
+    drop(conn);
+
+    if !orphan_ids.is_empty() {
+        prune_orphan_threads(codex_dir, &orphan_ids);
+    }
+
     sessions
 }
 
@@ -139,7 +270,6 @@ fn scan_jsonl(
     summaries: &HashMap<String, Vec<String>>,
 ) -> Vec<Session> {
     use serde::Deserialize;
-    use walkdir::WalkDir;
 
     #[derive(Deserialize)]
     struct SessionMeta {
@@ -286,4 +416,147 @@ fn read_history_summaries(codex_dir: &std::path::Path) -> HashMap<String, Vec<St
             (k, v.into_iter().map(|(_, s)| s).collect())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    /// Allocate a fresh empty temp directory for a single test, mirroring
+    /// the helper used in `delete::tests`. We do not pull in the
+    /// `tempfile` crate because the rest of the codebase does not depend
+    /// on it.
+    fn make_codex_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("agf-codex-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Create a `state_*.sqlite` with the columns the scanner reads and
+    /// seed it with `(id, cwd)` rows.
+    fn seed_state_db(path: &std::path::Path, rows: &[(&str, &str)]) {
+        let conn = Connection::open(path).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                cwd TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                git_branch TEXT,
+                first_user_message TEXT NOT NULL DEFAULT '',
+                archived INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .expect("create threads");
+        for (id, cwd) in rows {
+            conn.execute("INSERT INTO threads (id, cwd) VALUES (?1, ?2)", [*id, *cwd])
+                .expect("insert thread");
+        }
+    }
+
+    fn count_threads(path: &std::path::Path) -> i64 {
+        let conn = Connection::open(path).expect("open db");
+        conn.query_row("SELECT COUNT(*) FROM threads", [], |r| r.get(0))
+            .expect("count")
+    }
+
+    #[test]
+    fn prune_orphan_threads_removes_only_target_ids() {
+        let dir = make_codex_dir("prune-target");
+        let db = dir.join("state_5.sqlite");
+        seed_state_db(
+            &db,
+            &[
+                ("orphan-1", "/some/cwd"),
+                ("live-1", "/some/cwd"),
+                ("orphan-2", "/some/cwd"),
+            ],
+        );
+
+        prune_orphan_threads(&dir, &["orphan-1".to_string(), "orphan-2".to_string()]);
+
+        let conn = Connection::open(&db).unwrap();
+        let remaining: Vec<String> = conn
+            .prepare("SELECT id FROM threads ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(remaining, vec!["live-1".to_string()]);
+    }
+
+    #[test]
+    fn prune_orphan_threads_walks_every_state_db() {
+        let dir = make_codex_dir("prune-walk");
+        let db4 = dir.join("state_4.sqlite");
+        let db5 = dir.join("state_5.sqlite");
+        seed_state_db(&db4, &[("orphan", "/x"), ("live", "/x")]);
+        seed_state_db(&db5, &[("orphan", "/x"), ("live", "/x")]);
+
+        prune_orphan_threads(&dir, &["orphan".to_string()]);
+
+        assert_eq!(count_threads(&db4), 1);
+        assert_eq!(count_threads(&db5), 1);
+    }
+
+    #[test]
+    fn prune_orphan_threads_ignores_non_state_files() {
+        let dir = make_codex_dir("prune-ignore");
+        let db = dir.join("state_5.sqlite");
+        seed_state_db(&db, &[("orphan", "/x")]);
+        // Sibling files that must not interfere with the walk
+        fs::write(dir.join("history.jsonl"), b"{}").unwrap();
+        fs::write(dir.join("auth.json"), b"{}").unwrap();
+
+        prune_orphan_threads(&dir, &["orphan".to_string()]);
+        assert_eq!(count_threads(&db), 0);
+    }
+
+    #[test]
+    fn prune_orphan_threads_tolerates_missing_threads_table() {
+        let dir = make_codex_dir("prune-noschema");
+        let bad = dir.join("state_3.sqlite");
+        // Db with no `threads` table — older Codex CLI schema.
+        let conn = Connection::open(&bad).unwrap();
+        conn.execute_batch("CREATE TABLE other (id TEXT);").unwrap();
+        drop(conn);
+
+        let good = dir.join("state_5.sqlite");
+        seed_state_db(&good, &[("orphan", "/x")]);
+
+        prune_orphan_threads(&dir, &["orphan".to_string()]);
+        // `bad` was silently skipped; `good` got pruned.
+        assert_eq!(count_threads(&good), 0);
+    }
+
+    #[test]
+    fn collect_live_session_ids_returns_empty_when_sessions_dir_missing() {
+        let dir = make_codex_dir("live-missing");
+        // No `sessions/` subdir under codex_dir.
+        let live = collect_live_session_ids(&dir);
+        assert_eq!(live, Some(HashSet::new()));
+    }
+
+    #[test]
+    fn collect_live_session_ids_extracts_payload_id_from_rollout_jsonl() {
+        let dir = make_codex_dir("live-extract");
+        let day_dir = dir.join("sessions/2026/04/29");
+        fs::create_dir_all(&day_dir).unwrap();
+        let mut f = fs::File::create(day_dir.join("rollout-2026-04-29-abc.jsonl")).unwrap();
+        // First line is `session_meta` with payload.id; the scanner only
+        // needs to extract that id.
+        writeln!(
+            f,
+            r#"{{"type":"session_meta","payload":{{"id":"session-abc","cwd":"/x","timestamp":"2026-04-29T00:00:00Z"}}}}"#
+        )
+        .unwrap();
+
+        let live = collect_live_session_ids(&dir).expect("walk ok");
+        assert!(live.contains("session-abc"));
+        assert_eq!(live.len(), 1);
+    }
 }
