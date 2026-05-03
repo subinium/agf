@@ -32,6 +32,7 @@ pub fn all_plugins() -> Vec<Box<dyn AgentPlugin>> {
         Box::new(PluginAdapter(Agent::Kiro)),
         Box::new(PluginAdapter(Agent::CursorAgent)),
         Box::new(PluginAdapter(Agent::Gemini)),
+        Box::new(PluginAdapter(Agent::Hermes)),
     ]
 }
 
@@ -53,6 +54,7 @@ impl AgentPlugin for PluginAdapter {
             Agent::Kiro => "Kiro",
             Agent::CursorAgent => "Cursor CLI",
             Agent::Gemini => "Gemini",
+            Agent::Hermes => "Hermes",
         }
     }
 
@@ -74,6 +76,7 @@ impl AgentPlugin for PluginAdapter {
             Agent::Kiro => scanner::kiro::scan().unwrap_or_default(),
             Agent::CursorAgent => scanner::cursor_agent::scan().unwrap_or_default(),
             Agent::Gemini => scanner::gemini::scan().unwrap_or_default(),
+            Agent::Hermes => scanner::hermes::scan().unwrap_or_default(),
         }
     }
 
@@ -114,6 +117,9 @@ impl AgentPlugin for PluginAdapter {
                 .unwrap_or_default(),
             Agent::Gemini => config::gemini_dir()
                 .map(|d| vec![d.join("tmp")])
+                .unwrap_or_default(),
+            Agent::Hermes => config::hermes_dir()
+                .map(|d| vec![d.join("state.db")])
                 .unwrap_or_default(),
         }
     }

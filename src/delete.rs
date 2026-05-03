@@ -24,6 +24,7 @@ pub fn delete_session(session: &Session) -> Result<(), io::Error> {
         Agent::Kiro => delete_kiro_session(session),
         Agent::CursorAgent => delete_cursor_agent_session(session),
         Agent::Gemini => delete_gemini_session(session),
+        Agent::Hermes => delete_hermes_session(session),
     }
 }
 
@@ -388,6 +389,69 @@ fn delete_gemini_session(session: &Session) -> Result<(), io::Error> {
                 {
                     fs::remove_file(&path)?;
                     return Ok(());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Hermes
+// ---------------------------------------------------------------------------
+
+/// Hermes Agent sessions are stored in a SQLite database at
+/// `~/.hermes/state.db`. Messages are in a separate `messages` table
+/// with a foreign key to `sessions.id`.
+fn delete_hermes_session(session: &Session) -> Result<(), io::Error> {
+    let hermes_dir = config::hermes_dir().map_err(io::Error::other)?;
+    let db_path = hermes_dir.join("state.db");
+    if !db_path.exists() {
+        return Ok(());
+    }
+
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| io::Error::other(format!("SQLite open error: {e}")))?;
+
+    // Delete messages first (foreign key constraint).
+    conn.execute(
+        "DELETE FROM messages WHERE session_id = ?1",
+        [&session.session_id],
+    )
+    .map_err(|e| io::Error::other(format!("SQLite delete messages error: {e}")))?;
+
+    // Delete child sessions' messages and then the child sessions themselves.
+    conn.execute(
+        "DELETE FROM messages WHERE session_id IN \
+         (SELECT id FROM sessions WHERE parent_session_id = ?1)",
+        [&session.session_id],
+    )
+    .map_err(|e| io::Error::other(format!("SQLite delete child messages error: {e}")))?;
+
+    conn.execute(
+        "DELETE FROM sessions WHERE parent_session_id = ?1",
+        [&session.session_id],
+    )
+    .map_err(|e| io::Error::other(format!("SQLite delete child sessions error: {e}")))?;
+
+    // Delete the parent session.
+    conn.execute(
+        "DELETE FROM sessions WHERE id = ?1",
+        [&session.session_id],
+    )
+    .map_err(|e| io::Error::other(format!("SQLite delete session error: {e}")))?;
+
+    // Also remove any on-disk session JSON dumps.
+    let sessions_dir = hermes_dir.join("sessions");
+    if sessions_dir.exists() {
+        let prefix = format!("session_{}", session.session_id);
+        if let Ok(entries) = fs::read_dir(&sessions_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with(&prefix) && name.ends_with(".json") {
+                        let _ = fs::remove_file(entry.path());
+                    }
                 }
             }
         }

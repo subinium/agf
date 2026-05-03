@@ -10,6 +10,7 @@ pub enum Agent {
     Kiro,
     CursorAgent,
     Gemini,
+    Hermes,
 }
 
 impl fmt::Display for Agent {
@@ -22,6 +23,7 @@ impl fmt::Display for Agent {
             Agent::Kiro => write!(f, "Kiro"),
             Agent::CursorAgent => write!(f, "Cursor CLI"),
             Agent::Gemini => write!(f, "Gemini"),
+            Agent::Hermes => write!(f, "Hermes"),
         }
     }
 }
@@ -36,6 +38,7 @@ impl Agent {
             Agent::Kiro => (136, 69, 244),       // #8845F4 deep purple (AWS Kiro)
             Agent::CursorAgent => (245, 184, 65), // #F5B841 Cursor brand yellow
             Agent::Gemini => (66, 133, 244),     // #4285F4 Google blue
+            Agent::Hermes => (168, 85, 247),     // #A855F7 purple (Nous Research)
         }
     }
 
@@ -48,6 +51,7 @@ impl Agent {
             Agent::Kiro,
             Agent::CursorAgent,
             Agent::Gemini,
+            Agent::Hermes,
         ]
     }
 
@@ -61,6 +65,7 @@ impl Agent {
             Agent::Kiro => "kiro-cli",
             Agent::CursorAgent => "cursor-agent",
             Agent::Gemini => "gemini",
+            Agent::Hermes => "hermes",
         }
     }
 
@@ -74,6 +79,7 @@ impl Agent {
             Agent::Kiro => "kiro-cli chat --resume".to_string(),
             Agent::CursorAgent => format!("cursor-agent --resume '{session_id}'"),
             Agent::Gemini => format!("gemini --resume '{session_id}'"),
+            Agent::Hermes => format!("hermes --resume '{session_id}'"),
         }
     }
 
@@ -116,6 +122,7 @@ impl Agent {
             Agent::Kiro => "kiro-cli chat",
             Agent::CursorAgent => "cursor-agent",
             Agent::Gemini => "gemini",
+            Agent::Hermes => "hermes",
         }
     }
 }
