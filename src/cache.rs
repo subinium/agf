@@ -50,6 +50,7 @@ fn agent_from_str(s: &str) -> Option<Agent> {
         "Kiro" => Some(Agent::Kiro),
         "CursorAgent" => Some(Agent::CursorAgent),
         "Gemini" => Some(Agent::Gemini),
+        "Hermes" => Some(Agent::Hermes),
         _ => None,
     }
 }
@@ -63,6 +64,7 @@ fn agent_to_str(a: Agent) -> &'static str {
         Agent::Kiro => "Kiro",
         Agent::CursorAgent => "CursorAgent",
         Agent::Gemini => "Gemini",
+        Agent::Hermes => "Hermes",
     }
 }
 
@@ -309,6 +311,7 @@ pub fn start_stale_scan(stale: &[Agent]) -> std::sync::mpsc::Receiver<ScanResult
                 Agent::Kiro => crate::scanner::kiro::scan().unwrap_or_default(),
                 Agent::CursorAgent => crate::scanner::cursor_agent::scan().unwrap_or_default(),
                 Agent::Gemini => crate::scanner::gemini::scan().unwrap_or_default(),
+                Agent::Hermes => crate::scanner::hermes::scan().unwrap_or_default(),
             };
             if debug {
                 eprintln!(

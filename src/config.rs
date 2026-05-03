@@ -33,6 +33,10 @@ pub fn cursor_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".cursor"))
 }
 
+pub fn hermes_dir() -> Result<PathBuf, AgfError> {
+    Ok(home_dir()?.join(".hermes"))
+}
+
 pub fn kiro_data_dir() -> Result<PathBuf, AgfError> {
     // Kiro CLI stores data via dirs::data_local_dir()
     // macOS: ~/Library/Application Support/kiro-cli/
