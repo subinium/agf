@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.11.1] - 2026-05-04
+
+### Changed
+
+- **`superlighttui` bumped 0.17 → 0.20.1** — picks up 8 patch/minor releases of the underlying TUI library since v0.10.0 was tagged. Drop-in: every public API agf uses (`Context`, `Color::Rgb`, `KeyCode`, `KeyModifiers`, `RunConfig`, `TextareaState`, container/col/row builders, `help_colored`, `separator_colored`, `consume_key`, `mouse_down`, `quit`) is unchanged; agf does not touch any of the v0.20 breaking APIs (`gauge`/`line_gauge`/`breadcrumb` chainable builders, `scrollable_with_gutter` `GutterOpts`, `Constraints` `WidthSpec`/`HeightSpec` redesign, `f32 → f64` ratio unification on `SplitPane`). Notable improvements inherited for free:
+  - **3–5× flush-path speedup on redraw-heavy frames** (SLT 0.18.2 #62) — `flush_buffer_diff` now coalesces consecutive same-style cells in a row into a single `Print(run)` instead of per-cell, dropping `queue!` calls roughly 12000 → 2000 on a 200×60 redraw.
+  - **~1000× speedup on static frames** (SLT 0.20.0 #171) — per-row hash skip in `flush_buffer_diff` short-circuits cell iteration on rows whose contents and style didn't change. The agf list view, which is mostly static while the user reads it, gets the full benefit.
+  - **`rgb_to_ansi256` u8 overflow fix at `r=g=b=248`** (SLT 0.19.1 #104) — agf's color palette (`Rgb(229, 229, 229)`, `Rgb(245, 158, 11)`, etc.) sits below the threshold so the user-visible bug never fired in agf, but downstream installs on color-limited terminals now route grayscale tones to the correct ANSI 256 cell instead of silently mapping to `Indexed(0)` (Black).
+  - **`stdout` BufWriter** (SLT 0.19.1 #172) — every frame now batches dozens of `write_all` ANSI commands behind a 64 KiB `BufWriter`, ending with a single `flush()`. Reduces syscalls per frame on every TUI mode without any agf-side change.
+  - **Bordered title CJK truncation + overdraw fixes, image command count drop, treemap/textarea panic fixes** (SLT 0.19.x), **textarea undo/redo, modal `tab_trap` opt-in, `Anchor` enum + `modal_at`** (SLT 0.20.0) — not used by agf today; available for future TUI work.
+
+### Fixed
+
+- **DeleteConfirm: arrow Up/Down (and `j`/`k`, `Ctrl-j`/`Ctrl-k`) now toggle Yes/No** ([#38](https://github.com/subinium/agf/issues/38)) — previously only Left/Right worked, which was surprising on the v0.11.0 release because every other modal-style picker in agf accepts both axes. The toggle is the same direction-agnostic flip (`Yes ↔ No`) regardless of which arrow key fires.
+- **ActionSelect / AgentSelect / PermissionSelect / ResumeSelect: arrow keys cycle through the menu instead of stopping at edges** ([#39](https://github.com/subinium/agf/issues/39)) — `Up` on the first item now jumps to the last; `Down` on the last wraps to the first. Tab/BackTab already wrapped — Up/Down/`Ctrl-p`/`Ctrl-n`/`Ctrl-j`/`Ctrl-k` now match.
+- **Footer shows `agf v<version>` on the leftmost cell of every mode's status bar** ([#40](https://github.com/subinium/agf/issues/40)) — version is read from `CARGO_PKG_VERSION` at compile time so it stays in sync with the published crate. The 10 per-mode status bars are now routed through a single `render_footer` helper to keep layout uniform.
+
 ## [0.11.0] - 2026-05-04
 
 ### Added

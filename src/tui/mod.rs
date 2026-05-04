@@ -772,26 +772,21 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         // Separator between content and statusbar
         ui.separator_colored(SEPARATOR);
 
-        // Help bar (dim, right-aligned)
-        let _ = ui.container().pr(1).row(|ui| {
-            ui.spacer();
-            let _ = ui.help_colored(
-                &[
-                    ("↑↓", "nav"),
-                    ("Tab", "agent"),
-                    ("[/]", "summary"),
-                    ("→", "detail"),
-                    ("Enter", "select"),
-                    ("^S", "sort"),
-                    ("^G", "group"),
-                    ("^D", "delete"),
-                    ("?", "help"),
-                    ("Esc", "quit"),
-                ],
-                GRAY_500,
-                SEPARATOR,
-            );
-        });
+        render_footer(
+            ui,
+            &[
+                ("↑↓", "nav"),
+                ("Tab", "agent"),
+                ("[/]", "summary"),
+                ("→", "detail"),
+                ("Enter", "select"),
+                ("^S", "sort"),
+                ("^G", "group"),
+                ("^D", "delete"),
+                ("?", "help"),
+                ("Esc", "quit"),
+            ],
+        );
     });
 
     // Sync textarea → query (textarea stores lines, we use first line only)
@@ -1066,19 +1061,15 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
         });
 
         ui.separator_colored(SEPARATOR);
-        let _ = ui.container().pr(1).row(|ui| {
-            ui.spacer();
-            let _ = ui.help_colored(
-                &[
-                    ("↑↓", "nav"),
-                    ("Enter/Space", "expand"),
-                    ("^G", "flat view"),
-                    ("Esc", "back"),
-                ],
-                GRAY_500,
-                SEPARATOR,
-            );
-        });
+        render_footer(
+            ui,
+            &[
+                ("↑↓", "nav"),
+                ("Enter/Space", "expand"),
+                ("^G", "flat view"),
+                ("Esc", "back"),
+            ],
+        );
     });
 }
 
@@ -1090,25 +1081,18 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.mode = Mode::Browse;
     }
 
-    // Tab/BackTab: wrap-around navigation
-    if ui.consume_key_code(slt::KeyCode::BackTab) {
-        app.action_index = (app.action_index + action_count - 1) % action_count;
-    } else if (ui.key_code(slt::KeyCode::Up)
+    if ui.consume_key_code(slt::KeyCode::BackTab)
+        || ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
-        && app.action_index > 0
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
     {
-        app.action_index -= 1;
-    }
-
-    if ui.consume_key_code(slt::KeyCode::Tab) {
-        app.action_index = (app.action_index + 1) % action_count;
-    } else if (ui.key_code(slt::KeyCode::Down)
+        app.action_index = (app.action_index + action_count - 1) % action_count;
+    } else if ui.consume_key_code(slt::KeyCode::Tab)
+        || ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
-        && app.action_index < action_count - 1
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
     {
-        app.action_index += 1;
+        app.action_index = (app.action_index + 1) % action_count;
     }
 
     for i in 0..action_count.min(9) {
@@ -1260,13 +1244,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.container().pl(1).row(|ui| {
-            let _ = ui.help_colored(
-                &[("Tab", "nav"), ("Enter", "select"), ("Esc", "back")],
-                GRAY_500,
-                SEPARATOR,
-            );
-        });
+        render_footer(ui, &[("Tab", "nav"), ("Enter", "select"), ("Esc", "back")]);
     });
 }
 
@@ -1319,26 +1297,20 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         app.mode = Mode::ActionSelect;
     }
 
-    // Tab/BackTab: wrap-around navigation
-    if ui.consume_key_code(slt::KeyCode::BackTab) && option_count > 0 {
+    if option_count > 0
+        && (ui.consume_key_code(slt::KeyCode::BackTab)
+            || ui.key_code(slt::KeyCode::Up)
+            || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+            || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+    {
         app.agent_index = (app.agent_index + option_count - 1) % option_count;
-    } else if (ui.key_code(slt::KeyCode::Up)
-        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
-        && app.agent_index > 0
+    } else if option_count > 0
+        && (ui.consume_key_code(slt::KeyCode::Tab)
+            || ui.key_code(slt::KeyCode::Down)
+            || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+            || ui.key_mod('j', slt::KeyModifiers::CONTROL))
     {
-        app.agent_index -= 1;
-    }
-
-    if ui.consume_key_code(slt::KeyCode::Tab) && option_count > 0 {
         app.agent_index = (app.agent_index + 1) % option_count;
-    } else if (ui.key_code(slt::KeyCode::Down)
-        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
-        && option_count > 0
-        && app.agent_index < option_count - 1
-    {
-        app.agent_index += 1;
     }
 
     for i in 0..option_count.min(9) {
@@ -1412,18 +1384,15 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.container().pl(1).row(|ui| {
-            let _ = ui.help_colored(
-                &[
-                    ("1-9", "select"),
-                    ("Tab", "nav"),
-                    ("Enter", "mode"),
-                    ("Esc", "back"),
-                ],
-                GRAY_500,
-                SEPARATOR,
-            );
-        });
+        render_footer(
+            ui,
+            &[
+                ("1-9", "select"),
+                ("Tab", "nav"),
+                ("Enter", "mode"),
+                ("Esc", "back"),
+            ],
+        );
     });
 }
 
@@ -1475,26 +1444,20 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         app.mode = Mode::AgentSelect;
     }
 
-    // Tab/BackTab: wrap-around navigation
-    if ui.key_code(slt::KeyCode::BackTab) && option_count > 0 {
+    if option_count > 0
+        && (ui.key_code(slt::KeyCode::BackTab)
+            || ui.key_code(slt::KeyCode::Up)
+            || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+            || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+    {
         app.mode_index = (app.mode_index + option_count - 1) % option_count;
-    } else if (ui.key_code(slt::KeyCode::Up)
-        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
-        && app.mode_index > 0
+    } else if option_count > 0
+        && (ui.key_code(slt::KeyCode::Tab)
+            || ui.key_code(slt::KeyCode::Down)
+            || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+            || ui.key_mod('j', slt::KeyModifiers::CONTROL))
     {
-        app.mode_index -= 1;
-    }
-
-    if ui.key_code(slt::KeyCode::Tab) && option_count > 0 {
         app.mode_index = (app.mode_index + 1) % option_count;
-    } else if (ui.key_code(slt::KeyCode::Down)
-        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
-        && option_count > 0
-        && app.mode_index < option_count - 1
-    {
-        app.mode_index += 1;
     }
 
     for i in 0..option_count.min(9) {
@@ -1567,13 +1530,10 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.container().pl(1).row(|ui| {
-            let _ = ui.help_colored(
-                &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
-                GRAY_500,
-                SEPARATOR,
-            );
-        });
+        render_footer(
+            ui,
+            &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
+        );
     });
 }
 
@@ -1598,26 +1558,20 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.mode = Mode::ActionSelect;
     }
 
-    // Tab/BackTab: wrap-around navigation
-    if ui.key_code(slt::KeyCode::BackTab) && option_count > 0 {
+    if option_count > 0
+        && (ui.key_code(slt::KeyCode::BackTab)
+            || ui.key_code(slt::KeyCode::Up)
+            || ui.key_mod('p', slt::KeyModifiers::CONTROL)
+            || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+    {
         app.resume_mode_index = (app.resume_mode_index + option_count - 1) % option_count;
-    } else if (ui.key_code(slt::KeyCode::Up)
-        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
-        && app.resume_mode_index > 0
+    } else if option_count > 0
+        && (ui.key_code(slt::KeyCode::Tab)
+            || ui.key_code(slt::KeyCode::Down)
+            || ui.key_mod('n', slt::KeyModifiers::CONTROL)
+            || ui.key_mod('j', slt::KeyModifiers::CONTROL))
     {
-        app.resume_mode_index -= 1;
-    }
-
-    if ui.key_code(slt::KeyCode::Tab) && option_count > 0 {
         app.resume_mode_index = (app.resume_mode_index + 1) % option_count;
-    } else if (ui.key_code(slt::KeyCode::Down)
-        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
-        && option_count > 0
-        && app.resume_mode_index < option_count - 1
-    {
-        app.resume_mode_index += 1;
     }
 
     for i in 0..option_count.min(9) {
@@ -1686,13 +1640,10 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.container().pl(1).row(|ui| {
-            let _ = ui.help_colored(
-                &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
-                GRAY_500,
-                SEPARATOR,
-            );
-        });
+        render_footer(
+            ui,
+            &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
+        );
     });
 }
 
@@ -1773,13 +1724,10 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
                 .fg(RED)
                 .bold();
         });
-        let _ = ui.container().pl(1).row(|ui| {
-            let _ = ui.help_colored(
-                &[("Space", "toggle"), ("Enter", "delete"), ("Esc", "cancel")],
-                GRAY_500,
-                SEPARATOR,
-            );
-        });
+        render_footer(
+            ui,
+            &[("Space", "toggle"), ("Enter", "delete"), ("Esc", "cancel")],
+        );
     });
 }
 
@@ -1794,15 +1742,18 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
         }
     }
 
-    // Horizontal toggle only: Yes/No is a horizontal choice. Up/Down would
-    // be confusing (and easy to hit accidentally), so only Left/Right and
-    // Ctrl-h/l toggle.
     if ui.key_code(slt::KeyCode::Left)
         || ui.key_code(slt::KeyCode::Right)
+        || ui.key_code(slt::KeyCode::Up)
+        || ui.key_code(slt::KeyCode::Down)
         || ui.key('h')
         || ui.key('l')
+        || ui.key('j')
+        || ui.key('k')
         || ui.key_mod('h', slt::KeyModifiers::CONTROL)
         || ui.key_mod('l', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
+        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
     {
         app.delete_index = if app.delete_index == 0 { 1 } else { 0 };
     }
@@ -2076,13 +2027,10 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        let _ = ui.container().pl(1).row(|ui| {
-            let _ = ui.help_colored(
-                &[("↑↓", "cycle"), ("Enter", "actions"), ("Esc/←", "back")],
-                GRAY_500,
-                SEPARATOR,
-            );
-        });
+        render_footer(
+            ui,
+            &[("↑↓", "cycle"), ("Enter", "actions"), ("Esc/←", "back")],
+        );
     });
 }
 
@@ -2263,19 +2211,15 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         });
 
         ui.separator_colored(SEPARATOR);
-        let _ = ui.container().pr(1).row(|ui| {
-            ui.spacer();
-            let _ = ui.help_colored(
-                &[
-                    ("↑↓", "navigate"),
-                    ("Enter", "toggle"),
-                    ("+/-", "adjust"),
-                    ("Esc", "close"),
-                ],
-                GRAY_500,
-                SEPARATOR,
-            );
-        });
+        render_footer(
+            ui,
+            &[
+                ("↑↓", "navigate"),
+                ("Enter", "toggle"),
+                ("+/-", "adjust"),
+                ("Esc", "close"),
+            ],
+        );
     });
 }
 
@@ -2283,6 +2227,15 @@ fn help_line(ui: &mut slt::Context, key: &str, desc: &str) {
     let _ = ui.row(|ui| {
         ui.styled(format!("  {:<16}", key), slt::Style::new().fg(GRAY_500));
         ui.text(desc).fg(GRAY_400);
+    });
+}
+
+fn render_footer(ui: &mut slt::Context, hints: &[(&str, &str)]) {
+    let _ = ui.container().px(1).row(|ui| {
+        ui.text(concat!("agf v", env!("CARGO_PKG_VERSION")))
+            .fg(GRAY_500);
+        ui.spacer();
+        let _ = ui.help_colored(hints, GRAY_500, SEPARATOR);
     });
 }
 

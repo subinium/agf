@@ -1,6 +1,6 @@
 [package]
 name = "agf"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2021"
 description = "Find and resume local AI coding-agent sessions across Claude Code, Codex, Gemini, Cursor CLI, OpenCode, Kiro, pi, and Hermes"
 license = "MIT"
@@ -10,7 +10,7 @@ categories = ["command-line-utilities"]
 readme = "README.md"
 
 [dependencies]
-superlighttui = "0.17"
+superlighttui = "0.20"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
