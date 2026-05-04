@@ -8,7 +8,7 @@
 > Find the AI coding session you meant to resume.
 
 `agf` is a local-first fuzzy finder for AI coding-agent sessions.
-Search local sessions across **Claude Code**, **Codex**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, and **pi** — then resume the right one in a keystroke.
+Search local sessions across **Claude Code**, **Codex**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, **pi**, and **Hermes** — then resume the right one in a keystroke.
 
 ![agf demo](./assets/demo.gif)
 
@@ -50,6 +50,7 @@ Then you either dig through history files or start over.
 | [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
 | [Kiro](https://kiro.dev) | `kiro-cli chat --resume` | `~/Library/Application Support/kiro-cli/data.sqlite3` |
 | [pi](https://github.com/badlogic/pi-mono) | `pi --resume` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
+| [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes --resume <id>` | `~/.hermes/state.db` |
 
 <details>
 <summary>Full session storage paths</summary>
@@ -63,6 +64,7 @@ Then you either dig through history files or start over.
 | Kiro | SQLite | macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`<br>Linux: `~/.local/share/kiro-cli/data.sqlite3` |
 | Cursor CLI | SQLite + TXT | `~/.cursor/chats/*/<id>/store.db`<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` |
 | Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
+| Hermes | SQLite | `~/.hermes/state.db` (sessions + messages)<br>JSON dumps in `~/.hermes/sessions/session_<id>.json`<br>Hermes is cwd-independent — resume runs in your current shell directory |
 
 </details>
 

@@ -7,7 +7,14 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Agent, Session};
 use crate::plugin;
 
-const CACHE_VERSION: u32 = 2;
+// Bumped to 3 in v0.11.0:
+// - Hermes Agent registered (#34) so the per-agent cache map gains a new key.
+// - Hermes session payloads now carry first-user-message previews (only on
+//   CLI/TUI session ids) instead of bare source/model fallbacks; older cache
+//   entries written by 0.10.x would surface as stale "cli session (...)"
+//   summaries until the source DB mtime happens to change.
+//   Bumping the version forces a one-time rescan on first 0.11.0 launch.
+const CACHE_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct CacheFile {
