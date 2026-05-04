@@ -244,15 +244,18 @@ fn main() -> anyhow::Result<()> {
             scanning_agents,
         );
 
-        // Apply sort_by from config
-        if let Some(ref sort_by) = config.sort_by {
-            app.sort_mode = match sort_by.as_str() {
-                "name" => model::SortMode::Name,
-                "agent" => model::SortMode::Agent,
-                _ => model::SortMode::Time,
-            };
-            app.apply_sort();
-        }
+        // Apply sort from config (default: time). Always call apply_sort()
+        // so the initial render is ordered — without this, agents loaded
+        // from the cache appear in the order they were grouped on disk
+        // (per-agent buckets) rather than by timestamp, so a session from
+        // 11 minutes ago can land below sessions from a month ago on the
+        // first frame.
+        app.sort_mode = match config.sort_by.as_deref() {
+            Some("name") => model::SortMode::Name,
+            Some("agent") => model::SortMode::Agent,
+            _ => model::SortMode::Time,
+        };
+        app.apply_sort();
         let result = app.run()?;
         // Persist whatever sessions accumulated during the TUI lifetime so
         // the next launch reflects all scans that completed before exit.

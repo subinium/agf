@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.11.0] - 2026-05-04
+
+### Added
+
+- **Hermes Agent support** (#34, by @SHL0MS) — adds [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research's self-improving agent) as a first-class scanner. Reads top-level sessions from `~/.hermes/state.db` (SQLite); aggregates child-session titles as additional summaries (same pattern as OpenCode subagents); cascade-deletes messages → child sessions → parent → on-disk JSON dumps under `~/.hermes/sessions/session_<id>.json`. Resume via `hermes --resume <session_id>`.
+
+### Fixed
+
+- **scanner/hermes: pull first user message as preview when title is NULL** — Hermes lazily auto-generates titles after the first exchange, so short sessions stay un-titled and the listing fell back to bare `api_server session (model) — N msgs`. The scan query now selects the earliest `messages.content WHERE role='user'`, collapses whitespace, strips `<user_query>` wrapper tags, and caps to 160 chars so the detail pane shows what the conversation was actually about.
+- **scanner/hermes: empty project_path so resume stays in the user's cwd** — Hermes is cwd-independent; the original PR set `project_path = ~/.hermes`, which made `agf` emit `cd ~/.hermes && hermes --resume <id>` and yanked the shell out of whatever project the user was working in. `shell::cd_and` now skips the `cd` when the quoted path is empty (`""` / `''` / `\"\"`), and the Hermes scanner leaves `project_path` empty. `display_path()` renders empty paths as `—` so the TUI doesn't show a blank cell.
+- **delete/hermes: wrap cascade in a single SQLite transaction** — the original four DELETEs ran independently; a mid-cascade failure (disk full, DB locked, etc.) could leave orphan messages whose `sessions` row was already gone, surfacing as ghost rows on the next scan. The four DELETEs are now `BEGIN`/`COMMIT`-wrapped via `Connection::transaction`.
+- **TUI: time sort not applied on first frame when `config.sort_by` is unset** (regression visible since the cache was grouped per-agent) — `main.rs` only called `app.apply_sort()` inside an `if let Some(sort_by) = config.sort_by`, so the default-sort path silently rendered the cache's per-agent grouping order. A session from 11 minutes ago could land below sessions from a month ago on the first paint. `apply_sort()` is now always called; `sort_mode` falls through to `SortMode::Time` when `config.sort_by` is `None`.
+- **TUI: cwd-match boost removed** — the secondary sort that pushed sessions whose `project_path == $PWD` above everything else made the time-sorted listing look broken when `agf` was launched from inside a project: 11 sessions from "this project" surfaced first, then suddenly a 2-minute-old session from another project, then a 31-minute-old Hermes session, and so on. The boost was implicit (no on-screen indicator), so users read it as "time sort is wrong." Pinning is still honored — it's an explicit user action — but cwd is no longer special-cased.
+- **cache: bump `CACHE_VERSION` to 3** — Hermes Agent gained a new entry in the per-agent cache map, and the Hermes session payload now carries first-user-message previews instead of bare source/model fallbacks. Without bumping, 0.10.x cache files would surface as stale "cli session (...)" summaries on first 0.11.0 launch until the underlying DB mtime happened to change. The bump forces a one-time rescan on upgrade.
+
+### Notes
+
+- Cursor CLI scanner regression tracked separately in [#35](https://github.com/subinium/agf/issues/35) — recent cursor-agent installs write transcripts as `<id>/<id>.jsonl` (depth 4) instead of the legacy `<id>.txt` (depth 3) the scanner expects, so `agf list --agent cursor-agent` returns 0 sessions on those installs. Out of scope for this release.
+
 ## [0.10.3] - 2026-05-01
 
 ### Fixed

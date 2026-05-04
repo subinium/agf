@@ -50,7 +50,15 @@ impl CommandShell {
     ///
     /// POSIX uses `&&`. PowerShell 5.1 has no `&&` (that lands in 7+), so
     /// we use `; if ($?) { ... }` which works in both 5.1 and 7+.
+    ///
+    /// When `quoted_path` is empty (or the empty quoted form `''` / `""`)
+    /// the cd is skipped entirely — used by cwd-independent agents like
+    /// Hermes that don't have a project root and shouldn't drag the user
+    /// out of their current working directory on resume.
     pub fn cd_and(&self, quoted_path: &str, cmd: &str) -> String {
+        if quoted_path.is_empty() || quoted_path == "''" || quoted_path == "\"\"" {
+            return cmd.to_string();
+        }
         match self {
             Self::Posix => format!("cd {quoted_path} && {cmd}"),
             Self::PowerShell => format!("Set-Location {quoted_path}; if ($?) {{ {cmd} }}"),

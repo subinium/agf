@@ -403,7 +403,10 @@ fn delete_gemini_session(session: &Session) -> Result<(), io::Error> {
 
 /// Hermes Agent sessions are stored in a SQLite database at
 /// `~/.hermes/state.db`. Messages are in a separate `messages` table
-/// with a foreign key to `sessions.id`.
+/// with a foreign key to `sessions.id`. The four DELETEs are wrapped in
+/// a single transaction so a mid-cascade failure can't leave the DB in
+/// an inconsistent state (e.g. orphan messages whose sessions row is
+/// gone, which would surface as ghost rows on the next scan).
 fn delete_hermes_session(session: &Session) -> Result<(), io::Error> {
     let hermes_dir = config::hermes_dir().map_err(io::Error::other)?;
     let db_path = hermes_dir.join("state.db");
@@ -411,38 +414,44 @@ fn delete_hermes_session(session: &Session) -> Result<(), io::Error> {
         return Ok(());
     }
 
-    let conn = rusqlite::Connection::open(&db_path)
+    let mut conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| io::Error::other(format!("SQLite open error: {e}")))?;
 
+    let tx = conn
+        .transaction()
+        .map_err(|e| io::Error::other(format!("SQLite begin tx error: {e}")))?;
+
     // Delete messages first (foreign key constraint).
-    conn.execute(
+    tx.execute(
         "DELETE FROM messages WHERE session_id = ?1",
         [&session.session_id],
     )
     .map_err(|e| io::Error::other(format!("SQLite delete messages error: {e}")))?;
 
     // Delete child sessions' messages and then the child sessions themselves.
-    conn.execute(
+    tx.execute(
         "DELETE FROM messages WHERE session_id IN \
          (SELECT id FROM sessions WHERE parent_session_id = ?1)",
         [&session.session_id],
     )
     .map_err(|e| io::Error::other(format!("SQLite delete child messages error: {e}")))?;
 
-    conn.execute(
+    tx.execute(
         "DELETE FROM sessions WHERE parent_session_id = ?1",
         [&session.session_id],
     )
     .map_err(|e| io::Error::other(format!("SQLite delete child sessions error: {e}")))?;
 
     // Delete the parent session.
-    conn.execute(
-        "DELETE FROM sessions WHERE id = ?1",
-        [&session.session_id],
-    )
-    .map_err(|e| io::Error::other(format!("SQLite delete session error: {e}")))?;
+    tx.execute("DELETE FROM sessions WHERE id = ?1", [&session.session_id])
+        .map_err(|e| io::Error::other(format!("SQLite delete session error: {e}")))?;
 
-    // Also remove any on-disk session JSON dumps.
+    tx.commit()
+        .map_err(|e| io::Error::other(format!("SQLite commit error: {e}")))?;
+
+    // Also remove any on-disk session JSON dumps. These are best-effort:
+    // a failure here doesn't undo the DB delete (which is the source of
+    // truth for the listing), so we swallow the error.
     let sessions_dir = hermes_dir.join("sessions");
     if sessions_dir.exists() {
         let prefix = format!("session_{}", session.session_id);

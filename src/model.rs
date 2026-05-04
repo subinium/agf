@@ -205,6 +205,12 @@ impl Session {
     }
 
     pub fn display_path(&self) -> String {
+        // cwd-independent agents (Hermes) leave project_path empty so resume
+        // doesn't drag the user out of their current directory; surface that
+        // visually instead of rendering an empty cell.
+        if self.project_path.is_empty() {
+            return "—".to_string();
+        }
         if let Some(home) = dirs::home_dir() {
             if let Some(rest) = self.project_path.strip_prefix(home.to_str().unwrap_or("")) {
                 return format!("~{rest}");

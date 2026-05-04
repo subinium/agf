@@ -75,6 +75,11 @@ pub struct App {
     pub show_recap: bool,
     pub help_selected: usize,
     pub search_textarea: slt::TextareaState,
+    /// Current working directory at TUI launch. Previously drove a cwd-match
+    /// boost in `apply_sort` (removed in v0.11.0); kept on the struct so the
+    /// surrounding wiring (CLI plumbing in `main.rs`, `App::new` signature)
+    /// stays stable for a future settings-gated reintroduction.
+    #[allow(dead_code)]
     pub cwd: Option<String>,
     pub agent_counts: HashMap<Agent, usize>,
     pub pinned_sessions: Vec<String>,
@@ -210,17 +215,20 @@ impl App {
             }),
         }
 
-        // Boost: pinned first, then $PWD matches (stable sort preserves primary order within groups)
+        // Boost: pinned first; everything else keeps the primary sort order
+        // (stable sort preserves it within rank). The previous cwd-match
+        // boost was removed in v0.11.0 because it implicitly grouped the
+        // current project's sessions above older sessions from elsewhere,
+        // which made the listing look "out of time order" without any
+        // visible cause — `agf` has no UI hint that cwd boost is active.
+        // Pinning is still honored because it's an explicit user action.
         let pinned = self.pinned_sessions.clone();
-        let cwd = self.cwd.clone();
         self.sessions.sort_by(|a, b| {
             let rank = |s: &Session| -> u8 {
                 if pinned.contains(&s.session_id) {
                     0
-                } else if cwd.as_ref().is_some_and(|c| s.project_path == *c) {
-                    1
                 } else {
-                    2
+                    1
                 }
             };
             rank(a).cmp(&rank(b))
