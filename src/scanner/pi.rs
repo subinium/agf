@@ -52,7 +52,7 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
     let mut header = None;
-    let mut summary = None;
+    let mut summaries = Vec::new();
 
     for line in reader.lines().map_while(Result::ok) {
         let line = line.trim();
@@ -69,12 +69,8 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
             header = serde_json::from_value::<PiSessionHeader>(value.clone()).ok();
         }
 
-        if summary.is_none() {
-            summary = extract_user_summary(&value);
-        }
-
-        if header.is_some() && summary.is_some() {
-            break;
+        if let Some(summary) = extract_user_summary(&value) {
+            summaries.push(summary);
         }
     }
 
@@ -105,8 +101,6 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
-
-    let summaries = summary.into_iter().collect();
 
     Some(Session {
         agent: Agent::Pi,
@@ -232,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_extracts_first_user_message_as_summary() {
+    fn scan_extracts_user_messages_as_summaries() {
         let _guard = home_lock().lock().unwrap();
         let old_home = std::env::var_os("HOME");
         let home = temp_home("user-summary");
@@ -247,6 +241,8 @@ mod tests {
                 r#"{"type":"model_change","id":"model"}"#,
                 r#"{"type":"message","message":{"role":"bashExecution","content":[{"type":"text","text":"cargo test"}]}}"#,
                 r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"发布pip版本\n后续细节不用进入列表标题"}]}}"#,
+                r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"再发一个版本"}]}}"#,
             ],
         );
 
@@ -259,6 +255,6 @@ mod tests {
         }
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].summaries, vec!["发布pip版本"]);
+        assert_eq!(sessions[0].summaries, vec!["发布pip版本", "再发一个版本"]);
     }
 }
