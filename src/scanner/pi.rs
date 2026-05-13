@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use serde::Deserialize;
 use walkdir::WalkDir;
 
@@ -92,11 +90,86 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         });
     }
 
-    // Sort by timestamp desc, keep only the most recent session per project
-    // (pi --resume only resumes the latest session for a directory)
+    // Sort by timestamp desc. Pi supports resuming a specific session by id,
+    // so keep older sessions from the same project selectable.
     sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
-    let mut seen = HashSet::new();
-    sessions.retain(|s| seen.insert(s.project_path.clone()));
 
     Ok(sessions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
+    fn home_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn temp_home(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "agf-pi-scan-{name}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn write_pi_session(
+        home: &std::path::Path,
+        dir: &str,
+        filename: &str,
+        id: &str,
+        timestamp: &str,
+        cwd: &str,
+    ) {
+        let session_dir = home.join(".pi/agent/sessions").join(dir);
+        fs::create_dir_all(&session_dir).unwrap();
+        let mut file = fs::File::create(session_dir.join(filename)).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"session","id":"{id}","timestamp":"{timestamp}","cwd":"{cwd}"}}"#
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scan_keeps_multiple_sessions_from_same_project() {
+        let _guard = home_lock().lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let home = temp_home("same-project");
+        std::env::set_var("HOME", &home);
+
+        write_pi_session(
+            &home,
+            "--tmp-project--",
+            "old.jsonl",
+            "old-session",
+            "2026-05-01T00:00:00Z",
+            "/tmp/project",
+        );
+        write_pi_session(
+            &home,
+            "--tmp-project--",
+            "new.jsonl",
+            "new-session",
+            "2026-05-02T00:00:00Z",
+            "/tmp/project",
+        );
+
+        let sessions = scan().unwrap();
+
+        if let Some(old_home) = old_home {
+            std::env::set_var("HOME", old_home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        let ids: Vec<_> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["new-session", "old-session"]);
+    }
 }
