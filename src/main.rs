@@ -231,10 +231,11 @@ fn main() -> anyhow::Result<()> {
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(|s| s.to_string()));
+        let initial_query = default_tui_query(cli.query, cwd.clone());
         let include_summaries = config.search_scope == "all";
         let mut app = tui::App::new(
             sessions,
-            cli.query,
+            initial_query,
             config.summary_search_count,
             include_summaries,
             cwd,
@@ -270,6 +271,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn default_tui_query(query: Option<String>, cwd: Option<String>) -> Option<String> {
+    query.or(cwd)
 }
 
 /// RAII guard that enters the alternate screen and hides the cursor on
@@ -358,4 +363,26 @@ fn exec_via_shell(cmd: &str, shell: shell::CommandShell) -> anyhow::Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn default_tui_query_uses_cwd_when_no_query_is_given() {
+        assert_eq!(
+            super::default_tui_query(None, Some("/data/projects/llmcmd".to_string())),
+            Some("/data/projects/llmcmd".to_string())
+        );
+    }
+
+    #[test]
+    fn default_tui_query_keeps_explicit_query() {
+        assert_eq!(
+            super::default_tui_query(
+                Some("pi llmcmd".to_string()),
+                Some("/data/projects/llmcmd".to_string())
+            ),
+            Some("pi llmcmd".to_string())
+        );
+    }
 }
