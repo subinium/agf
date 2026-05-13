@@ -11,7 +11,6 @@ pub fn generate_command(
 
     match action {
         Action::Resume => {
-            // NOTE: Pi/Kiro CLI only resume latest; session_id ignored.
             let cmd = session.agent.resume_cmd(&session.session_id);
             Some(shell.cd_and(&quoted_path, &cmd))
         }
@@ -65,7 +64,6 @@ pub fn detect_editor() -> String {
 pub fn resume_with_flags(session: &Session, flags: &str) -> String {
     let shell = CommandShell::from_env();
     let quoted_path = shell.quote(&session.project_path);
-    // NOTE: Pi/Kiro CLI only resume latest; session_id ignored.
     let base_cmd = session.agent.resume_cmd(&session.session_id);
     shell.cd_and(&quoted_path, &format!("{base_cmd}{flags}"))
 }

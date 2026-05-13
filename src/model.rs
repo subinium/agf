@@ -75,7 +75,7 @@ impl Agent {
             Agent::ClaudeCode => format!("claude --resume '{session_id}'"),
             Agent::Codex => format!("codex resume '{session_id}'"),
             Agent::OpenCode => format!("opencode -s '{session_id}'"),
-            Agent::Pi => "pi --resume".to_string(),
+            Agent::Pi => format!("pi --session '{session_id}'"),
             Agent::Kiro => "kiro-cli chat --resume".to_string(),
             Agent::CursorAgent => format!("cursor-agent --resume '{session_id}'"),
             Agent::Gemini => format!("gemini --resume '{session_id}'"),
@@ -268,5 +268,18 @@ impl fmt::Display for Action {
             Action::Delete => write!(f, "Delete Session"),
             Action::Back => write!(f, "← Back"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pi_resume_command_uses_selected_session_id() {
+        assert_eq!(
+            Agent::Pi.resume_cmd("019e14f4-c9a5-76dc-b7b6-0613e602a620"),
+            "pi --session '019e14f4-c9a5-76dc-b7b6-0613e602a620'"
+        );
     }
 }
