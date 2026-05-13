@@ -1,9 +1,14 @@
 use serde::Deserialize;
+use serde_json::Value;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use walkdir::WalkDir;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
-use crate::scanner::read_first_line;
+use crate::scanner::first_line_truncated;
+
+const SUMMARY_MAX_CHARS: usize = 120;
 
 #[derive(Deserialize)]
 struct PiSessionHeader {
@@ -31,63 +36,9 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             continue;
         }
 
-        // Read just the first line rather than loading the whole JSONL.
-        let first_line = match read_first_line(path) {
-            Some(line) => line,
-            None => continue,
-        };
-
-        let header: PiSessionHeader = match serde_json::from_str(first_line.trim()) {
-            Ok(h) => h,
-            Err(_) => continue,
-        };
-
-        if header.entry_type.as_deref() != Some("session") {
-            continue;
+        if let Some(session) = parse_session(path) {
+            sessions.push(session);
         }
-
-        let session_id = match header.id {
-            Some(id) => id,
-            None => continue,
-        };
-
-        let cwd = match header.cwd {
-            Some(cwd) => cwd,
-            None => continue,
-        };
-
-        let timestamp = header
-            .timestamp
-            .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or_else(|| {
-                path.metadata()
-                    .and_then(|m| m.modified())
-                    .map(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as i64
-                    })
-                    .unwrap_or(0)
-            });
-
-        let project_name = std::path::Path::new(&cwd)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        sessions.push(Session {
-            agent: Agent::Pi,
-            session_id,
-            project_name,
-            project_path: cwd,
-            summaries: Vec::new(),
-            timestamp,
-            git_branch: None,
-            worktree: None,
-            recap: None,
-        });
     }
 
     // Sort by timestamp desc. Pi supports resuming a specific session by id,
@@ -95,6 +46,104 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
 
     Ok(sessions)
+}
+
+fn parse_session(path: &std::path::Path) -> Option<Session> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut header = None;
+    let mut summary = None;
+
+    for line in reader.lines().map_while(Result::ok) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        if header.is_none() && value.get("type").and_then(Value::as_str) == Some("session") {
+            header = serde_json::from_value::<PiSessionHeader>(value.clone()).ok();
+        }
+
+        if summary.is_none() {
+            summary = extract_user_summary(&value);
+        }
+
+        if header.is_some() && summary.is_some() {
+            break;
+        }
+    }
+
+    let header = header?;
+    if header.entry_type.as_deref() != Some("session") {
+        return None;
+    }
+
+    let session_id = header.id?;
+    let cwd = header.cwd?;
+    let timestamp = header
+        .timestamp
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or_else(|| {
+            path.metadata()
+                .and_then(|m| m.modified())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64
+                })
+                .unwrap_or(0)
+        });
+
+    let project_name = std::path::Path::new(&cwd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let summaries = summary.into_iter().collect();
+
+    Some(Session {
+        agent: Agent::Pi,
+        session_id,
+        project_name,
+        project_path: cwd,
+        summaries,
+        timestamp,
+        git_branch: None,
+        worktree: None,
+        recap: None,
+    })
+}
+
+fn extract_user_summary(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+
+    let message = value.get("message")?;
+    if message.get("role").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+
+    extract_text_content(message.get("content")?)
+}
+
+fn extract_text_content(content: &Value) -> Option<String> {
+    match content {
+        Value::String(text) => first_line_truncated(text, SUMMARY_MAX_CHARS),
+        Value::Array(items) => items.iter().find_map(extract_text_content),
+        Value::Object(map) => match map.get("text") {
+            Some(Value::String(text)) => first_line_truncated(text, SUMMARY_MAX_CHARS),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +186,15 @@ mod tests {
         .unwrap();
     }
 
+    fn write_pi_session_lines(home: &std::path::Path, dir: &str, filename: &str, lines: &[&str]) {
+        let session_dir = home.join(".pi/agent/sessions").join(dir);
+        fs::create_dir_all(&session_dir).unwrap();
+        let mut file = fs::File::create(session_dir.join(filename)).unwrap();
+        for line in lines {
+            writeln!(file, "{line}").unwrap();
+        }
+    }
+
     #[test]
     fn scan_keeps_multiple_sessions_from_same_project() {
         let _guard = home_lock().lock().unwrap();
@@ -171,5 +229,36 @@ mod tests {
 
         let ids: Vec<_> = sessions.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, vec!["new-session", "old-session"]);
+    }
+
+    #[test]
+    fn scan_extracts_first_user_message_as_summary() {
+        let _guard = home_lock().lock().unwrap();
+        let old_home = std::env::var_os("HOME");
+        let home = temp_home("user-summary");
+        std::env::set_var("HOME", &home);
+
+        write_pi_session_lines(
+            &home,
+            "--tmp-project--",
+            "session.jsonl",
+            &[
+                r#"{"type":"session","id":"session-with-summary","timestamp":"2026-05-01T00:00:00Z","cwd":"/tmp/project"}"#,
+                r#"{"type":"model_change","id":"model"}"#,
+                r#"{"type":"message","message":{"role":"bashExecution","content":[{"type":"text","text":"cargo test"}]}}"#,
+                r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"发布pip版本\n后续细节不用进入列表标题"}]}}"#,
+            ],
+        );
+
+        let sessions = scan().unwrap();
+
+        if let Some(old_home) = old_home {
+            std::env::set_var("HOME", old_home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].summaries, vec!["发布pip版本"]);
     }
 }
