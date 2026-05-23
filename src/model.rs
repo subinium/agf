@@ -76,6 +76,8 @@ impl Agent {
             Agent::Codex => format!("codex resume '{session_id}'"),
             Agent::OpenCode => format!("opencode -s '{session_id}'"),
             Agent::Pi => format!("pi --session '{session_id}'"),
+            // Kiro CLI has no per-session resume flag — `--resume` always
+            // reopens the latest session for the cwd, so session_id is unused.
             Agent::Kiro => "kiro-cli chat --resume".to_string(),
             Agent::CursorAgent => format!("cursor-agent --resume '{session_id}'"),
             Agent::Gemini => format!("gemini --resume '{session_id}'"),

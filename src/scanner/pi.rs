@@ -10,6 +10,15 @@ use crate::scanner::first_line_truncated;
 
 const SUMMARY_MAX_CHARS: usize = 120;
 
+/// Cap on bytes parsed per pi session file. Pi transcripts are usually small,
+/// but a long-running session can grow to several MB. Reading every byte on a
+/// cold scan — which the v5 `CACHE_VERSION` bump forces once on upgrade —
+/// repeats the v0.10.1 heavy-log stall that `read_head_tail` was added to
+/// prevent for Claude. The header (id/cwd/timestamp) is the first line so it
+/// is always read; this only bounds how many prompt summaries are collected
+/// from pathologically large sessions.
+const MAX_PARSE_BYTES: usize = 512 * 1024;
+
 #[derive(Deserialize)]
 struct PiSessionHeader {
     #[serde(rename = "type")]
@@ -53,24 +62,29 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
     let reader = BufReader::new(file);
     let mut header = None;
     let mut summaries = Vec::new();
+    let mut bytes_read = 0usize;
 
     for line in reader.lines().map_while(Result::ok) {
+        // +1 approximates the newline stripped by `lines()`; we only need a
+        // rough byte budget, not an exact count.
+        bytes_read += line.len() + 1;
+
         let line = line.trim();
-        if line.is_empty() {
-            continue;
+        if !line.is_empty() {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                if header.is_none() && value.get("type").and_then(Value::as_str) == Some("session")
+                {
+                    header = serde_json::from_value::<PiSessionHeader>(value.clone()).ok();
+                }
+
+                if let Some(summary) = extract_user_summary(&value) {
+                    summaries.push(summary);
+                }
+            }
         }
 
-        let value: Value = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-
-        if header.is_none() && value.get("type").and_then(Value::as_str) == Some("session") {
-            header = serde_json::from_value::<PiSessionHeader>(value.clone()).ok();
-        }
-
-        if let Some(summary) = extract_user_summary(&value) {
-            summaries.push(summary);
+        if bytes_read >= MAX_PARSE_BYTES {
+            break;
         }
     }
 
@@ -145,73 +159,107 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
-    use std::sync::{Mutex, OnceLock};
 
-    fn home_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn temp_home(name: &str) -> std::path::PathBuf {
+    /// Write a standalone pi session JSONL to a unique temp path and return it.
+    /// Tests that exercise `parse_session` directly don't need to redirect
+    /// `$HOME`, so they stay portable — `dirs::home_dir()` only honors a `HOME`
+    /// override on Unix (Windows resolves via the Known Folder API).
+    fn temp_session_file(name: &str, lines: &[&str]) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "agf-pi-scan-{name}-{}-{}",
+            "agf-pi-{name}-{}-{}.jsonl",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    fn write_pi_session(
-        home: &std::path::Path,
-        dir: &str,
-        filename: &str,
-        id: &str,
-        timestamp: &str,
-        cwd: &str,
-    ) {
-        let session_dir = home.join(".pi/agent/sessions").join(dir);
-        fs::create_dir_all(&session_dir).unwrap();
-        let mut file = fs::File::create(session_dir.join(filename)).unwrap();
-        writeln!(
-            file,
-            r#"{{"type":"session","id":"{id}","timestamp":"{timestamp}","cwd":"{cwd}"}}"#
-        )
-        .unwrap();
-    }
-
-    fn write_pi_session_lines(home: &std::path::Path, dir: &str, filename: &str, lines: &[&str]) {
-        let session_dir = home.join(".pi/agent/sessions").join(dir);
-        fs::create_dir_all(&session_dir).unwrap();
-        let mut file = fs::File::create(session_dir.join(filename)).unwrap();
+        let mut file = fs::File::create(&path).unwrap();
         for line in lines {
             writeln!(file, "{line}").unwrap();
         }
+        path
     }
 
     #[test]
-    fn scan_keeps_multiple_sessions_from_same_project() {
-        let _guard = home_lock().lock().unwrap();
-        let old_home = std::env::var_os("HOME");
-        let home = temp_home("same-project");
-        std::env::set_var("HOME", &home);
+    fn parse_session_extracts_user_messages_as_summaries() {
+        let path = temp_session_file(
+            "user-summary",
+            &[
+                r#"{"type":"session","id":"session-with-summary","timestamp":"2026-05-01T00:00:00Z","cwd":"/tmp/project"}"#,
+                r#"{"type":"model_change","id":"model"}"#,
+                r#"{"type":"message","message":{"role":"bashExecution","content":[{"type":"text","text":"cargo test"}]}}"#,
+                r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"发布pip版本\n后续细节不用进入列表标题"}]}}"#,
+                r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"再发一个版本"}]}}"#,
+            ],
+        );
 
-        write_pi_session(
-            &home,
-            "--tmp-project--",
-            "old.jsonl",
-            "old-session",
-            "2026-05-01T00:00:00Z",
-            "/tmp/project",
+        let session = parse_session(&path);
+        let _ = fs::remove_file(&path);
+
+        let session = session.expect("session header should parse");
+        assert_eq!(session.session_id, "session-with-summary");
+        assert_eq!(session.summaries, vec!["发布pip版本", "再发一个版本"]);
+    }
+
+    #[test]
+    fn parse_session_stops_at_byte_budget() {
+        // Header on line 1, then user messages whose raw bytes far exceed
+        // MAX_PARSE_BYTES so the read loop has to break early.
+        let big_text = "x".repeat(2000); // ~2 KiB per line
+        let user_line = format!(
+            r#"{{"type":"message","message":{{"role":"user","content":[{{"type":"text","text":"{big_text}"}}]}}}}"#
         );
-        write_pi_session(
-            &home,
-            "--tmp-project--",
-            "new.jsonl",
-            "new-session",
-            "2026-05-02T00:00:00Z",
-            "/tmp/project",
+        let mut lines = vec![
+            r#"{"type":"session","id":"big","timestamp":"2026-05-01T00:00:00Z","cwd":"/tmp/project"}"#
+                .to_string(),
+        ];
+        for _ in 0..400 {
+            lines.push(user_line.clone()); // ~800 KiB total
+        }
+        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let path = temp_session_file("byte-budget", &line_refs);
+
+        let session = parse_session(&path);
+        let _ = fs::remove_file(&path);
+
+        let session = session.expect("header on line 1 should parse within the budget");
+        assert_eq!(session.session_id, "big");
+        // The 512 KiB budget stops collection before all 400 prompts are read.
+        assert!(
+            session.summaries.len() < 400,
+            "expected the byte budget to cap summaries, got {}",
+            session.summaries.len()
         );
+    }
+
+    /// `scan()` walks `$HOME/.pi/agent/sessions`; redirecting the home dir via
+    /// the `HOME` env var only works on Unix, so the dir-walk + multi-session
+    /// (dedup-removal) coverage is gated to Unix.
+    #[cfg(unix)]
+    #[test]
+    fn scan_keeps_multiple_sessions_from_same_project() {
+        use std::sync::{Mutex, OnceLock};
+        static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let old_home = std::env::var_os("HOME");
+        let home = std::env::temp_dir().join(format!(
+            "agf-pi-scan-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let session_dir = home.join(".pi/agent/sessions/--tmp-project--");
+        fs::create_dir_all(&session_dir).unwrap();
+        for (file, id, ts) in [
+            ("old.jsonl", "old-session", "2026-05-01T00:00:00Z"),
+            ("new.jsonl", "new-session", "2026-05-02T00:00:00Z"),
+        ] {
+            let mut f = fs::File::create(session_dir.join(file)).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"session","id":"{id}","timestamp":"{ts}","cwd":"/tmp/project"}}"#
+            )
+            .unwrap();
+        }
+        std::env::set_var("HOME", &home);
 
         let sessions = scan().unwrap();
 
@@ -223,38 +271,5 @@ mod tests {
 
         let ids: Vec<_> = sessions.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, vec!["new-session", "old-session"]);
-    }
-
-    #[test]
-    fn scan_extracts_user_messages_as_summaries() {
-        let _guard = home_lock().lock().unwrap();
-        let old_home = std::env::var_os("HOME");
-        let home = temp_home("user-summary");
-        std::env::set_var("HOME", &home);
-
-        write_pi_session_lines(
-            &home,
-            "--tmp-project--",
-            "session.jsonl",
-            &[
-                r#"{"type":"session","id":"session-with-summary","timestamp":"2026-05-01T00:00:00Z","cwd":"/tmp/project"}"#,
-                r#"{"type":"model_change","id":"model"}"#,
-                r#"{"type":"message","message":{"role":"bashExecution","content":[{"type":"text","text":"cargo test"}]}}"#,
-                r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"发布pip版本\n后续细节不用进入列表标题"}]}}"#,
-                r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
-                r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"再发一个版本"}]}}"#,
-            ],
-        );
-
-        let sessions = scan().unwrap();
-
-        if let Some(old_home) = old_home {
-            std::env::set_var("HOME", old_home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].summaries, vec!["发布pip版本", "再发一个版本"]);
     }
 }

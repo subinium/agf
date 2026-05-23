@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.2] - 2026-05-23
+
+### Fixed
+
+- **pi: resume the selected session by id** (#43, by @shellus) — pi sessions were resumed with a bare `pi --resume`, which opens an interactive picker / the latest session for the cwd and ignored the session the user actually selected in agf. The command is now `pi --session '<id>'`. Verified against the pi-mono source (`resolveSessionPath` in `packages/coding-agent/src/main.ts`): an argument with no `/`, `\`, or `.jsonl` is treated as a session-id prefix and matched against the session store; because agf wraps resume as `cd '<project_path>' && pi --session '<id>'`, pi resolves it in the session's own project directory and resumes directly without a fork prompt. (Confirmed on pi 0.53.0.)
+- **pi: keep every session from a project selectable** (#43, by @shellus) — the scanner deduped to the most recent session per project directory, a workaround for the old "only resumes latest" assumption. Now that resume-by-id works, all sessions are listed and individually resumable.
+- **pi: show prompt summaries and full history** (#43, by @shellus) — the scanner now extracts user-message text from each session's JSONL (collapsing whitespace, capped at 120 chars per line) so the listing shows what a session was about, and the Preview `History:` pane lists every prompt — parity with the other agents instead of bare `project (model)` rows.
+
+### Changed
+
+- **cache: `CACHE_VERSION` bumped to 5** (#43, by @shellus) — the pi payload now carries prompt summaries, so 0.11.x cache entries written before this release would otherwise keep rendering only the project name until each session's source mtime happened to change. The bump forces a one-time rescan on upgrade.
+
+### Internal
+
+- **pi scanner: bound the per-file read with a 512 KiB budget** — collecting every prompt requires reading the whole JSONL, but pi transcripts can grow to several MB and the `CACHE_VERSION` bump forces a cold rescan for everyone on upgrade. The read loop now stops after 512 KiB (the header is the first line, so it is always captured), mirroring the `read_head_tail` cap added in v0.10.1 after large Claude logs stalled the TUI.
+- **model: document Kiro's resume-latest behavior** — restored the note (dropped in #43) that `kiro-cli chat --resume` has no per-session flag and ignores `session_id`, now placed on the `Agent::Kiro` arm of `resume_cmd` where the command is defined.
+
+### Reverted
+
+- **TUI default-to-cwd search query** (from #43) — the merged PR also pre-filled the search box with `$PWD` when `agf` was launched without a query. That changed the no-arg behavior for *every* agent (empty list in non-project directories) and re-introduced the cwd special-casing deliberately removed in v0.11.0 (the cwd-match sort boost made time-sort look broken). Reverted to keep this release scoped to pi; a cwd default can land later as its own opt-in setting.
+
 ## [0.11.1] - 2026-05-04
 
 ### Changed
