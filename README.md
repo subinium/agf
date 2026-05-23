@@ -74,7 +74,6 @@ Then you either dig through history files or start over.
 - **Fuzzy search** — find sessions by project name, path, branch, or summary
 - **One-key resume** — resume the selected session with the right agent command
 - **Quick resume** — `agf resume <query>` skips the TUI entirely
-- **Current directory default** — launching `agf` without a query pre-filters by the current working directory
 - **Bulk delete** — `Ctrl+D` to multi-select and clean up stale sessions
 - **Project awareness** — git branches and Claude Code `--worktree` sessions surface in the UI
 
