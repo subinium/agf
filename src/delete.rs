@@ -322,7 +322,7 @@ fn delete_kiro_session(session: &Session) -> Result<(), io::Error> {
 
 /// Cursor Agent sessions are stored in two locations:
 /// 1. `~/.cursor/chats/<workspace-hash>/<session_id>/store.db` (SQLite)
-/// 2. `~/.cursor/projects/*/agent-transcripts/<session_id>.txt` (transcript files)
+/// 2. `~/.cursor/projects/*/agent-transcripts/<session_id>/` (transcript directory)
 fn delete_cursor_agent_session(session: &Session) -> Result<(), io::Error> {
     let cursor_dir = config::cursor_dir().map_err(io::Error::other)?;
 
@@ -332,20 +332,10 @@ fn delete_cursor_agent_session(session: &Session) -> Result<(), io::Error> {
         remove_dirs_matching_name(&chats_dir, &session.session_id)?;
     }
 
-    // 2. Remove transcript files: ~/.cursor/projects/*/agent-transcripts/<session_id>.txt
+    // 2. Remove transcript directory: ~/.cursor/projects/*/agent-transcripts/<session_id>/
     let projects_dir = cursor_dir.join("projects");
     if projects_dir.exists() {
-        let transcript_name = format!("{}.txt", session.session_id);
-        for entry in WalkDir::new(&projects_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(&transcript_name)
-            {
-                let _ = fs::remove_file(path);
-            }
-        }
+        remove_dirs_matching_name(&projects_dir, &session.session_id)?;
     }
 
     Ok(())
@@ -558,5 +548,27 @@ mod tests {
 
         // Should swallow the "no such table: threads" error.
         delete_codex_sqlite_rows(&dir, "anything").unwrap();
+    }
+
+    #[test]
+    fn delete_cursor_agent_removes_transcript_dir_not_sibling() {
+        let base = make_codex_dir("agf-test-cursor-delete");
+        let transcripts = base.join("projects/encproj/agent-transcripts");
+
+        let target_uuid = "ddddddddddddddddddddddddddddddd1";
+        let sibling_uuid = "ddddddddddddddddddddddddddddddd2";
+
+        let target_dir = transcripts.join(target_uuid);
+        let sibling_dir = transcripts.join(sibling_uuid);
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&sibling_dir).unwrap();
+        fs::write(target_dir.join(format!("{target_uuid}.jsonl")), b"{}").unwrap();
+        fs::write(sibling_dir.join(format!("{sibling_uuid}.jsonl")), b"{}").unwrap();
+
+        let projects_dir = base.join("projects");
+        remove_dirs_matching_name(&projects_dir, target_uuid).unwrap();
+
+        assert!(!target_dir.exists(), "target session dir should be deleted");
+        assert!(sibling_dir.exists(), "sibling session dir must survive");
     }
 }
