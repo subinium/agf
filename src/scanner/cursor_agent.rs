@@ -88,7 +88,7 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
         let (summary, timestamp) = match meta {
             Some(m) => (m.name, m.created_at),
             None => {
-                // Fall back to transcript file mtime
+                // Fall back to transcript file mtime + first user prompt as summary
                 let mtime = path
                     .metadata()
                     .ok()
@@ -96,7 +96,7 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                (None, mtime)
+                (extract_first_prompt(path), mtime)
             }
         };
 
@@ -175,6 +175,60 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
         .collect()
+}
+
+/// Extract the first user-visible prompt from a Cursor agent transcript JSONL.
+///
+/// Each line is a JSON object with `{"role":"user"|"assistant","message":{"content":[...]}}`.
+/// User turns may contain a `<user_info>` system injection (always first) followed by
+/// the actual `<user_query>` prompt. We skip info blocks and strip the query tags.
+fn extract_first_prompt(jsonl_path: &Path) -> Option<String> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(jsonl_path).ok()?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines().take(50) {
+        let line = line.ok()?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        if value.get("role").and_then(|v| v.as_str()) != Some("user") {
+            continue;
+        }
+        let parts = value
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())?;
+
+        for part in parts {
+            if part.get("type").and_then(|t| t.as_str()) != Some("text") {
+                continue;
+            }
+            let text = match part.get("text").and_then(|t| t.as_str()) {
+                Some(t) => t,
+                None => continue,
+            };
+            if text.trim_start().starts_with("<user_info>") {
+                continue;
+            }
+            // Strip <user_query> wrapper if present
+            let prompt = if let (Some(s), Some(e)) =
+                (text.find("<user_query>"), text.find("</user_query>"))
+            {
+                text[s + "<user_query>".len()..e].trim()
+            } else {
+                text.trim()
+            };
+            if !prompt.is_empty() {
+                return Some(truncate(prompt, 100));
+            }
+        }
+    }
+    None
 }
 
 /// Backtracking path decoder: dash-encoded path -> filesystem path.
@@ -349,5 +403,70 @@ mod tests {
             decode_dash_path("this-path-does-not-exist-anywhere-xyzabc999"),
             None
         );
+    }
+
+    #[test]
+    fn extract_first_prompt_reads_user_query_tags() {
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("agf-prompt-test-{pid}.jsonl"));
+        fs::write(
+            &path,
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nFix the bug\n</user_query>"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(extract_first_prompt(&path).as_deref(), Some("Fix the bug"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn extract_first_prompt_skips_user_info_block() {
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("agf-prompt-info-{pid}.jsonl"));
+        fs::write(
+            &path,
+            "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<user_info>OS: darwin</user_info>\"}]}}\n\
+             {\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<user_query>\\nActual prompt\\n</user_query>\"}]}}",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_first_prompt(&path).as_deref(),
+            Some("Actual prompt")
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn extract_first_prompt_returns_none_for_empty_jsonl() {
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("agf-prompt-empty-{pid}.jsonl"));
+        fs::write(&path, b"{}").unwrap();
+        assert_eq!(extract_first_prompt(&path), None);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn scan_from_finds_prompt_when_no_store_db() {
+        let (cursor_dir, real_proj, encoded) = make_fixture("nodb");
+        let uuid = "aaaaaaaa0000000000000000000000a3";
+
+        // Write a real JSONL with a user prompt (no store.db / chats dir)
+        let session_dir = cursor_dir
+            .join("projects")
+            .join(&encoded)
+            .join("agent-transcripts")
+            .join(uuid);
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join(format!("{uuid}.jsonl")),
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nhello world\n</user_query>"}]}}"#,
+        )
+        .unwrap();
+
+        let sessions = scan_from(&cursor_dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].summaries, vec!["hello world"]);
+
+        let _ = fs::remove_dir_all(&cursor_dir);
+        let _ = fs::remove_dir_all(&real_proj);
     }
 }
