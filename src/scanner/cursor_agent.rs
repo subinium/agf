@@ -9,7 +9,10 @@ use crate::model::{Agent, Session};
 use super::truncate;
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
-    let cursor_dir = crate::config::cursor_dir()?;
+    scan_from(&crate::config::cursor_dir()?)
+}
+
+fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
     let projects_dir = cursor_dir.join("projects");
 
     if !projects_dir.exists() {
@@ -19,23 +22,27 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     let chats_dir = cursor_dir.join("chats");
     let mut sessions = Vec::new();
 
-    // Walk ~/.cursor/projects/*/agent-transcripts/*.txt
+    // Walk ~/.cursor/projects/*/agent-transcripts/*/<session>.jsonl
     for entry in WalkDir::new(&projects_dir)
-        .min_depth(3)
-        .max_depth(3)
+        .min_depth(4)
+        .max_depth(4)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
 
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("txt") {
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
 
-        // Parent must be "agent-transcripts"
-        let parent = match path.parent() {
-            Some(p) if p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts") => p,
-            _ => continue,
+        // Grandparent must be "agent-transcripts"
+        let agent_transcripts_dir = match path
+            .parent()
+            .and_then(|p| p.parent())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts"))
+        {
+            Some(p) => p,
+            None => continue,
         };
 
         let session_id = match path.file_stem().and_then(|n| n.to_str()) {
@@ -43,8 +50,8 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             None => continue,
         };
 
-        // Grandparent is the dash-encoded project path
-        let encoded_dir = match parent
+        // Parent of agent-transcripts is the dash-encoded project path
+        let encoded_dir = match agent_transcripts_dir
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
@@ -200,4 +207,147 @@ fn solve(parts: &[&str], idx: usize, current: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    /// Build a (cursor_dir, real_project_dir, dash_encoded_slug) fixture.
+    ///
+    /// Both directories are created under `temp_dir()`. The project dir is
+    /// canonicalized so macOS `/tmp` → `/private/tmp` is handled correctly,
+    /// and its path components are joined with `-` to produce the slug that
+    /// Cursor writes as the project folder name under `projects/`.
+    ///
+    /// Labels must be alphanumeric only (no dashes) to avoid ambiguity in
+    /// the backtracking decoder.
+    fn make_fixture(label: &str) -> (PathBuf, PathBuf, String) {
+        let pid = std::process::id();
+        let cursor_dir = std::env::temp_dir().join(format!("agfcursor{pid}{label}"));
+        let proj_dir = std::env::temp_dir().join(format!("agfproj{pid}{label}"));
+
+        let _ = fs::remove_dir_all(&cursor_dir);
+        let _ = fs::remove_dir_all(&proj_dir);
+        fs::create_dir_all(cursor_dir.join("projects")).unwrap();
+        fs::create_dir_all(&proj_dir).unwrap();
+
+        let real_proj = proj_dir.canonicalize().unwrap();
+        let encoded = real_proj
+            .to_str()
+            .unwrap()
+            .trim_start_matches('/')
+            .replace('/', "-");
+
+        (cursor_dir, real_proj, encoded)
+    }
+
+    /// Write an empty `.jsonl` at the correct depth:
+    /// `<cursor_dir>/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`
+    fn place_session(cursor_dir: &Path, slug: &str, uuid: &str) {
+        let session_dir = cursor_dir
+            .join("projects")
+            .join(slug)
+            .join("agent-transcripts")
+            .join(uuid);
+        fs::create_dir_all(&session_dir).unwrap();
+        let mut f = fs::File::create(session_dir.join(format!("{uuid}.jsonl"))).unwrap();
+        f.write_all(b"{}\n").unwrap();
+    }
+
+    #[test]
+    fn scan_from_finds_jsonl_session() {
+        let (cursor_dir, real_proj, encoded) = make_fixture("finds");
+        let uuid = "aaaaaaaa0000000000000000000000a1";
+
+        place_session(&cursor_dir, &encoded, uuid);
+
+        let sessions = scan_from(&cursor_dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, uuid);
+        assert_eq!(sessions[0].project_path, real_proj.to_str().unwrap());
+        assert_eq!(sessions[0].agent, Agent::CursorAgent);
+
+        let _ = fs::remove_dir_all(&cursor_dir);
+        let _ = fs::remove_dir_all(&real_proj);
+    }
+
+    #[test]
+    fn scan_from_ignores_txt_at_wrong_depth() {
+        let (cursor_dir, real_proj, encoded) = make_fixture("txtigno");
+
+        // Old (wrong) format: .txt directly inside agent-transcripts/
+        let transcripts_dir = cursor_dir
+            .join("projects")
+            .join(&encoded)
+            .join("agent-transcripts");
+        fs::create_dir_all(&transcripts_dir).unwrap();
+        fs::write(transcripts_dir.join("session.txt"), b"").unwrap();
+
+        assert!(scan_from(&cursor_dir).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&cursor_dir);
+        let _ = fs::remove_dir_all(&real_proj);
+    }
+
+    #[test]
+    fn scan_from_ignores_jsonl_directly_in_agent_transcripts() {
+        let (cursor_dir, real_proj, encoded) = make_fixture("depth");
+
+        // .jsonl at depth 3 instead of 4 — must be ignored
+        let transcripts_dir = cursor_dir
+            .join("projects")
+            .join(&encoded)
+            .join("agent-transcripts");
+        fs::create_dir_all(&transcripts_dir).unwrap();
+        fs::write(transcripts_dir.join("session.jsonl"), b"{}").unwrap();
+
+        assert!(scan_from(&cursor_dir).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&cursor_dir);
+        let _ = fs::remove_dir_all(&real_proj);
+    }
+
+    #[test]
+    fn scan_from_skips_var_folders_encoded_dirs() {
+        let (cursor_dir, real_proj, _) = make_fixture("varfold");
+        let uuid = "aaaaaaaa0000000000000000000000a2";
+
+        // Use a slug that starts with "var-folders" — must be skipped even if
+        // the session file is otherwise valid.
+        place_session(&cursor_dir, "var-folders-xx-yyyyyyyy", uuid);
+
+        assert!(scan_from(&cursor_dir).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&cursor_dir);
+        let _ = fs::remove_dir_all(&real_proj);
+    }
+
+    #[test]
+    fn decode_dash_path_resolves_existing_directory() {
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("agfdecode{pid}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let real = dir.canonicalize().unwrap();
+
+        let encoded = real
+            .to_str()
+            .unwrap()
+            .trim_start_matches('/')
+            .replace('/', "-");
+        assert_eq!(decode_dash_path(&encoded), Some(real));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decode_dash_path_returns_none_for_nonexistent() {
+        assert_eq!(
+            decode_dash_path("this-path-does-not-exist-anywhere-xyzabc999"),
+            None
+        );
+    }
 }
