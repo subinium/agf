@@ -142,9 +142,9 @@ fn read_store_db(store_path: &Path) -> Option<StoreMeta> {
     )
     .ok()?;
 
-    // The meta table typically has key-value rows with hex-encoded JSON
+    // Cursor CLI stores session metadata as hex-encoded JSON in meta WHERE key='0'
     let mut stmt = conn
-        .prepare("SELECT value FROM cursorDiskKV WHERE key = 'composerData'")
+        .prepare("SELECT value FROM meta WHERE key = '0'")
         .ok()?;
     let hex_value: String = stmt.query_row([], |row| row.get(0)).ok()?;
 
