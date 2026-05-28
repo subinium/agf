@@ -102,12 +102,23 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
 
         let project_path_str = project_path.to_string_lossy().to_string();
 
-        // Try to get metadata from store.db
-        let meta = if chats_dir.exists() {
-            find_store_db_metadata(&chats_dir, &session_id)
+        // Locate the matching store.db (if any). cursor-agent's `/resume` only
+        // surfaces sessions that have BOTH a transcript and a store.db entry
+        // under ~/.cursor/chats/<workspace>/<session_id>/, so for the .jsonl
+        // (Composer 2+) format we treat the absence of store.db as "orphaned"
+        // and skip the session — otherwise agf would show sessions that
+        // cursor-agent itself refuses to resume.
+        let store_db_path = if chats_dir.exists() {
+            find_store_db_path(&chats_dir, &session_id)
         } else {
             None
         };
+
+        if ext == Some("jsonl") && store_db_path.is_none() {
+            continue;
+        }
+
+        let meta = store_db_path.as_deref().and_then(read_store_db);
 
         let (summary, timestamp) = match meta {
             Some(m) => (m.name, m.created_at),
@@ -150,14 +161,16 @@ struct StoreMeta {
     created_at: i64,
 }
 
-/// Search ~/.cursor/chats/*/<session_id>/store.db and extract metadata.
-fn find_store_db_metadata(chats_dir: &Path, session_id: &str) -> Option<StoreMeta> {
-    // chats_dir contains workspace-hash directories
+/// Locate the first existing ~/.cursor/chats/<workspace>/<session_id>/store.db.
+///
+/// Presence of this file means cursor-agent considers the session resumable;
+/// the file is the source of truth for `/resume`.
+fn find_store_db_path(chats_dir: &Path, session_id: &str) -> Option<PathBuf> {
     let read_dir = std::fs::read_dir(chats_dir).ok()?;
     for workspace_entry in read_dir.filter_map(|e| e.ok()) {
         let store_path = workspace_entry.path().join(session_id).join("store.db");
         if store_path.exists() {
-            return read_store_db(&store_path);
+            return Some(store_path);
         }
     }
     None
@@ -340,18 +353,42 @@ mod tests {
         f.write_all(b"{}\n").unwrap();
     }
 
+    /// Create a stub store.db at `<cursor_dir>/chats/<workspace>/<uuid>/store.db`.
+    /// The file content is irrelevant; only its existence is checked.
+    fn place_store_db(cursor_dir: &Path, workspace: &str, uuid: &str) {
+        let dir = cursor_dir.join("chats").join(workspace).join(uuid);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("store.db"), b"").unwrap();
+    }
+
     #[test]
-    fn scan_from_finds_jsonl_session() {
+    fn scan_from_finds_jsonl_session_with_store_db() {
         let (cursor_dir, real_proj, encoded) = make_fixture("finds");
         let uuid = "aaaaaaaa0000000000000000000000a1";
 
         place_session(&cursor_dir, &encoded, uuid);
+        place_store_db(&cursor_dir, "anyworkspacehash", uuid);
 
         let sessions = scan_from(&cursor_dir).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, uuid);
         assert_eq!(sessions[0].project_path, real_proj.to_str().unwrap());
         assert_eq!(sessions[0].agent, Agent::CursorAgent);
+
+        let _ = fs::remove_dir_all(&cursor_dir);
+        let _ = fs::remove_dir_all(&real_proj);
+    }
+
+    #[test]
+    fn scan_from_skips_orphan_jsonl_without_store_db() {
+        let (cursor_dir, real_proj, encoded) = make_fixture("orphan");
+        let uuid = "aaaaaaaa0000000000000000000000ad";
+
+        // Transcript exists but no store.db → cursor-agent /resume would NOT
+        // surface it, so agf must hide it too.
+        place_session(&cursor_dir, &encoded, uuid);
+
+        assert!(scan_from(&cursor_dir).unwrap().is_empty());
 
         let _ = fs::remove_dir_all(&cursor_dir);
         let _ = fs::remove_dir_all(&real_proj);
@@ -499,11 +536,11 @@ mod tests {
     }
 
     #[test]
-    fn scan_from_finds_prompt_when_no_store_db() {
+    fn scan_from_falls_back_to_prompt_when_store_db_lacks_meta() {
         let (cursor_dir, real_proj, encoded) = make_fixture("nodb");
         let uuid = "aaaaaaaa0000000000000000000000a3";
 
-        // Write a real JSONL with a user prompt (no store.db / chats dir)
+        // Real JSONL with a user prompt …
         let session_dir = cursor_dir
             .join("projects")
             .join(&encoded)
@@ -515,6 +552,10 @@ mod tests {
             r#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nhello world\n</user_query>"}]}}"#,
         )
         .unwrap();
+        // … plus a stub store.db (not a valid sqlite file, so read_store_db
+        // returns None) — the session is "resumable" so it must surface, and
+        // the summary must fall back to the extracted prompt.
+        place_store_db(&cursor_dir, "anyworkspacehash", uuid);
 
         let sessions = scan_from(&cursor_dir).unwrap();
         assert_eq!(sessions.len(), 1);
