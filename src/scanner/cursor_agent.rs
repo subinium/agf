@@ -22,32 +22,56 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
     let chats_dir = cursor_dir.join("chats");
     let mut sessions = Vec::new();
 
-    // Walk ~/.cursor/projects/*/agent-transcripts/*/<session>.jsonl
+    // Single walk covers both storage formats:
+    //
+    //   Legacy  (Cursor ≤ 2.4.7):  projects/<slug>/agent-transcripts/<uuid>.txt      (depth 3)
+    //   Current (Composer 2 / 3+): projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl (depth 4)
     for entry in WalkDir::new(&projects_dir)
-        .min_depth(4)
+        .min_depth(3)
         .max_depth(4)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        if !path.is_file() {
             continue;
         }
 
-        // Grandparent must be "agent-transcripts"
-        let agent_transcripts_dir = match path
-            .parent()
-            .and_then(|p| p.parent())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts"))
-        {
-            Some(p) => p,
-            None => continue,
-        };
+        let ext = path.extension().and_then(|e| e.to_str());
 
-        let session_id = match path.file_stem().and_then(|n| n.to_str()) {
-            Some(id) => id.to_string(),
-            None => continue,
+        // Resolve (agent_transcripts_dir, session_id) for each format.
+        let (agent_transcripts_dir, session_id) = match ext {
+            Some("txt") => {
+                // Legacy: parent must be "agent-transcripts"
+                let parent = match path.parent().filter(|p| {
+                    p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts")
+                }) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let id = match path.file_stem().and_then(|n| n.to_str()) {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
+                (parent, id)
+            }
+            Some("jsonl") => {
+                // Current: grandparent must be "agent-transcripts"
+                let grandparent = match path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts"))
+                {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let id = match path.file_stem().and_then(|n| n.to_str()) {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
+                (grandparent, id)
+            }
+            _ => continue,
         };
 
         // Parent of agent-transcripts is the dash-encoded project path
@@ -60,7 +84,7 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
             None => continue,
         };
 
-        // Skip temp directories
+        // Skip macOS temp directories
         if encoded_dir.starts_with("var-folders") {
             continue;
         }
@@ -88,7 +112,6 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
         let (summary, timestamp) = match meta {
             Some(m) => (m.name, m.created_at),
             None => {
-                // Fall back to transcript file mtime + first user prompt as summary
                 let mtime = path
                     .metadata()
                     .ok()
@@ -96,7 +119,13 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                (extract_first_prompt(path), mtime)
+                // Prompt extraction only applies to JSONL; .txt format is unknown
+                let prompt = if ext == Some("jsonl") {
+                    extract_first_prompt(path)
+                } else {
+                    None
+                };
+                (prompt, mtime)
             }
         };
 
@@ -329,16 +358,41 @@ mod tests {
     }
 
     #[test]
-    fn scan_from_ignores_txt_at_wrong_depth() {
+    fn scan_from_finds_legacy_txt_session() {
         let (cursor_dir, real_proj, encoded) = make_fixture("txtigno");
 
-        // Old (wrong) format: .txt directly inside agent-transcripts/
+        // Legacy format: <uuid>.txt directly inside agent-transcripts/
         let transcripts_dir = cursor_dir
             .join("projects")
             .join(&encoded)
             .join("agent-transcripts");
         fs::create_dir_all(&transcripts_dir).unwrap();
-        fs::write(transcripts_dir.join("session.txt"), b"").unwrap();
+        let uuid = "bbbbbbbb0000000000000000000000b1";
+        fs::write(transcripts_dir.join(format!("{uuid}.txt")), b"").unwrap();
+
+        let sessions = scan_from(&cursor_dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, uuid);
+        assert_eq!(sessions[0].project_path, real_proj.to_str().unwrap());
+        assert_eq!(sessions[0].agent, Agent::CursorAgent);
+
+        let _ = fs::remove_dir_all(&cursor_dir);
+        let _ = fs::remove_dir_all(&real_proj);
+    }
+
+    #[test]
+    fn scan_from_ignores_txt_nested_in_uuid_subdir() {
+        let (cursor_dir, real_proj, encoded) = make_fixture("txtwrong");
+
+        // .txt at depth 4 (inside a UUID subdir) is NOT the legacy format and must be ignored
+        let uuid = "cccccccc0000000000000000000000c1";
+        let session_dir = cursor_dir
+            .join("projects")
+            .join(&encoded)
+            .join("agent-transcripts")
+            .join(uuid);
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join(format!("{uuid}.txt")), b"").unwrap();
 
         assert!(scan_from(&cursor_dir).unwrap().is_empty());
 
