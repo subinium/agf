@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Agent, Session};
 use crate::plugin;
 
+// Bumped to 6 in v0.11.3:
+// - Cursor scanner now (a) walks both depth-3 .txt and depth-4 .jsonl layouts,
+//   (b) reads chat metadata from the `meta` table of store.db, and (c) drops
+//   .jsonl transcripts that have no matching store.db (orphans `cursor-agent`
+//   itself refuses to resume). Cache entries written by 0.11.x would surface
+//   the old orphan-laden list until each transcript's mtime happened to
+//   change. Bumping the version forces a one-time rescan on upgrade so the
+//   PR description's "35 orphans -> 0" claim actually holds for upgraders.
+//
 // Bumped to 5 after v0.11.1:
 // - Pi scanner now keeps all user-message summaries instead of only the first
 //   one, matching the History preview behavior of other agents.
@@ -24,7 +33,7 @@ use crate::plugin;
 //   entries written by 0.10.x would surface as stale "cli session (...)"
 //   summaries until the source DB mtime happens to change.
 //   Bumping the version forces a one-time rescan on first 0.11.0 launch.
-const CACHE_VERSION: u32 = 5;
+const CACHE_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 struct CacheFile {

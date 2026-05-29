@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.11.3] - 2026-05-27
+
+### Fixed
+
+- **Cursor scanner: walk both legacy `.txt` and current Composer 2+ `.jsonl` layouts** ([#45](https://github.com/subinium/agf/pull/45), by @rooty0 / Stan) — current Cursor stores transcripts at `~/.cursor/projects/*/agent-transcripts/<uuid>/<uuid>.jsonl` (depth 4) rather than the legacy `~/.cursor/projects/*/agent-transcripts/<uuid>.txt` (depth 3). The scanner walked depth 3 with a `.txt`-only filter, so on current Cursor it returned **zero sessions**. Verified against live data: `~/.cursor/projects` had 2 JSONL transcripts at depth 4 and 0 TXT, and `agf list --agent cursor-agent` returned `No sessions found.` before this release. Closes [#35](https://github.com/subinium/agf/issues/35).
+- **Cursor scanner: read chat metadata from the right table** ([#45](https://github.com/subinium/agf/pull/45), by @rooty0) — the previous code queried `SELECT value FROM cursorDiskKV WHERE key = 'composerData'`, which is the **IDE's** `state.vscdb` schema, not the CLI's `store.db`. Cursor CLI's `store.db` actually exposes a `meta(key TEXT PRIMARY KEY, value TEXT)` table with a single `key = '0'` row whose value is a hex-encoded JSON containing `agentId`, `name`, `createdAt`, `mode`, and `lastUsedModel`. Verified via `sqlite3` against a real store.db on disk.
+- **Cursor scanner: skip JSONL transcripts whose `store.db` is missing** ([#45](https://github.com/subinium/agf/pull/45), by @rooty0) — `cursor-agent --resume` only surfaces sessions that have BOTH a transcript and a `~/.cursor/chats/<workspace>/<session_id>/store.db` entry; reporting orphaned transcripts that the CLI itself refuses to resume just confuses the listing. Legacy `.txt` sessions are unaffected (they predate the `chats/` directory).
+- **Cursor scanner: fall back to the first user prompt when `store.db` has no usable metadata** ([#45](https://github.com/subinium/agf/pull/45), by @rooty0) — the JSONL is parsed for the first `role: user` text part, with `<user_info>` system injections skipped and `<user_query>` wrappers stripped.
+- **`extract_first_prompt` no longer panics on inverted `<user_query>` tags** — `str::find` returns the FIRST occurrence of each substring independently, so a text part where `</user_query>` byte-precedes `<user_query>` (e.g. a pasted log or AI-generated code sample) gave `start > end` and `text[s+12..e]` panicked with `begin > end`. Confirmed via a standalone rustc reproducer. The closing tag is now searched **after** the opening one. Regression test: `extract_first_prompt_does_not_panic_on_inverted_tags`.
+- **`extract_first_prompt` no longer aborts on the first malformed or non-UTF-8 line** — both the per-line IO read and `serde_json::from_str` used `.ok()?`, which propagates `None` out of the whole function on the first error instead of skipping the bad line. A single corrupted/truncated/non-UTF-8 line at the top of the JSONL silently disabled the blank-summary fallback for the rest of the file. Replaced with `let Ok(...) else { continue; };` (matching `scanner/pi.rs`). Regression tests: `extract_first_prompt_skips_malformed_json_lines` and `extract_first_prompt_skips_invalid_utf8_lines`.
+- **`extract_first_prompt` now bounded by a 512 KiB byte budget** — pi.rs added this safeguard in v0.11.2 after large Claude logs stalled the TUI; Cursor transcripts can carry multi-MB tool-result blobs, and the `CACHE_VERSION` bump in this release forces a cold rescan for every upgrader, so the same precaution applies.
+- **Cursor delete: legacy `.txt` transcripts now actually get removed** — `delete_cursor_agent_session` called `remove_dirs_matching_name(&projects_dir, &session.session_id)`, but that helper filters on `path.is_dir()` AND `file_name == name`. Legacy sessions live at `agent-transcripts/<uuid>.txt` (a file named `<uuid>.txt`), so it never matched. Delete returned `Ok(())`, the orphan file persisted on disk, and the next scan resurrected it. A new sibling helper `remove_files_matching_name` removes the file form alongside the directory form. Regression test: `delete_cursor_agent_removes_legacy_txt_transcript`.
+- **Cursor scanner: enforce stem == parent UUID invariant on the `.jsonl` arm** — the previous check only required the grandparent to be named `agent-transcripts`. A stray `agent-transcripts/<uuidA>/<uuidB>.jsonl` would produce `session_id = uuidB`, which mismatches both the store.db lookup and what `cursor-agent --resume` expects. Real Cursor always writes them equal, but the invariant is now explicit. Regression test: `scan_from_rejects_jsonl_with_stem_mismatched_to_parent`.
+- **`decode_dash_path` test coverage for hyphenated project segments** — added `decode_dash_path_resolves_hyphenated_segments` which places `agent`, `agent-tui`, and `agent-tui-finder` as sibling directories and asserts the backtracking decoder resolves to the longest existing match. This is the load-bearing case for this very repo's path.
+
+### Changed
+
+- **`CACHE_VERSION` bumped to 6** — the new orphan-skip rule fires only on fresh scans; cached `0.11.x` cursor entries persist with their old summaries until each transcript's mtime changes. Bumping the version forces a one-time rescan on upgrade so the "35 orphans → 0" effect actually lands for upgraders.
+
+### Docs
+
+- **README: Cursor CLI doc link + transcript paths updated** ([#45](https://github.com/subinium/agf/pull/45), by @rooty0) — `docs.cursor.com/agent` no longer resolves; switched to `cursor.com/docs/cli/overview`. Storage column now lists both the current JSONL layout and the legacy `.txt` form.
+
 ## [0.11.2] - 2026-05-23
 
 ### Fixed
