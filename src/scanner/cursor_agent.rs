@@ -8,6 +8,21 @@ use crate::model::{Agent, Session};
 
 use super::truncate;
 
+/// Max chars stored per session summary.
+const SUMMARY_MAX_CHARS: usize = 100;
+
+/// Max bytes read from a single JSONL transcript when extracting the first
+/// prompt. Cursor transcripts can include multi-MB tool-result blobs, and the
+/// CACHE_VERSION bump in this release forces a cold rescan for every upgrader,
+/// so an unbounded read repeats the v0.10.1 heavy-log stall pattern that
+/// `read_head_tail` was added to prevent for Claude.
+const MAX_PARSE_BYTES: usize = 512 * 1024;
+
+/// Max lines scanned when extracting the first prompt. The first user message
+/// almost always lands within the first few lines; the cap bounds work on
+/// pathological transcripts that pad with non-`role=user` rows.
+const MAX_PARSE_LINES: usize = 50;
+
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     scan_from(&crate::config::cursor_dir()?)
 }
@@ -40,39 +55,53 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
         let ext = path.extension().and_then(|e| e.to_str());
 
         // Resolve (agent_transcripts_dir, session_id) for each format.
-        let (agent_transcripts_dir, session_id) = match ext {
-            Some("txt") => {
-                // Legacy: parent must be "agent-transcripts"
-                let parent = match path.parent().filter(|p| {
-                    p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts")
-                }) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                let id = match path.file_stem().and_then(|n| n.to_str()) {
-                    Some(id) => id.to_string(),
-                    None => continue,
-                };
-                (parent, id)
-            }
-            Some("jsonl") => {
-                // Current: grandparent must be "agent-transcripts"
-                let grandparent = match path
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts"))
-                {
-                    Some(p) => p,
-                    None => continue,
-                };
-                let id = match path.file_stem().and_then(|n| n.to_str()) {
-                    Some(id) => id.to_string(),
-                    None => continue,
-                };
-                (grandparent, id)
-            }
-            _ => continue,
-        };
+        let (agent_transcripts_dir, session_id) =
+            match ext {
+                Some("txt") => {
+                    // Legacy: parent must be "agent-transcripts"
+                    let parent = match path.parent().filter(|p| {
+                        p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts")
+                    }) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let id = match path.file_stem().and_then(|n| n.to_str()) {
+                        Some(id) => id.to_string(),
+                        None => continue,
+                    };
+                    (parent, id)
+                }
+                Some("jsonl") => {
+                    // Current layout: agent-transcripts/<uuid>/<uuid>.jsonl
+                    // The parent dir name must equal the file stem (both are the
+                    // same session UUID). Without this invariant a stray jsonl
+                    // would produce a session_id that mismatches both the
+                    // store.db lookup key and what `cursor-agent --resume` expects.
+                    let parent = match path.parent() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let parent_name = match parent.file_name().and_then(|n| n.to_str()) {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    let id = match path.file_stem().and_then(|n| n.to_str()) {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    if parent_name != id {
+                        continue;
+                    }
+                    let grandparent = match parent.parent().filter(|p| {
+                        p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts")
+                    }) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    (grandparent, id.to_string())
+                }
+                _ => continue,
+            };
 
         // Parent of agent-transcripts is the dash-encoded project path
         let encoded_dir = match agent_transcripts_dir
@@ -197,7 +226,7 @@ fn read_store_db(store_path: &Path) -> Option<StoreMeta> {
     let name = parsed
         .get("name")
         .and_then(|v| v.as_str())
-        .map(|s| truncate(s, 100));
+        .map(|s| truncate(s, SUMMARY_MAX_CHARS));
 
     // createdAt is in milliseconds
     let created_at = parsed
@@ -231,20 +260,39 @@ fn extract_first_prompt(jsonl_path: &Path) -> Option<String> {
     let file = File::open(jsonl_path).ok()?;
     let reader = BufReader::new(file);
 
-    for line in reader.lines().take(50) {
-        let line = line.ok()?;
+    let mut bytes_read = 0usize;
+    for (lines_seen, line_result) in reader.lines().enumerate() {
+        if lines_seen >= MAX_PARSE_LINES || bytes_read >= MAX_PARSE_BYTES {
+            break;
+        }
+
+        // A single bad line (invalid UTF-8, transient IO error, malformed
+        // JSON, partial flush from a crashed session) must skip just that
+        // line — never disable extraction for the rest of the file. The
+        // previous `.ok()?` pattern silently defeated this fallback for any
+        // transcript whose first 50 lines had even one unparseable row.
+        let Ok(line) = line_result else {
+            continue;
+        };
+        bytes_read += line.len() + 1; // +1 approximates the stripped newline
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         if value.get("role").and_then(|v| v.as_str()) != Some("user") {
             continue;
         }
-        let parts = value
+        let parts = match value
             .get("message")
             .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())?;
+            .and_then(|c| c.as_array())
+        {
+            Some(p) => p,
+            None => continue,
+        };
 
         for part in parts {
             if part.get("type").and_then(|t| t.as_str()) != Some("text") {
@@ -257,16 +305,25 @@ fn extract_first_prompt(jsonl_path: &Path) -> Option<String> {
             if text.trim_start().starts_with("<user_info>") {
                 continue;
             }
-            // Strip <user_query> wrapper if present
-            let prompt = if let (Some(s), Some(e)) =
-                (text.find("<user_query>"), text.find("</user_query>"))
-            {
-                text[s + "<user_query>".len()..e].trim()
-            } else {
-                text.trim()
+            // Strip the `<user_query>...</user_query>` wrapper if present.
+            // `str::find` returns the FIRST occurrence of each substring
+            // independently, so we must search for the closing tag AFTER
+            // the opening one — otherwise a text like
+            // `"</user_query>foo<user_query>...</user_query>"` (which can
+            // occur in a pasted log or AI-generated code sample) gives
+            // s > e and `text[s+12..e]` panics with `begin > end`.
+            let prompt = match text.find("<user_query>") {
+                Some(s) => {
+                    let after = s + "<user_query>".len();
+                    match text[after..].find("</user_query>") {
+                        Some(rel) => text[after..after + rel].trim(),
+                        None => text.trim(),
+                    }
+                }
+                None => text.trim(),
             };
             if !prompt.is_empty() {
-                return Some(truncate(prompt, 100));
+                return Some(truncate(prompt, SUMMARY_MAX_CHARS));
             }
         }
     }
@@ -320,6 +377,14 @@ mod tests {
     ///
     /// Labels must be alphanumeric only (no dashes) to avoid ambiguity in
     /// the backtracking decoder.
+    ///
+    /// Gated to Unix: the slug encoding (`canonical.to_str()` →
+    /// `trim_start_matches('/')` → `replace('/', "-")`) assumes POSIX paths.
+    /// On Windows, `canonicalize()` returns `\\?\C:\…` with backslashes that
+    /// the dash decoder can't round-trip — every fixture-based test would
+    /// fail. The scanner code itself is platform-agnostic; only this test
+    /// fixture is Unix-shaped.
+    #[cfg(unix)]
     fn make_fixture(label: &str) -> (PathBuf, PathBuf, String) {
         let pid = std::process::id();
         let cursor_dir = std::env::temp_dir().join(format!("agfcursor{pid}{label}"));
@@ -342,6 +407,7 @@ mod tests {
 
     /// Write an empty `.jsonl` at the correct depth:
     /// `<cursor_dir>/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`
+    #[cfg(unix)]
     fn place_session(cursor_dir: &Path, slug: &str, uuid: &str) {
         let session_dir = cursor_dir
             .join("projects")
@@ -355,12 +421,14 @@ mod tests {
 
     /// Create a stub store.db at `<cursor_dir>/chats/<workspace>/<uuid>/store.db`.
     /// The file content is irrelevant; only its existence is checked.
+    #[cfg(unix)]
     fn place_store_db(cursor_dir: &Path, workspace: &str, uuid: &str) {
         let dir = cursor_dir.join("chats").join(workspace).join(uuid);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("store.db"), b"").unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn scan_from_finds_jsonl_session_with_store_db() {
         let (cursor_dir, real_proj, encoded) = make_fixture("finds");
@@ -379,6 +447,7 @@ mod tests {
         let _ = fs::remove_dir_all(&real_proj);
     }
 
+    #[cfg(unix)]
     #[test]
     fn scan_from_skips_orphan_jsonl_without_store_db() {
         let (cursor_dir, real_proj, encoded) = make_fixture("orphan");
@@ -394,6 +463,7 @@ mod tests {
         let _ = fs::remove_dir_all(&real_proj);
     }
 
+    #[cfg(unix)]
     #[test]
     fn scan_from_finds_legacy_txt_session() {
         let (cursor_dir, real_proj, encoded) = make_fixture("txtigno");
@@ -417,6 +487,7 @@ mod tests {
         let _ = fs::remove_dir_all(&real_proj);
     }
 
+    #[cfg(unix)]
     #[test]
     fn scan_from_ignores_txt_nested_in_uuid_subdir() {
         let (cursor_dir, real_proj, encoded) = make_fixture("txtwrong");
@@ -437,6 +508,7 @@ mod tests {
         let _ = fs::remove_dir_all(&real_proj);
     }
 
+    #[cfg(unix)]
     #[test]
     fn scan_from_ignores_jsonl_directly_in_agent_transcripts() {
         let (cursor_dir, real_proj, encoded) = make_fixture("depth");
@@ -455,6 +527,7 @@ mod tests {
         let _ = fs::remove_dir_all(&real_proj);
     }
 
+    #[cfg(unix)]
     #[test]
     fn scan_from_skips_var_folders_encoded_dirs() {
         let (cursor_dir, real_proj, _) = make_fixture("varfold");
@@ -470,6 +543,7 @@ mod tests {
         let _ = fs::remove_dir_all(&real_proj);
     }
 
+    #[cfg(unix)]
     #[test]
     fn decode_dash_path_resolves_existing_directory() {
         let pid = std::process::id();
@@ -535,6 +609,7 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    #[cfg(unix)]
     #[test]
     fn scan_from_falls_back_to_prompt_when_store_db_lacks_meta() {
         let (cursor_dir, real_proj, encoded) = make_fixture("nodb");
@@ -563,5 +638,143 @@ mod tests {
 
         let _ = fs::remove_dir_all(&cursor_dir);
         let _ = fs::remove_dir_all(&real_proj);
+    }
+
+    /// Write a standalone `.jsonl` to a unique temp path for tests that drive
+    /// `extract_first_prompt` directly (no `make_fixture` / `scan_from`, so
+    /// they stay portable — the existing fixture encodes paths Unix-style).
+    fn temp_jsonl(label: &str, body: &[u8]) -> PathBuf {
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("agf-cursor-{label}-{pid}.jsonl"));
+        let _ = fs::remove_file(&path);
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// Regression: a text part containing `</user_query>` BEFORE `<user_query>`
+    /// (e.g. a pasted log or AI-generated code sample) used to compute
+    /// `start > end` and panic with "begin > end" when slicing. The fix
+    /// searches for the closing tag AFTER the opening one.
+    #[test]
+    fn extract_first_prompt_does_not_panic_on_inverted_tags() {
+        // The text has the CLOSING tag first, then a normal opening+closing pair.
+        let path = temp_jsonl(
+            "invtag",
+            br#"{"role":"user","message":{"content":[{"type":"text","text":"</user_query>noise<user_query>real prompt</user_query>"}]}}"#,
+        );
+        let result = extract_first_prompt(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(result.as_deref(), Some("real prompt"));
+    }
+
+    /// Regression: previously, the FIRST malformed JSON line aborted the whole
+    /// per-line loop via `.ok()?`, so a single garbage line at the top of a
+    /// JSONL silently disabled the blank-summary fallback for the entire file.
+    /// Now each bad line is skipped individually.
+    #[test]
+    fn extract_first_prompt_skips_malformed_json_lines() {
+        // Line 1: garbage; Line 2: empty; Line 3: valid user prompt.
+        let body = b"not-json-at-all\n\n\
+            {\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<user_query>recovered</user_query>\"}]}}\n";
+        let path = temp_jsonl("malformed", body);
+        let result = extract_first_prompt(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(result.as_deref(), Some("recovered"));
+    }
+
+    /// Regression: a single line containing invalid UTF-8 bytes used to abort
+    /// the loop via `let line = line.ok()?;`. It should now be skipped like
+    /// any other bad line.
+    #[test]
+    fn extract_first_prompt_skips_invalid_utf8_lines() {
+        let mut bytes: Vec<u8> = Vec::new();
+        // Line 1: a truncated multibyte sequence — `BufReader::lines` returns
+        // Err(InvalidData) for this row.
+        bytes.extend_from_slice(&[0xC3, 0x28]); // invalid 2-byte UTF-8 start
+        bytes.push(b'\n');
+        // Line 2: well-formed JSON with a user prompt.
+        bytes.extend_from_slice(
+            br#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>after garbage</user_query>"}]}}"#,
+        );
+        let path = temp_jsonl("badutf8", &bytes);
+        let result = extract_first_prompt(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(result.as_deref(), Some("after garbage"));
+    }
+
+    /// Invariant: a jsonl whose file stem mismatches its parent directory name
+    /// is silently dropped. Real Cursor always writes them equal; the guard
+    /// prevents a stray jsonl from producing a session_id that mismatches both
+    /// the store.db lookup key and what `cursor-agent --resume` expects.
+    ///
+    /// Gated to Unix because `make_fixture`'s slug encoding (joining canonical
+    /// path components with `-`) assumes Unix-style paths; Windows canonical
+    /// paths carry `\\?\C:\…` and backslashes that the dash decoder can't
+    /// round-trip.
+    #[cfg(unix)]
+    #[test]
+    fn scan_from_rejects_jsonl_with_stem_mismatched_to_parent() {
+        let (cursor_dir, real_proj, encoded) = make_fixture("stemmismatch");
+        let parent_uuid = "aaaaaaaa0000000000000000000000c1";
+        let stem_uuid = "bbbbbbbb0000000000000000000000c1";
+
+        let session_dir = cursor_dir
+            .join("projects")
+            .join(&encoded)
+            .join("agent-transcripts")
+            .join(parent_uuid);
+        fs::create_dir_all(&session_dir).unwrap();
+        // stem != parent_uuid → must be skipped.
+        fs::write(session_dir.join(format!("{stem_uuid}.jsonl")), b"{}\n").unwrap();
+        // Even with a store.db at the stem id, the scanner shouldn't surface it.
+        place_store_db(&cursor_dir, "ws", stem_uuid);
+
+        let sessions = scan_from(&cursor_dir).unwrap();
+        assert!(sessions.is_empty());
+
+        let _ = fs::remove_dir_all(&cursor_dir);
+        let _ = fs::remove_dir_all(&real_proj);
+    }
+
+    /// Real-world load-bearing case: project paths regularly contain hyphens
+    /// (this very repo is `agent-tui-finder`). The backtracking decoder must
+    /// pick the segment that actually exists on disk when multiple
+    /// hyphen-split prefixes are valid directory candidates.
+    ///
+    /// Gated to Unix for the same reason as `make_fixture` — the encoded slug
+    /// is built from a canonical path with `'/'`-separated components.
+    #[cfg(unix)]
+    #[test]
+    fn decode_dash_path_resolves_hyphenated_segments() {
+        let pid = std::process::id();
+        let base = std::env::temp_dir()
+            .join(format!("agfdecode{pid}hyphen"))
+            .canonicalize()
+            .unwrap_or_else(|_| {
+                let p = std::env::temp_dir().join(format!("agfdecode{pid}hyphen"));
+                let _ = fs::remove_dir_all(&p);
+                fs::create_dir_all(&p).unwrap();
+                p.canonicalize().unwrap()
+            });
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        // Decoy siblings the greedy-longest-first decoder must reject.
+        fs::create_dir_all(base.join("agent")).unwrap();
+        fs::create_dir_all(base.join("agent-tui")).unwrap();
+        // The real target.
+        let target = base.join("agent-tui-finder");
+        fs::create_dir_all(&target).unwrap();
+
+        let encoded = base
+            .to_str()
+            .unwrap()
+            .trim_start_matches('/')
+            .replace('/', "-")
+            + "-agent-tui-finder";
+
+        let resolved = decode_dash_path(&encoded).unwrap();
+        assert_eq!(resolved, target);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

@@ -107,6 +107,21 @@ fn remove_dirs_matching_name(base: &Path, name: &str) -> Result<(), io::Error> {
     Ok(())
 }
 
+/// Walk a directory tree and remove any regular file whose name (including
+/// extension) matches the target.
+fn remove_files_matching_name(base: &Path, name: &str) -> Result<(), io::Error> {
+    if !base.is_dir() {
+        return Ok(());
+    }
+    for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(name) {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Codex
 // ---------------------------------------------------------------------------
@@ -320,22 +335,33 @@ fn delete_kiro_session(session: &Session) -> Result<(), io::Error> {
 // Cursor Agent
 // ---------------------------------------------------------------------------
 
-/// Cursor Agent sessions are stored in two locations:
-/// 1. `~/.cursor/chats/<workspace-hash>/<session_id>/store.db` (SQLite)
-/// 2. `~/.cursor/projects/*/agent-transcripts/<session_id>/` (transcript directory)
+/// Cursor Agent sessions are stored across two layouts:
+/// - Current (Composer 2+) JSONL: directory at
+///   `~/.cursor/projects/*/agent-transcripts/<session_id>/` containing
+///   `<session_id>.jsonl`, plus chat metadata under
+///   `~/.cursor/chats/<workspace-hash>/<session_id>/store.db`.
+/// - Legacy: file at `~/.cursor/projects/*/agent-transcripts/<session_id>.txt`
+///   with no `chats/` counterpart.
+///
+/// Both shapes are still surfaced by the scanner (see `scan_from`), so delete
+/// must remove the directory AND the file form — otherwise legacy sessions
+/// silently no-op (`remove_dirs_matching_name` filters on `is_dir()`) and the
+/// next scan resurrects the orphan.
 fn delete_cursor_agent_session(session: &Session) -> Result<(), io::Error> {
     let cursor_dir = config::cursor_dir().map_err(io::Error::other)?;
 
-    // 1. Remove chat directory: ~/.cursor/chats/*/<session_id>/
+    // 1. Chat metadata: ~/.cursor/chats/*/<session_id>/
     let chats_dir = cursor_dir.join("chats");
     if chats_dir.exists() {
         remove_dirs_matching_name(&chats_dir, &session.session_id)?;
     }
 
-    // 2. Remove transcript directory: ~/.cursor/projects/*/agent-transcripts/<session_id>/
+    // 2. Transcript: directory form (JSONL) and file form (legacy .txt).
     let projects_dir = cursor_dir.join("projects");
     if projects_dir.exists() {
         remove_dirs_matching_name(&projects_dir, &session.session_id)?;
+        let legacy_txt = format!("{}.txt", session.session_id);
+        remove_files_matching_name(&projects_dir, &legacy_txt)?;
     }
 
     Ok(())
@@ -570,5 +596,37 @@ mod tests {
 
         assert!(!target_dir.exists(), "target session dir should be deleted");
         assert!(sibling_dir.exists(), "sibling session dir must survive");
+    }
+
+    /// Regression: legacy Cursor sessions live as plain files at
+    /// `projects/<slug>/agent-transcripts/<uuid>.txt`, not as directories.
+    /// `remove_dirs_matching_name` filters on `is_dir()`, so the dir-only
+    /// pass added in #45 left these files behind and the next scan
+    /// resurrected the orphan. Delete must remove both shapes.
+    #[test]
+    fn delete_cursor_agent_removes_legacy_txt_transcript() {
+        let base = make_codex_dir("agf-test-cursor-legacy-txt");
+        let transcripts = base.join("projects/encproj/agent-transcripts");
+        fs::create_dir_all(&transcripts).unwrap();
+
+        let target_uuid = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee1";
+        let sibling_uuid = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee2";
+
+        let target_file = transcripts.join(format!("{target_uuid}.txt"));
+        let sibling_file = transcripts.join(format!("{sibling_uuid}.txt"));
+        fs::write(&target_file, b"legacy transcript").unwrap();
+        fs::write(&sibling_file, b"legacy transcript").unwrap();
+
+        let projects_dir = base.join("projects");
+        remove_files_matching_name(&projects_dir, &format!("{target_uuid}.txt")).unwrap();
+
+        assert!(
+            !target_file.exists(),
+            "legacy .txt transcript should be deleted",
+        );
+        assert!(
+            sibling_file.exists(),
+            "unrelated sibling legacy .txt must survive",
+        );
     }
 }
