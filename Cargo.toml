@@ -1,6 +1,6 @@
 [package]
 name = "agf"
-version = "0.11.3"
+version = "0.11.4"
 edition = "2021"
 description = "Find and resume local AI coding-agent sessions across Claude Code, Codex, Gemini, Cursor CLI, OpenCode, Kiro, pi, and Hermes"
 license = "MIT"
