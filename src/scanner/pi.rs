@@ -64,7 +64,16 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
     let mut summaries = Vec::new();
     let mut bytes_read = 0usize;
 
-    for line in reader.lines().map_while(Result::ok) {
+    for line_result in reader.lines() {
+        // A single bad line (invalid UTF-8, transient IO error) must skip just
+        // that line — never abort the rest of the file. `map_while(Result::ok)`
+        // stops at the first `Err`, which silently truncates summaries (or
+        // drops the entire session if the bad line is line 1, since the header
+        // is not yet captured). Same bug class as the cursor `.ok()?` fix in
+        // v0.11.3 (`extract_first_prompt_skips_invalid_utf8_lines`).
+        let Ok(line) = line_result else {
+            continue;
+        };
         // +1 approximates the newline stripped by `lines()`; we only need a
         // rough byte budget, not an exact count.
         bytes_read += line.len() + 1;
@@ -228,6 +237,43 @@ mod tests {
             "expected the byte budget to cap summaries, got {}",
             session.summaries.len()
         );
+    }
+
+    /// Regression: a single line with invalid UTF-8 bytes used to abort the
+    /// entire per-line loop via `reader.lines().map_while(Result::ok)`. If the
+    /// bad line preceded the session header, the whole session was silently
+    /// dropped. The fix skips just the bad line and keeps iterating, so the
+    /// header on line 2 is captured and the user prompt on line 3 still
+    /// surfaces. Same bug class as the cursor `.ok()?` fix in v0.11.3.
+    #[test]
+    fn parse_session_skips_invalid_utf8_lines() {
+        let pid = std::process::id();
+        let ts = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let path = std::env::temp_dir().join(format!("agf-pi-badutf8-{pid}-{ts}.jsonl"));
+        let _ = fs::remove_file(&path);
+
+        let mut bytes: Vec<u8> = Vec::new();
+        // Line 1: a truncated multibyte sequence — `BufReader::lines()` returns
+        // `Err(InvalidData)` for this row.
+        bytes.extend_from_slice(&[0xC3, 0x28]);
+        bytes.push(b'\n');
+        // Line 2: valid session header.
+        bytes.extend_from_slice(
+            br#"{"type":"session","id":"recovered","timestamp":"2026-05-29T00:00:00Z","cwd":"/tmp/project"}"#,
+        );
+        bytes.push(b'\n');
+        // Line 3: valid user message.
+        bytes.extend_from_slice(
+            br#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"after garbage"}]}}"#,
+        );
+        fs::write(&path, &bytes).unwrap();
+
+        let session = parse_session(&path);
+        let _ = fs::remove_file(&path);
+
+        let session = session.expect("session should surface despite invalid UTF-8 on line 1");
+        assert_eq!(session.session_id, "recovered");
+        assert_eq!(session.summaries, vec!["after garbage"]);
     }
 
     /// `scan()` walks `$HOME/.pi/agent/sessions`; redirecting the home dir via

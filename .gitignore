@@ -7,4 +7,5 @@
 .vscode/
 *.iml
 CLAUDE.md
+.claude/
 .release-notes-*.md

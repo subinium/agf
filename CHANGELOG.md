@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.11.4] - 2026-05-29
+
+### Fixed
+
+- **`scanner/pi`: a single invalid-UTF-8 line no longer drops the rest of the file (or the whole session)** — `parse_session` used `reader.lines().map_while(Result::ok)`, which stops at the first `Err` and silently truncates every prompt summary that follows. Worse, when the bad line lands before the session header (a real failure mode for crash-truncated or rotation-racing writes), the header is never captured and the entire session is dropped from `agf list`. This is the same bug class as the `extract_first_prompt` `.ok()?` regression fixed in v0.11.3 for the Cursor scanner. Replaced with `let Ok(line) = line_result else { continue; };` so each bad line is skipped individually. Regression test: `parse_session_skips_invalid_utf8_lines`.
+- **`scanner/codex`: `~/.codex/history.jsonl` no longer scales with the user's lifetime codex usage** — `read_history_summaries` streamed the entire file, parsed every line into a `HistoryEntry`, and accumulated `(f64, String)` tuples for every session_id ever seen — including thousands of sessions that no longer have a rollout JSONL on disk. For power users who run codex daily, the file reaches tens of MB; v0.11.3's `CACHE_VERSION` bump to 6 forces a cold rescan on every upgrader, which would otherwise pay this cost on first launch. The function now takes the same `live_session_ids` set already collected by `collect_live_session_ids` and short-circuits any line whose `session_id` is not in it. When `live_session_ids` is `None` (transient I/O on the sessions tree), the legacy "keep everything" behavior is preserved, mirroring `scan_sqlite`'s same-condition fallback. Regression tests: `read_history_summaries_pre_filters_against_live_session_ids` and `read_history_summaries_keeps_all_when_live_set_is_none`.
+
+### Docs
+
+- **README: Kiro row now surfaces "no per-session resume — always opens the latest session for the cwd"** — `kiro-cli` ignores `session_id`, so selecting a specific older Kiro entry in the TUI silently launches a different session. The caveat was previously only in `Agent::Kiro::resume_cmd`'s inline comment; it now appears in the top agents table where users actually read.
+- **README: Hermes row now surfaces "cwd-independent — resumes in your current shell directory"** — documented in the expanded `Full session storage paths` section but missing from the discoverable top table.
+
+### Internal
+
+- **`.gitignore`: `/.claude/` added** — every contributor running Claude Code locally was seeing `~/.claude/` show up as untracked in `git status`, with the latent risk of an accidental `git add .` committing a personal agent state directory.
+
 ## [0.11.3] - 2026-05-27
 
 ### Fixed

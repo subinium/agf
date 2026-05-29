@@ -12,9 +12,6 @@ use crate::scanner::{first_line_truncated, read_first_line};
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let codex_dir = crate::config::codex_dir()?;
 
-    // Collect summaries from history.jsonl (keyed by session_id, newest-first)
-    let summaries = read_history_summaries(&codex_dir);
-
     // Build the set of session IDs whose rollout JSONL still exists on disk.
     // Used to filter out — and prune from SQLite — `threads` rows that were
     // left behind when the JSONL was deleted manually (e.g. the user wiped
@@ -26,6 +23,16 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     // behavior — surface every SQLite row, prune nothing — to avoid
     // wiping live rows on a flaky filesystem read.
     let live_session_ids = collect_live_session_ids(&codex_dir);
+
+    // Collect summaries from history.jsonl, pre-filtered against the live set
+    // when known. `history.jsonl` is append-only and grows unbounded — power
+    // users hit tens of MB after months of daily use — so keeping every
+    // historical entry in memory wastes both RAM and post-loop sort time when
+    // only the currently-listed sessions need summaries. (Surfaced by the
+    // v0.11.3 post-ship audit; the `CACHE_VERSION=6` bump forces a cold
+    // rescan on every upgrader, which would otherwise pay this cost on first
+    // launch.)
+    let summaries = read_history_summaries(&codex_dir, live_session_ids.as_ref());
 
     // Primary: read from SQLite (state_*.sqlite)
     let mut sessions = scan_sqlite(&codex_dir, &summaries, live_session_ids.as_ref());
@@ -375,7 +382,20 @@ struct HistoryEntry {
     text: Option<String>,
 }
 
-fn read_history_summaries(codex_dir: &std::path::Path) -> HashMap<String, Vec<String>> {
+/// Read `~/.codex/history.jsonl` and group user-prompt summaries by
+/// `session_id`, newest-first.
+///
+/// `live_session_ids` is the set of session IDs whose rollout JSONL still
+/// exists on disk; when `Some`, lines whose `session_id` is not in the set
+/// are skipped early so historical entries for long-deleted sessions never
+/// reach the HashMap. `None` means the caller couldn't enumerate the live set
+/// reliably (permission denied / transient I/O); the legacy behavior — keep
+/// every entry — is preserved to match `scan_sqlite`'s same-condition
+/// fallback at `live_session_ids.is_none()`.
+fn read_history_summaries(
+    codex_dir: &std::path::Path,
+    live_session_ids: Option<&HashSet<String>>,
+) -> HashMap<String, Vec<String>> {
     let path = codex_dir.join("history.jsonl");
     let mut summaries: HashMap<String, Vec<(f64, String)>> = HashMap::new();
 
@@ -401,6 +421,11 @@ fn read_history_summaries(codex_dir: &std::path::Path) -> HashMap<String, Vec<St
             Some(id) if !id.is_empty() => id,
             _ => continue,
         };
+        if let Some(live) = live_session_ids {
+            if !live.contains(&session_id) {
+                continue;
+            }
+        }
         let ts = entry.ts.unwrap_or(0.0);
         let text = match entry.text {
             Some(t) if !t.is_empty() => t,
@@ -558,5 +583,59 @@ mod tests {
         let live = collect_live_session_ids(&dir).expect("walk ok");
         assert!(live.contains("session-abc"));
         assert_eq!(live.len(), 1);
+    }
+
+    fn seed_history_jsonl(dir: &std::path::Path, entries: &[(&str, f64, &str)]) {
+        let mut f = fs::File::create(dir.join("history.jsonl")).unwrap();
+        for (sid, ts, text) in entries {
+            writeln!(f, r#"{{"session_id":"{sid}","ts":{ts},"text":"{text}"}}"#).unwrap();
+        }
+    }
+
+    /// Pre-filter: when a live session id set is provided, history entries for
+    /// any other session id are skipped early so they never reach the
+    /// returned `HashMap`. Bounds memory growth on `history.jsonl`, which is
+    /// append-only and reaches tens of MB for power users.
+    #[test]
+    fn read_history_summaries_pre_filters_against_live_session_ids() {
+        let dir = make_codex_dir("hist-prefilter");
+        seed_history_jsonl(
+            &dir,
+            &[
+                ("live-a", 100.0, "kept-A1"),
+                ("dead-b", 110.0, "dropped"),
+                ("live-a", 120.0, "kept-A2"),
+                ("dead-c", 130.0, "dropped"),
+            ],
+        );
+        let mut live = HashSet::new();
+        live.insert("live-a".to_string());
+
+        let summaries = read_history_summaries(&dir, Some(&live));
+
+        assert_eq!(summaries.len(), 1);
+        // Newest-first order: 120.0 before 100.0.
+        assert_eq!(
+            summaries.get("live-a").map(|v| v.as_slice()),
+            Some(&["kept-A2".to_string(), "kept-A1".to_string()][..])
+        );
+        assert!(!summaries.contains_key("dead-b"));
+        assert!(!summaries.contains_key("dead-c"));
+    }
+
+    /// `None` (caller could not enumerate the live set) preserves the legacy
+    /// "keep every entry" behavior — mirrors `scan_sqlite`'s same-condition
+    /// fallback so a transient I/O error on the sessions tree can't wipe
+    /// summaries from the listing.
+    #[test]
+    fn read_history_summaries_keeps_all_when_live_set_is_none() {
+        let dir = make_codex_dir("hist-no-filter");
+        seed_history_jsonl(&dir, &[("a", 1.0, "kept-a"), ("b", 2.0, "kept-b")]);
+
+        let summaries = read_history_summaries(&dir, None);
+
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries.contains_key("a"));
+        assert!(summaries.contains_key("b"));
     }
 }

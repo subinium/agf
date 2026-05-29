@@ -48,9 +48,9 @@ Then you either dig through history files or start over.
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` |
 | [Cursor CLI](https://cursor.com/docs/cli/overview) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy) |
 | [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
-| [Kiro](https://kiro.dev) | `kiro-cli chat --resume` | `~/Library/Application Support/kiro-cli/data.sqlite3` |
+| [Kiro](https://kiro.dev) | `kiro-cli chat --resume` *(no per-session resume — always opens the latest session for the cwd)* | `~/Library/Application Support/kiro-cli/data.sqlite3` |
 | [pi](https://github.com/badlogic/pi-mono) | `pi --session <id>` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
-| [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes --resume <id>` | `~/.hermes/state.db` |
+| [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes --resume <id>` *(cwd-independent — resumes in your current shell directory)* | `~/.hermes/state.db` |
 
 <details>
 <summary>Full session storage paths</summary>
