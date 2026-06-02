@@ -319,13 +319,9 @@ impl App {
         let id = session.session_id.clone();
         let offset = self.summary_offsets.get(&id).copied().unwrap_or(0);
         let new_offset = if forward {
-            if offset + 1 < count {
-                offset + 1
-            } else {
-                offset
-            }
+            (offset + 1) % count
         } else {
-            offset.saturating_sub(1)
+            if offset == 0 { count - 1 } else { offset - 1 }
         };
         self.summary_offsets.insert(id, new_offset);
     }
