@@ -345,10 +345,11 @@ impl App {
             return;
         }
         let visible = self.viewport_height.max(1);
+        let margin = 3usize.min(visible.saturating_sub(1));
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
-        } else if self.selected >= self.scroll_offset + visible {
-            self.scroll_offset = self.selected - visible + 1;
+        } else if self.selected >= self.scroll_offset + visible.saturating_sub(margin) {
+            self.scroll_offset = self.selected - visible + 1 + margin;
         }
         let max_offset = self.filtered_indices.len().saturating_sub(visible);
         if self.scroll_offset > max_offset {
@@ -587,9 +588,9 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     let ctrl_sort = ui.key_mod('s', slt::KeyModifiers::CONTROL);
     let ctrl_bulk = ui.key_mod('d', slt::KeyModifiers::CONTROL);
     let ctrl_clear = ui.key_mod('u', slt::KeyModifiers::CONTROL);
+    let ctrl_left = ui.key_mod('h', slt::KeyModifiers::CONTROL);
     let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
     let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
-    let ctrl_left = ui.key_mod('h', slt::KeyModifiers::CONTROL);
     // Consume ctrl chars to prevent textarea insertion
     if ctrl_up {
         ui.consume_key('p');
@@ -608,14 +609,14 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     if ctrl_clear {
         ui.consume_key('u');
     }
+    if ctrl_left {
+        ui.consume_key('h');
+    }
     if ctrl_right {
         ui.consume_key('l');
     }
     if ctrl_group {
         ui.consume_key('g');
-    }
-    if ctrl_left {
-        ui.consume_key('h');
     }
 
     // Consume special chars that have bindings
@@ -821,8 +822,9 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
         ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
     let ctrl_down =
         ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
-    let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
+    let ctrl_left = ui.key_mod('h', slt::KeyModifiers::CONTROL);
     let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
+    let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
     if ctrl_up {
         ui.consume_key('p');
         ui.consume_key('k');
@@ -831,11 +833,14 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
         ui.consume_key('n');
         ui.consume_key('j');
     }
-    if ctrl_group {
-        ui.consume_key('g');
+    if ctrl_left {
+        ui.consume_key('h');
     }
     if ctrl_right {
         ui.consume_key('l');
+    }
+    if ctrl_group {
+        ui.consume_key('g');
     }
 
     if esc || ctrl_group {
@@ -889,10 +894,11 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
 
     // Scroll
     let visible = app.viewport_height.max(1);
+    let margin = 3usize.min(visible.saturating_sub(1));
     if app.grouped_selected < app.grouped_scroll {
         app.grouped_scroll = app.grouped_selected;
-    } else if app.grouped_selected >= app.grouped_scroll + visible {
-        app.grouped_scroll = app.grouped_selected - visible + 1;
+    } else if app.grouped_selected >= app.grouped_scroll + visible.saturating_sub(margin) {
+        app.grouped_scroll = app.grouped_selected - visible + 1 + margin;
     }
 
     // --- Render ---
