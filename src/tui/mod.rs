@@ -1106,12 +1106,14 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         || ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
         || ui.key_mod('k', slt::KeyModifiers::CONTROL)
+        || ui.key('k')
     {
         app.action_index = (app.action_index + action_count - 1) % action_count;
     } else if ui.consume_key_code(slt::KeyCode::Tab)
         || ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL)
+        || ui.key('j')
     {
         app.action_index = (app.action_index + 1) % action_count;
     }
