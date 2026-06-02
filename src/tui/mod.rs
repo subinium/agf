@@ -781,7 +781,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
             &[
                 ("↑↓", "nav"),
                 ("Tab", "agent"),
-                ("[/]", "summary"),
+                ("[ or ]", "summary"),
                 ("→", "detail"),
                 ("Enter", "select"),
                 ("^S", "sort"),
@@ -2132,7 +2132,13 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
             ui.text("Keybindings").fg(GRAY_400).bold();
             ui.text("").dim();
             help_line(ui, "↑ / ↓", "Navigate sessions");
-            help_line(ui, "[ or ]", "Cycle summary");
+            let _ = ui.row(|ui| {
+                ui.styled("  [", slt::Style::new().fg(GRAY_500));
+                ui.styled(" or ", slt::Style::new().fg(GRAY_400));
+                ui.styled("]", slt::Style::new().fg(GRAY_500));
+                ui.styled("          ", slt::Style::new());
+                ui.text("Cycle summary").fg(GRAY_400);
+            });
             help_line(ui, "→", "Session detail");
             help_line(ui, "Enter", "Action menu");
             help_line(ui, "Tab", "Cycle agent filter");
