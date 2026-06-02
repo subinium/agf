@@ -593,6 +593,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     let ctrl_clear = ui.key_mod('u', slt::KeyModifiers::CONTROL);
     let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
     let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
+    let ctrl_left = ui.key_mod('h', slt::KeyModifiers::CONTROL);
     // Consume ctrl chars to prevent textarea insertion
     if ctrl_up {
         ui.consume_key('p');
@@ -616,6 +617,9 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     }
     if ctrl_group {
         ui.consume_key('g');
+    }
+    if ctrl_left {
+        ui.consume_key('h');
     }
 
     // Consume special chars that have bindings
@@ -822,6 +826,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     let ctrl_down =
         ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
     let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
+    let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
     if ctrl_up {
         ui.consume_key('p');
         ui.consume_key('k');
@@ -833,10 +838,24 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     if ctrl_group {
         ui.consume_key('g');
     }
+    if ctrl_right {
+        ui.consume_key('l');
+    }
 
     if esc || ctrl_group {
         app.mode = Mode::Browse;
         return;
+    }
+    if ctrl_right {
+        if let Some((gi, child)) = app.grouped_row_at(app.grouped_selected) {
+            if let Some(ci) = child {
+                let session_idx = app.groups[gi].sessions[ci];
+                if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
+                    app.selected = vi;
+                    app.mode = Mode::Preview;
+                }
+            }
+        }
     }
 
     let total_rows = app.grouped_row_count();
@@ -2039,13 +2058,24 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         app.mode = Mode::Browse;
     }
 
-    if (ui.key_code(slt::KeyCode::Up) || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+    let ctrl_up = ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
+    let ctrl_down = ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
+    if ctrl_up {
+        ui.consume_key('p');
+        ui.consume_key('k');
+    }
+    if ctrl_down {
+        ui.consume_key('n');
+        ui.consume_key('j');
+    }
+
+    if (ui.key_code(slt::KeyCode::Up) || ctrl_up)
         && app.help_selected > 0
     {
         app.help_selected -= 1;
     }
 
-    if (ui.key_code(slt::KeyCode::Down) || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+    if (ui.key_code(slt::KeyCode::Down) || ctrl_down)
         && app.help_selected < 2
     {
         app.help_selected += 1;
@@ -2102,7 +2132,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
             ui.text("Keybindings").fg(GRAY_400).bold();
             ui.text("").dim();
             help_line(ui, "↑ / ↓", "Navigate sessions");
-            help_line(ui, "[ / ]", "Cycle summary");
+            help_line(ui, "[ or ]", "Cycle summary");
             help_line(ui, "→", "Session detail");
             help_line(ui, "Enter", "Action menu");
             help_line(ui, "Tab", "Cycle agent filter");
