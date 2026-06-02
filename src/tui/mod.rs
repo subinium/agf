@@ -1267,7 +1267,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        render_footer(ui, &[("Tab", "nav"), ("Enter", "select"), ("Esc", "back")]);
+        render_footer(ui, &[("Tab/jk", "nav"), ("Enter", "select"), ("Esc", "back")]);
     });
 }
 
