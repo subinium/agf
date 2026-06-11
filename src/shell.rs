@@ -15,21 +15,49 @@ pub enum CommandShell {
 }
 
 impl CommandShell {
-    /// Resolve the active shell once per process. The wrapper sets
-    /// `AGF_SHELL` before exec'ing `agf`, so the value never changes for the
-    /// lifetime of this binary — caching avoids per-frame env lookups in the
-    /// TUI render path and per-call lookups in `action.rs`.
+    /// Resolve the active shell once per process. The wrapper sets `AGF_SHELL`
+    /// before exec'ing `agf`; without it we fall back to `default_shell`.
+    /// Cached so the TUI render path and `action.rs` don't re-read env.
     pub fn from_env() -> Self {
         static CACHE: OnceLock<CommandShell> = OnceLock::new();
-        *CACHE.get_or_init(|| Self::from_name(std::env::var("AGF_SHELL").ok().as_deref()))
+        *CACHE.get_or_init(|| match std::env::var("AGF_SHELL").ok().as_deref() {
+            Some(name) if !name.is_empty() => Self::from_name(Some(name)),
+            _ => Self::default_shell(
+                cfg!(windows),
+                std::env::var_os("MSYSTEM").is_some(),
+                std::env::var("SHELL").ok().as_deref(),
+            ),
+        })
     }
 
-    /// Pure helper behind `from_env` — classifies a shell name string.
+    /// Pure helper behind `from_env` — classifies an explicit shell name string.
     /// Exposed so tests can drive it without mutating process env.
     fn from_name(name: Option<&str>) -> Self {
         match name {
             Some("powershell") | Some("pwsh") => Self::PowerShell,
             _ => Self::Posix,
+        }
+    }
+
+    /// Default shell when `AGF_SHELL` is unset. Native Windows needs PowerShell
+    /// (no `sh`, no `&&`); a POSIX layer signals itself via `MSYSTEM` or, for
+    /// ones like Cygwin that don't, a `SHELL` that native shells never export.
+    /// Args are passed in so tests stay pure.
+    fn default_shell(is_windows: bool, msystem: bool, shell: Option<&str>) -> Self {
+        if !is_windows || msystem {
+            return Self::Posix;
+        }
+        // Classify SHELL's basename via `from_name` so shell names live in one place.
+        match shell {
+            Some(s) if !s.is_empty() => {
+                let base = s
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(s)
+                    .to_ascii_lowercase();
+                Self::from_name(Some(base.trim_end_matches(".exe")))
+            }
+            _ => Self::PowerShell,
         }
     }
 
@@ -335,6 +363,67 @@ mod tests {
         let pwsh = CommandShell::PowerShell;
         assert!(pwsh.is_cd_only("Set-Location '/tmp'"));
         assert!(!pwsh.is_cd_only("Set-Location '/tmp'; if ($?) { claude }"));
+    }
+
+    #[test]
+    fn default_shell_picks_powershell_on_native_windows() {
+        assert_eq!(
+            CommandShell::default_shell(true, false, None),
+            CommandShell::PowerShell
+        );
+    }
+
+    #[test]
+    fn default_shell_honors_posix_layer_on_windows() {
+        assert_eq!(
+            CommandShell::default_shell(true, true, None),
+            CommandShell::Posix
+        );
+        assert_eq!(
+            CommandShell::default_shell(true, false, Some("/usr/bin/bash")),
+            CommandShell::Posix
+        );
+        assert_eq!(
+            CommandShell::default_shell(true, false, Some("/bin/sh")),
+            CommandShell::Posix
+        );
+    }
+
+    #[test]
+    fn default_shell_classifies_shell_as_powershell_only_for_pwsh() {
+        assert_eq!(
+            CommandShell::default_shell(true, false, Some("pwsh")),
+            CommandShell::PowerShell
+        );
+        assert_eq!(
+            CommandShell::default_shell(true, false, Some("/bin/csh")),
+            CommandShell::Posix
+        );
+    }
+
+    #[test]
+    fn default_shell_matches_basename_not_path_substring() {
+        assert_eq!(
+            CommandShell::default_shell(true, false, Some(r"C:\Git\usr\bin\bash.exe")),
+            CommandShell::Posix
+        );
+        assert_eq!(
+            CommandShell::default_shell(true, false, Some(r"C:\Users\bashfan\bin\pwsh.exe")),
+            CommandShell::PowerShell
+        );
+    }
+
+    #[test]
+    fn default_shell_is_posix_off_windows() {
+        assert_eq!(
+            CommandShell::default_shell(false, false, None),
+            CommandShell::Posix
+        );
+        // Even a Windows-looking SHELL must not flip a non-Windows host.
+        assert_eq!(
+            CommandShell::default_shell(false, true, Some("pwsh")),
+            CommandShell::Posix
+        );
     }
 
     #[test]
