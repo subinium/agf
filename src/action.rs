@@ -41,24 +41,27 @@ pub fn action_preview(session: &Session, action: Action) -> String {
 }
 
 /// Detect editor from config, then $EDITOR, then $VISUAL, fallback to "vim".
+///
+/// Resolved once per process and cached: `save_editable()` never writes the
+/// `editor` key, so the value cannot change observably mid-run, and this is
+/// called from the action-menu render path every frame (same rationale as
+/// `CommandShell::from_env` in shell.rs).
 pub fn detect_editor() -> String {
-    let config = crate::settings::Settings::load();
-    if let Some(ref editor) = config.editor
-        && !editor.is_empty()
-    {
-        return editor.clone();
-    }
-    if let Ok(editor) = std::env::var("EDITOR")
-        && !editor.is_empty()
-    {
-        return editor;
-    }
-    if let Ok(editor) = std::env::var("VISUAL")
-        && !editor.is_empty()
-    {
-        return editor;
-    }
-    "vim".to_string()
+    use std::sync::OnceLock;
+    static EDITOR: OnceLock<String> = OnceLock::new();
+    EDITOR
+        .get_or_init(|| {
+            let config = crate::settings::Settings::load();
+            if let Some(editor) = config.editor.filter(|e| !e.is_empty()) {
+                return editor;
+            }
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|e| !e.is_empty())
+                .or_else(|| std::env::var("VISUAL").ok().filter(|e| !e.is_empty()))
+                .unwrap_or_else(|| "vim".to_string())
+        })
+        .clone()
 }
 
 pub fn resume_with_flags(session: &Session, flags: &str) -> String {
@@ -68,9 +71,9 @@ pub fn resume_with_flags(session: &Session, flags: &str) -> String {
     shell.cd_and(&quoted_path, &format!("{base_cmd}{flags}"))
 }
 
-pub fn new_session_with_flags(session: &Session, agent: Agent, flags: &str) -> Option<String> {
+pub fn new_session_with_flags(session: &Session, agent: Agent, flags: &str) -> String {
     let shell = CommandShell::from_env();
     let quoted_path = shell.quote(&session.project_path);
     let base = agent.new_session_cmd();
-    Some(shell.cd_and(&quoted_path, &format!("{base}{flags}")))
+    shell.cd_and(&quoted_path, &format!("{base}{flags}"))
 }

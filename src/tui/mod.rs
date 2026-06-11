@@ -114,13 +114,11 @@ impl App {
         scan_rx: Option<Receiver<ScanResult>>,
         scanning_agents: HashSet<Agent>,
     ) -> Self {
-        let agents = installed_agents();
-
         let mut agent_counts: HashMap<Agent, usize> = HashMap::new();
         for s in &sessions {
             *agent_counts.entry(s.agent).or_insert(0) += 1;
         }
-        let mut sorted_agents = agents.clone();
+        let mut sorted_agents = installed_agents();
         sorted_agents.sort_by(|a, b| {
             agent_counts
                 .get(b)
@@ -222,11 +220,9 @@ impl App {
         // which made the listing look "out of time order" without any
         // visible cause — `agf` has no UI hint that cwd boost is active.
         // Pinning is still honored because it's an explicit user action.
-        let pinned = self.pinned_sessions.clone();
-        self.sessions.sort_by(|a, b| {
-            let rank = |s: &Session| -> u8 { if pinned.contains(&s.session_id) { 0 } else { 1 } };
-            rank(a).cmp(&rank(b))
-        });
+        let pinned = &self.pinned_sessions;
+        self.sessions
+            .sort_by_key(|s| !pinned.contains(&s.session_id));
 
         // Sessions reordered → cached column width no longer valid.
         self.name_col_width_cache = None;
@@ -250,10 +246,7 @@ impl App {
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| match self.agent_filter {
-                Some(agent) => s.agent == agent,
-                None => true,
-            })
+            .filter(|(_, s)| self.agent_filter.is_none_or(|agent| s.agent == agent))
             .map(|(i, _)| i)
             .collect();
 
@@ -272,7 +265,7 @@ impl App {
             );
 
             self.filtered_indices = results.iter().map(|r| agent_filtered[r.index]).collect();
-            self.match_positions = results.iter().map(|r| r.positions.clone()).collect();
+            self.match_positions = results.into_iter().map(|r| r.positions).collect();
         }
 
         if self.filtered_indices.is_empty() {
@@ -301,24 +294,22 @@ impl App {
     }
 
     pub fn cycle_summary(&mut self, forward: bool) {
-        let session = match self.selected_session() {
-            Some(s) => s,
-            None => return,
+        let Some(session) = self.selected_session() else {
+            return;
         };
         let count = session.summaries.len();
         if count <= 1 {
             return;
         }
         let id = session.session_id.clone();
-        let offset = self.summary_offsets.get(&id).copied().unwrap_or(0);
-        let new_offset = if forward {
-            (offset + 1) % count
-        } else if offset == 0 {
+        let offset = self.summary_offsets.entry(id).or_insert(0);
+        *offset = if forward {
+            (*offset + 1) % count
+        } else if *offset == 0 {
             count - 1
         } else {
-            offset - 1
+            *offset - 1
         };
-        self.summary_offsets.insert(id, new_offset);
     }
 
     pub fn save_settings(&self) {
@@ -382,13 +373,11 @@ impl App {
             let a_ts = a
                 .sessions
                 .first()
-                .map(|&i| self.sessions[i].timestamp)
-                .unwrap_or(0);
+                .map_or(0, |&i| self.sessions[i].timestamp);
             let b_ts = b
                 .sessions
                 .first()
-                .map(|&i| self.sessions[i].timestamp)
-                .unwrap_or(0);
+                .map_or(0, |&i| self.sessions[i].timestamp);
             b_ts.cmp(&a_ts)
         });
     }
@@ -506,8 +495,6 @@ impl App {
     /// Replace all sessions for `agent` with `new_sessions`. Caller is
     /// responsible for re-sorting / re-filtering.
     fn merge_agent_sessions(&mut self, agent: Agent, new_sessions: Vec<Session>) {
-        // Drop preserved selection across the swap by remembering the id.
-        let selected_id = self.selected_session().map(|s| s.session_id.clone());
         self.sessions.retain(|s| s.agent != agent);
         // agent_counts: subtract old, add new.
         self.agent_counts.remove(&agent);
@@ -521,15 +508,6 @@ impl App {
             self.sessions
                 .sort_by_key(|s| std::cmp::Reverse(s.timestamp));
             self.sessions.truncate(max);
-        }
-        // Restore selection if the same id is still present after the swap;
-        // apply_sort() (run by the caller) will re-derive the index.
-        if let Some(id) = selected_id
-            && let Some(pos) = self.sessions.iter().position(|s| s.session_id == id)
-        {
-            // Stash via a side channel: filtered_indices is stale here, so
-            // we just record the id; apply_sort() restores cursor.
-            let _ = pos;
         }
     }
 
@@ -1012,7 +990,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
 
                             // Calculate available space for summary
                             let fixed_width = 5 + 1 + 12 + 2 + 16; // tree + pin + agent + gap + time
-                            let git_width = s.git_branch.as_ref().map(|b| b.len() + 2).unwrap_or(0);
+                            let git_width = s.git_branch.as_ref().map_or(0, |b| b.len() + 2);
                             let summary_max =
                                 total_width.saturating_sub(fixed_width + git_width + 2);
 
@@ -1205,8 +1183,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
                 let label = if *act == Action::Pin {
                     let is_pinned = app
                         .selected_session()
-                        .map(|s| app.pinned_sessions.contains(&s.session_id))
-                        .unwrap_or(false);
+                        .is_some_and(|s| app.pinned_sessions.contains(&s.session_id));
                     if is_pinned {
                         "Unpin Session".to_string()
                     } else {
@@ -1450,15 +1427,12 @@ fn permission_options_for(agent: Agent) -> Vec<(&'static str, &'static str)> {
 }
 
 fn dispatch_agent_option(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
-    if let Some(opt) = app.new_session_options.get(app.agent_index) {
-        let agent = opt.agent;
-        let suffix = opt.command_suffix;
-        if let Some(session) = app.selected_session().cloned()
-            && let Some(cmd) = action::new_session_with_flags(&session, agent, suffix)
-        {
-            result.replace(cmd);
-            ui.quit();
-        }
+    if let Some(opt) = app.new_session_options.get(app.agent_index)
+        && let Some(session) = app.selected_session().cloned()
+    {
+        let cmd = action::new_session_with_flags(&session, opt.agent, opt.command_suffix);
+        result.replace(cmd);
+        ui.quit();
     }
 }
 
@@ -1505,8 +1479,7 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
     let agent_label = app
         .new_session_options
         .get(app.agent_index)
-        .map(|o| o.label.as_str())
-        .unwrap_or("agent");
+        .map_or("agent", |o| o.label.as_str());
 
     let _ = ui.col(|ui| {
         ui.separator_colored(SEPARATOR);
@@ -1565,14 +1538,11 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 fn dispatch_mode_option(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     if let Some((_, flags)) = app.mode_options.get(app.mode_index)
         && let Some(opt) = app.new_session_options.get(app.agent_index)
+        && let Some(session) = app.selected_session().cloned()
     {
-        let agent = opt.agent;
-        if let Some(session) = app.selected_session().cloned()
-            && let Some(cmd) = action::new_session_with_flags(&session, agent, flags)
-        {
-            result.replace(cmd);
-            ui.quit();
-        }
+        let cmd = action::new_session_with_flags(&session, opt.agent, flags);
+        result.replace(cmd);
+        ui.quit();
     }
 }
 
@@ -1789,9 +1759,12 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
                 let mut indices: Vec<usize> = app.selected_set.drain().collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
                 for idx in indices {
-                    if idx < app.sessions.len() {
+                    // Only drop the row from the UI when the on-disk delete
+                    // actually succeeded; failed deletes stay visible.
+                    if idx < app.sessions.len()
+                        && crate::delete::delete_session(&app.sessions[idx]).is_ok()
+                    {
                         let agent = app.sessions[idx].agent;
-                        let _ = crate::delete::delete_session(&app.sessions[idx]);
                         app.sessions.remove(idx);
                         decrement_agent_count(&mut app.agent_counts, agent);
                     }
@@ -1799,10 +1772,13 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
                 app.selected_set.clear();
                 app.update_filter();
             } else if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
-                let agent = app.sessions[idx].agent;
-                let _ = crate::delete::delete_session(&app.sessions[idx]);
-                app.sessions.remove(idx);
-                decrement_agent_count(&mut app.agent_counts, agent);
+                // Only drop the row from the UI when the on-disk delete
+                // actually succeeded; a failed delete stays visible.
+                if crate::delete::delete_session(&app.sessions[idx]).is_ok() {
+                    let agent = app.sessions[idx].agent;
+                    app.sessions.remove(idx);
+                    decrement_agent_count(&mut app.agent_counts, agent);
+                }
                 app.update_filter();
             }
             app.mode = Mode::Browse;
@@ -2341,7 +2317,7 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
 
             let _ = ui.row(|ui| {
                 ui.styled(indicator.to_string(), indicator_style);
-                render_chunks(ui, &chunks);
+                render_chunks(ui, chunks);
             });
         } else {
             let is_pinned = app.pinned_sessions.contains(&session.session_id);
@@ -2383,7 +2359,7 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
                     slt::Style::new().fg(slt::Color::White).bg(bg)
                 };
                 ui.styled(indicator.to_string(), ind_style);
-                render_chunks(ui, &chunks);
+                render_chunks(ui, chunks);
             });
         }
     }
@@ -2472,10 +2448,7 @@ fn build_session_row(
     } else {
         session.git_branch.as_ref().map(|b| format!("  {b}"))
     };
-    let git_info_width = git_info_str
-        .as_deref()
-        .map(UnicodeWidthStr::width)
-        .unwrap_or(0);
+    let git_info_width = git_info_str.as_deref().map_or(0, UnicodeWidthStr::width);
 
     // Use fixed column width for project name (padded to align columns)
     let fixed_left = indicator_width + 14;
@@ -2553,9 +2526,12 @@ fn chunk_width(chunks: &[StyledChunk]) -> usize {
         .sum()
 }
 
-fn render_chunks(ui: &mut slt::Context, chunks: &[StyledChunk]) {
+/// Emit pre-built row chunks. Takes the Vec by value: chunks are built fresh
+/// per visible row each frame, so consuming them avoids a String clone per
+/// chunk on the hot render path.
+fn render_chunks(ui: &mut slt::Context, chunks: Vec<StyledChunk>) {
     for (text, style) in chunks {
-        ui.styled(text.clone(), *style);
+        ui.styled(text, style);
     }
 }
 
