@@ -355,6 +355,9 @@ fn solve(parts: &[&str], idx: usize, current: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+    // Only the unix-gated fixture helpers use the Write trait; gate the
+    // import the same way so Windows clippy doesn't flag it as unused.
+    #[cfg(unix)]
     use std::io::Write;
 
     /// Build a (cursor_dir, real_project_dir, dash_encoded_slug) fixture.
