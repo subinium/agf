@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Agent, Session};
 use crate::plugin;
 
+// Since v0.12.0 the cache also stores `agf_version` (the writing binary's
+// version); any mismatch on read forces a full rescan (issue #37). That makes
+// per-release CACHE_VERSION bumps unnecessary for scanner-behavior changes —
+// CACHE_VERSION only needs bumping for schema/interpretation changes that can
+// ship *within* one package version (e.g. successive dev builds).
+//
 // Bumped to 6 in v0.11.3:
 // - Cursor scanner now (a) walks both depth-3 .txt and depth-4 .jsonl layouts,
 //   (b) reads chat metadata from the `meta` table of store.db, and (c) drops
@@ -35,19 +41,28 @@ use crate::plugin;
 //   Bumping the version forces a one-time rescan on first 0.11.0 launch.
 const CACHE_VERSION: u32 = 6;
 
-#[derive(Serialize, Deserialize)]
+/// The binary version stamped into every cache write; any mismatch on read
+/// invalidates the whole cache (see `parse_cache`).
+const AGF_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Serialize, Deserialize)]
 struct CacheFile {
     version: u32,
+    /// `CARGO_PKG_VERSION` of the binary that wrote the file. Defaults to ""
+    /// for caches written before this field existed, which fails the version
+    /// match in `parse_cache` and forces the rescan we want.
+    #[serde(default)]
+    agf_version: String,
     agents: HashMap<String, AgentCache>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct AgentCache {
     mtime: u64, // Unix seconds of data source last modification
     sessions: Vec<CachedSession>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct CachedSession {
     agent: String,
     session_id: String,
@@ -148,6 +163,33 @@ fn get_max_mtime(paths: &[PathBuf]) -> u64 {
     max
 }
 
+/// Validate raw cache-file content. The cache is usable only when (a) it
+/// parses, (b) the schema `version` matches, and (c) it was written by this
+/// exact binary version. (c) exists because scanner behavior can change
+/// between releases without a schema change — issue #37: mtime checks can't
+/// distinguish "the data didn't change" from "the data didn't change but its
+/// interpretation just did", so every upgrade pays one full rescan instead of
+/// silently serving per-session payloads shaped by an older binary.
+fn parse_cache(content: &str, binary_version: &str) -> Result<CacheFile, String> {
+    let cache: CacheFile =
+        serde_json::from_str(content).map_err(|e| format!("cache parse failed: {e}"))?;
+    if cache.version != CACHE_VERSION {
+        return Err(format!(
+            "cache schema version {} != {}",
+            cache.version, CACHE_VERSION
+        ));
+    }
+    if cache.agf_version != binary_version {
+        let by = if cache.agf_version.is_empty() {
+            "an older agf (pre-agf_version)"
+        } else {
+            cache.agf_version.as_str()
+        };
+        return Err(format!("cache built by {by}, current {binary_version}"));
+    }
+    Ok(cache)
+}
+
 /// Load cached sessions. Returns (sessions, stale_agents).
 /// stale_agents are agents whose data sources have changed since cache was written.
 pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
@@ -157,20 +199,11 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
         Err(_) => return (Vec::new(), Agent::all().to_vec()),
     };
 
-    let cache: CacheFile = match serde_json::from_str::<CacheFile>(&content) {
-        Ok(c) if c.version == CACHE_VERSION => c,
-        Ok(c) => {
+    let cache = match parse_cache(&content, AGF_VERSION) {
+        Ok(c) => c,
+        Err(why) => {
             if std::env::var("AGF_DEBUG").is_ok() {
-                eprintln!(
-                    "[agf] cache version {} != {} → rescanning",
-                    c.version, CACHE_VERSION
-                );
-            }
-            return (Vec::new(), Agent::all().to_vec());
-        }
-        Err(e) => {
-            if std::env::var("AGF_DEBUG").is_ok() {
-                eprintln!("[agf] cache parse failed: {e} → rescanning");
+                eprintln!("[agf] {why} → rescanning");
             }
             return (Vec::new(), Agent::all().to_vec());
         }
@@ -226,22 +259,23 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
     let plugins = plugin::all_plugins();
     let mut agents: HashMap<String, AgentCache> = HashMap::new();
 
-    // Carry over prior cache entries for in-flight agents.
+    // Carry over prior cache entries for in-flight agents. `parse_cache`
+    // gates this on schema AND binary version: entries written by another
+    // binary are exactly the stale data issue #37 is about, so on upgrade we
+    // drop them and let the next launch rescan those agents instead.
     if !skip_agents.is_empty() {
         if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(prior) = serde_json::from_str::<CacheFile>(&content) {
-                if prior.version == CACHE_VERSION {
-                    for skip in skip_agents {
-                        let key = agent_to_str(*skip).to_string();
-                        if let Some(entry) = prior.agents.get(&key) {
-                            agents.insert(
-                                key,
-                                AgentCache {
-                                    mtime: entry.mtime,
-                                    sessions: entry.sessions.iter().map(clone_cached).collect(),
-                                },
-                            );
-                        }
+            if let Ok(prior) = parse_cache(&content, AGF_VERSION) {
+                for skip in skip_agents {
+                    let key = agent_to_str(*skip).to_string();
+                    if let Some(entry) = prior.agents.get(&key) {
+                        agents.insert(
+                            key,
+                            AgentCache {
+                                mtime: entry.mtime,
+                                sessions: entry.sessions.iter().map(clone_cached).collect(),
+                            },
+                        );
                     }
                 }
             }
@@ -273,6 +307,7 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
 
     let cache = CacheFile {
         version: CACHE_VERSION,
+        agf_version: AGF_VERSION.to_string(),
         agents,
     };
 
@@ -354,4 +389,55 @@ pub fn start_stale_scan(stale: &[Agent]) -> std::sync::mpsc::Receiver<ScanResult
     // Drop the original sender so the receiver closes once all workers finish.
     drop(tx);
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache_json(version: u32, agf_version: Option<&str>) -> String {
+        let mut v = serde_json::json!({
+            "version": version,
+            "agents": {}
+        });
+        if let Some(av) = agf_version {
+            v["agf_version"] = serde_json::Value::String(av.to_string());
+        }
+        v.to_string()
+    }
+
+    #[test]
+    fn parse_cache_accepts_matching_schema_and_binary_version() {
+        let json = cache_json(CACHE_VERSION, Some(AGF_VERSION));
+        assert!(parse_cache(&json, AGF_VERSION).is_ok());
+    }
+
+    #[test]
+    fn parse_cache_rejects_schema_version_mismatch() {
+        let json = cache_json(CACHE_VERSION + 1, Some(AGF_VERSION));
+        let err = parse_cache(&json, AGF_VERSION).unwrap_err();
+        assert!(err.contains("schema version"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn parse_cache_rejects_binary_version_mismatch() {
+        let json = cache_json(CACHE_VERSION, Some("0.0.1"));
+        let err = parse_cache(&json, AGF_VERSION).unwrap_err();
+        assert!(err.contains("cache built by 0.0.1"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn parse_cache_rejects_pre_agf_version_caches() {
+        // Caches written before the field existed carry no `agf_version` key;
+        // the serde default "" must fail the match and force a rescan.
+        let json = cache_json(CACHE_VERSION, None);
+        let err = parse_cache(&json, AGF_VERSION).unwrap_err();
+        assert!(err.contains("pre-agf_version"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn parse_cache_rejects_garbage() {
+        let err = parse_cache("not json", AGF_VERSION).unwrap_err();
+        assert!(err.contains("cache parse failed"), "unexpected: {err}");
+    }
 }
