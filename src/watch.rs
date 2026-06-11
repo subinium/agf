@@ -74,7 +74,11 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
             if state.selected < state.scroll_offset {
                 state.scroll_offset = state.selected;
             } else if state.selected >= state.scroll_offset + viewport.saturating_sub(margin) {
-                state.scroll_offset = state.selected - viewport + 1 + margin;
+                state.scroll_offset = (state.selected + margin + 1).saturating_sub(viewport);
+            }
+            let max_offset = state.sessions.len().saturating_sub(viewport);
+            if state.scroll_offset > max_offset {
+                state.scroll_offset = max_offset;
             }
 
             // Render

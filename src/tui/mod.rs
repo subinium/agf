@@ -320,8 +320,10 @@ impl App {
         let offset = self.summary_offsets.get(&id).copied().unwrap_or(0);
         let new_offset = if forward {
             (offset + 1) % count
+        } else if offset == 0 {
+            count - 1
         } else {
-            if offset == 0 { count - 1 } else { offset - 1 }
+            offset - 1
         };
         self.summary_offsets.insert(id, new_offset);
     }
@@ -349,7 +351,10 @@ impl App {
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
         } else if self.selected >= self.scroll_offset + visible.saturating_sub(margin) {
-            self.scroll_offset = self.selected - visible + 1 + margin;
+            // Saturating form: the margin branch can trigger while
+            // selected < visible (e.g. viewport 10, margin 3, selected 7),
+            // where `selected - visible` would underflow usize.
+            self.scroll_offset = (self.selected + margin + 1).saturating_sub(visible);
         }
         let max_offset = self.filtered_indices.len().saturating_sub(visible);
         if self.scroll_offset > max_offset {
@@ -848,13 +853,12 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
         return;
     }
     if ctrl_right {
-        if let Some((gi, child)) = app.grouped_row_at(app.grouped_selected) {
-            if let Some(ci) = child {
-                let session_idx = app.groups[gi].sessions[ci];
-                if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
-                    app.selected = vi;
-                    app.mode = Mode::Preview;
-                }
+        if let Some((gi, Some(ci))) = app.grouped_row_at(app.grouped_selected) {
+            let session_idx = app.groups[gi].sessions[ci];
+            if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
+                app.selected = vi;
+                app.mode = Mode::Preview;
+                return;
             }
         }
     }
@@ -898,7 +902,11 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     if app.grouped_selected < app.grouped_scroll {
         app.grouped_scroll = app.grouped_selected;
     } else if app.grouped_selected >= app.grouped_scroll + visible.saturating_sub(margin) {
-        app.grouped_scroll = app.grouped_selected - visible + 1 + margin;
+        app.grouped_scroll = (app.grouped_selected + margin + 1).saturating_sub(visible);
+    }
+    let max_grouped_offset = total_rows.saturating_sub(visible);
+    if app.grouped_scroll > max_grouped_offset {
+        app.grouped_scroll = max_grouped_offset;
     }
 
     // --- Render ---
@@ -1267,7 +1275,10 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        render_footer(ui, &[("Tab/jk", "nav"), ("Enter", "select"), ("Esc", "back")]);
+        render_footer(
+            ui,
+            &[("Tab/jk", "nav"), ("Enter", "select"), ("Esc", "back")],
+        );
     });
 }
 
@@ -2062,8 +2073,10 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         app.mode = Mode::Browse;
     }
 
-    let ctrl_up = ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
-    let ctrl_down = ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
+    let ctrl_up =
+        ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
+    let ctrl_down =
+        ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
     if ctrl_up {
         ui.consume_key('p');
         ui.consume_key('k');
@@ -2073,15 +2086,11 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         ui.consume_key('j');
     }
 
-    if (ui.key_code(slt::KeyCode::Up) || ctrl_up)
-        && app.help_selected > 0
-    {
+    if (ui.key_code(slt::KeyCode::Up) || ctrl_up) && app.help_selected > 0 {
         app.help_selected -= 1;
     }
 
-    if (ui.key_code(slt::KeyCode::Down) || ctrl_down)
-        && app.help_selected < 2
-    {
+    if (ui.key_code(slt::KeyCode::Down) || ctrl_down) && app.help_selected < 2 {
         app.help_selected += 1;
     }
 
@@ -2640,5 +2649,71 @@ fn truncate_str(s: &str, max_width: usize) -> String {
         format!("{}...", &s[..e])
     } else {
         s[..end].to_string()
+    }
+}
+
+#[cfg(test)]
+mod scroll_margin_tests {
+    use super::*;
+
+    fn make_app(n: usize) -> App {
+        let sessions = (0..n)
+            .map(|i| crate::model::Session {
+                agent: crate::model::Agent::all()[0],
+                session_id: format!("s{i}"),
+                project_name: "p".into(),
+                project_path: "/tmp/p".into(),
+                summaries: Vec::new(),
+                timestamp: i as i64,
+                git_branch: None,
+                worktree: None,
+                recap: None,
+            })
+            .collect();
+        App::new(
+            sessions,
+            None,
+            5,
+            false,
+            None,
+            Vec::new(),
+            crate::settings::Settings::default(),
+            None,
+            HashSet::new(),
+        )
+    }
+
+    /// The margin branch triggers while `selected < visible` (viewport 10,
+    /// margin 3 → at selected == 7); the pre-fix `selected - visible + 1 +
+    /// margin` underflowed usize and panicked in debug builds.
+    #[test]
+    fn adjust_scroll_does_not_underflow_when_margin_branch_fires_early() {
+        let mut app = make_app(8);
+        app.viewport_height = 10;
+        app.selected = 7;
+        app.adjust_scroll();
+        // All 8 rows fit in a 10-row viewport: no scrolling at all.
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn adjust_scroll_keeps_margin_rows_below_cursor_mid_list() {
+        let mut app = make_app(30);
+        app.viewport_height = 10;
+        app.selected = 12;
+        app.adjust_scroll();
+        // offset = selected + margin + 1 - visible → rows 6..=15 visible,
+        // cursor at 12 leaves margin (3) rows below it.
+        assert_eq!(app.scroll_offset, 6);
+    }
+
+    #[test]
+    fn adjust_scroll_clamps_to_list_end_instead_of_overscrolling() {
+        let mut app = make_app(15);
+        app.viewport_height = 10;
+        app.selected = 14;
+        app.adjust_scroll();
+        // Margin would push offset to 8, but max_offset = 15 - 10 = 5.
+        assert_eq!(app.scroll_offset, 5);
     }
 }
