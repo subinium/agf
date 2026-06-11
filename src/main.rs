@@ -85,8 +85,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> anyhow::Result<()> {
     // Handle --version / -V manually (clap hides it due to args_conflicts_with_subcommands)
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("agf {VERSION}");
         return Ok(());
     }
@@ -123,8 +122,10 @@ fn main() -> anyhow::Result<()> {
             }
 
             let chosen = if let Some(n) = list_count {
-                // Interactive: show top N and let user pick
-                let top_n = results.iter().take(n).collect::<Vec<_>>();
+                // Interactive: show top N and let user pick. `n.max(1)` guards
+                // `--list 0`: an empty top_n would underflow `top_n.len() - 1`
+                // below (results is already non-empty here).
+                let top_n = results.iter().take(n.max(1)).collect::<Vec<_>>();
                 for (i, r) in top_n.iter().enumerate() {
                     let s = &sessions[all_indices[r.index]];
                     eprintln!(

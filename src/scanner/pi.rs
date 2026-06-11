@@ -6,7 +6,7 @@ use walkdir::WalkDir;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
-use crate::scanner::first_line_truncated;
+use crate::scanner::{first_line_truncated, project_name_from_path};
 
 const SUMMARY_MAX_CHARS: usize = 120;
 
@@ -79,16 +79,15 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
         bytes_read += line.len() + 1;
 
         let line = line.trim();
-        if !line.is_empty() {
-            if let Ok(value) = serde_json::from_str::<Value>(line) {
-                if header.is_none() && value.get("type").and_then(Value::as_str) == Some("session")
-                {
-                    header = serde_json::from_value::<PiSessionHeader>(value.clone()).ok();
-                }
+        if !line.is_empty()
+            && let Ok(value) = serde_json::from_str::<Value>(line)
+        {
+            if header.is_none() && value.get("type").and_then(Value::as_str) == Some("session") {
+                header = serde_json::from_value::<PiSessionHeader>(value.clone()).ok();
+            }
 
-                if let Some(summary) = extract_user_summary(&value) {
-                    summaries.push(summary);
-                }
+            if let Some(summary) = extract_user_summary(&value) {
+                summaries.push(summary);
             }
         }
 
@@ -119,11 +118,7 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
                 .unwrap_or(0)
         });
 
-    let project_name = std::path::Path::new(&cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let project_name = project_name_from_path(&cwd);
 
     Some(Session {
         agent: Agent::Pi,
@@ -305,14 +300,17 @@ mod tests {
             )
             .unwrap();
         }
-        std::env::set_var("HOME", &home);
+        // Serialized by the HOME_LOCK guard above.
+        unsafe { std::env::set_var("HOME", &home) };
 
         let sessions = scan().unwrap();
 
         if let Some(old_home) = old_home {
-            std::env::set_var("HOME", old_home);
+            // Serialized by the HOME_LOCK guard above.
+            unsafe { std::env::set_var("HOME", old_home) };
         } else {
-            std::env::remove_var("HOME");
+            // Serialized by the HOME_LOCK guard above.
+            unsafe { std::env::remove_var("HOME") };
         }
 
         let ids: Vec<_> = sessions.iter().map(|s| s.session_id.as_str()).collect();

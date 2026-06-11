@@ -24,7 +24,7 @@ impl CommandShell {
             Some(name) if !name.is_empty() => Self::from_name(Some(name)),
             _ => Self::default_shell(
                 cfg!(windows),
-                std::env::var_os("MSYSTEM").is_some(),
+                std::env::var_os("MSYSTEM").is_some_and(|v| !v.is_empty()),
                 std::env::var("SHELL").ok().as_deref(),
             ),
         })
@@ -423,6 +423,28 @@ mod tests {
         assert_eq!(
             CommandShell::default_shell(false, true, Some("pwsh")),
             CommandShell::Posix
+        );
+    }
+
+    #[test]
+    fn default_shell_handles_uppercase_exe_and_empty_shell() {
+        // Lowercasing must happen before `.exe` trimming.
+        assert_eq!(
+            CommandShell::default_shell(true, false, Some(r"C:\PowerShell\7\PWSH.EXE")),
+            CommandShell::PowerShell
+        );
+        assert_eq!(
+            CommandShell::default_shell(
+                true,
+                false,
+                Some(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+            ),
+            CommandShell::PowerShell
+        );
+        // Empty SHELL means "unset", not a POSIX-layer signal.
+        assert_eq!(
+            CommandShell::default_shell(true, false, Some("")),
+            CommandShell::PowerShell
         );
     }
 

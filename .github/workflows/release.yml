@@ -9,8 +9,23 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version
+        run: |
+          pkg_version=$(cargo pkgid | sed 's/.*[@#]//')
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "Cargo.toml version ($pkg_version) != tag ($tag_version)" >&2
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -36,7 +51,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -80,12 +95,15 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          for dir in */; do
-            cd "$dir"
-            for f in *.tar.gz *.zip; do
-              [ -f "$f" ] && sha256sum "$f" >> ../checksums.txt
-            done
-            cd ..
+          shopt -s nullglob
+          files=(*/*.tar.gz */*.zip)
+          # Keep in sync with the build matrix size.
+          if [ "${#files[@]}" -ne 4 ]; then
+            echo "expected 4 release archives, found ${#files[@]}: ${files[*]}" >&2
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            (cd "$(dirname "$f")" && sha256sum "$(basename "$f")") >> checksums.txt
           done
 
       - name: Create release
@@ -104,4 +122,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # cargo reads CARGO_REGISTRY_TOKEN from the env; when the secret is
+      # unset we skip gracefully instead of failing the whole release red.
+      - name: Publish (skips when CARGO_REGISTRY_TOKEN is unset)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "CARGO_REGISTRY_TOKEN not set — skipping crates.io publish."
+            exit 0
+          fi
+          cargo publish --locked

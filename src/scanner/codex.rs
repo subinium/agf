@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
-use crate::scanner::{first_line_truncated, read_first_line};
+use crate::scanner::{first_line_truncated, project_name_from_path, read_first_line};
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let codex_dir = crate::config::codex_dir()?;
@@ -64,31 +64,25 @@ fn collect_live_session_ids(codex_dir: &std::path::Path) -> Option<HashSet<Strin
     let walker = WalkDir::new(&sessions_dir).into_iter();
     let mut had_walk_error = false;
     for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => {
-                had_walk_error = true;
-                continue;
-            }
+        let Ok(entry) = entry else {
+            had_walk_error = true;
+            continue;
         };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        let first_line = match read_first_line(path) {
-            Some(line) => line,
-            None => continue,
+        let Some(first_line) = read_first_line(path) else {
+            continue;
         };
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line.trim()) {
-            if let Some(id) = value
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line.trim())
+            && let Some(id) = value
                 .get("payload")
                 .and_then(|p| p.get("id"))
                 .and_then(|v| v.as_str())
-            {
-                if !id.is_empty() {
-                    ids.insert(id.to_string());
-                }
-            }
+            && !id.is_empty()
+        {
+            ids.insert(id.to_string());
         }
     }
     // If the walk itself failed (permission denied, transient I/O), treat
@@ -107,9 +101,8 @@ fn prune_orphan_threads(codex_dir: &std::path::Path, orphan_ids: &[String]) {
     if orphan_ids.is_empty() {
         return;
     }
-    let entries = match std::fs::read_dir(codex_dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = std::fs::read_dir(codex_dir) else {
+        return;
     };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -121,13 +114,11 @@ fn prune_orphan_threads(codex_dir: &std::path::Path, orphan_ids: &[String]) {
         if !is_state_db {
             continue;
         }
-        let conn = match Connection::open(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(conn) = Connection::open(&path) else {
+            continue;
         };
-        let tx = match conn.unchecked_transaction() {
-            Ok(t) => t,
-            Err(_) => continue,
+        let Ok(tx) = conn.unchecked_transaction() else {
+            continue;
         };
         for id in orphan_ids {
             let _ = tx.execute("DELETE FROM threads WHERE id = ?1", [id]);
@@ -152,28 +143,26 @@ fn scan_sqlite(
     live_session_ids: Option<&HashSet<String>>,
 ) -> Vec<Session> {
     // Find the latest state_*.sqlite file
-    let db_path = match find_state_db(codex_dir) {
-        Some(p) => p,
-        None => return Vec::new(),
+    let Some(db_path) = find_state_db(codex_dir) else {
+        return Vec::new();
     };
 
-    let conn =
-        match Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
+    let Ok(conn) =
+        Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return Vec::new();
+    };
 
-    let mut stmt = match conn.prepare(
+    let Ok(mut stmt) = conn.prepare(
         "SELECT id, cwd, title, updated_at, git_branch, first_user_message
          FROM threads
          WHERE archived = 0 AND cwd != ''
          ORDER BY updated_at DESC",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    ) else {
+        return Vec::new();
     };
 
-    let rows = match stmt.query_map([], |row| {
+    let Ok(rows) = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -182,9 +171,8 @@ fn scan_sqlite(
             row.get::<_, Option<String>>(4)?,
             row.get::<_, String>(5).unwrap_or_default(),
         ))
-    }) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
+    }) else {
+        return Vec::new();
     };
 
     let mut sessions = Vec::new();
@@ -199,18 +187,14 @@ fn scan_sqlite(
         // Only filter/prune when we have a trustworthy live set. If the
         // sessions tree could not be enumerated (`None`), surface the row
         // as-is — better stale than nuked.
-        if let Some(live) = live_session_ids {
-            if !live.contains(&session_id) {
-                orphan_ids.push(session_id);
-                continue;
-            }
+        if let Some(live) = live_session_ids
+            && !live.contains(&session_id)
+        {
+            orphan_ids.push(session_id);
+            continue;
         }
 
-        let project_name = std::path::Path::new(&cwd)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let project_name = project_name_from_path(&cwd);
 
         // updated_at is Unix seconds — convert to millis
         let timestamp = updated_at * 1000;
@@ -255,7 +239,7 @@ fn scan_sqlite(
 /// Find the latest state_*.sqlite file in the codex directory.
 fn find_state_db(codex_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let entries = std::fs::read_dir(codex_dir).ok()?;
-    let mut candidates: Vec<std::path::PathBuf> = entries
+    entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
@@ -264,11 +248,8 @@ fn find_state_db(codex_dir: &std::path::Path) -> Option<std::path::PathBuf> {
                 .map(|n| n.starts_with("state_") && n.ends_with(".sqlite"))
                 .unwrap_or(false)
         })
-        .collect();
-
-    // Sort descending by name so state_5 > state_4 etc.
-    candidates.sort_by(|a, b| b.cmp(a));
-    candidates.into_iter().next()
+        // Lexicographic max picks the latest db (state_5 > state_4 etc.).
+        .max()
 }
 
 /// Fallback: scan JSONL session files via walkdir (legacy format).
@@ -314,23 +295,20 @@ fn scan_jsonl(
             continue;
         }
 
-        let first_line = match read_first_line(path) {
-            Some(line) => line,
-            None => continue,
+        let Some(first_line) = read_first_line(path) else {
+            continue;
         };
 
-        let meta: SessionMeta = match serde_json::from_str(first_line.trim()) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(meta) = serde_json::from_str::<SessionMeta>(first_line.trim()) else {
+            continue;
         };
 
         if meta.entry_type.as_deref() != Some("session_meta") {
             continue;
         }
 
-        let payload = match meta.payload {
-            Some(p) => p,
-            None => continue,
+        let Some(payload) = meta.payload else {
+            continue;
         };
 
         let session_id = match payload.id {
@@ -343,11 +321,7 @@ fn scan_jsonl(
             _ => continue,
         };
 
-        let project_name = std::path::Path::new(&cwd)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let project_name = project_name_from_path(&cwd);
 
         let timestamp = payload
             .timestamp
@@ -399,32 +373,29 @@ fn read_history_summaries(
     let path = codex_dir.join("history.jsonl");
     let mut summaries: HashMap<String, Vec<(f64, String)>> = HashMap::new();
 
-    let file = match File::open(&path) {
-        Ok(f) => f,
-        Err(_) => return HashMap::new(),
+    let Ok(file) = File::open(&path) else {
+        return HashMap::new();
     };
 
     for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
+        let Ok(line) = line else {
+            continue;
         };
-        let line = line.trim().to_owned();
+        let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let entry: HistoryEntry = match serde_json::from_str(&line) {
-            Ok(e) => e,
-            Err(_) => continue,
+        let Ok(entry) = serde_json::from_str::<HistoryEntry>(line) else {
+            continue;
         };
         let session_id = match entry.session_id {
             Some(id) if !id.is_empty() => id,
             _ => continue,
         };
-        if let Some(live) = live_session_ids {
-            if !live.contains(&session_id) {
-                continue;
-            }
+        if let Some(live) = live_session_ids
+            && !live.contains(&session_id)
+        {
+            continue;
         }
         let ts = entry.ts.unwrap_or(0.0);
         let text = match entry.text {

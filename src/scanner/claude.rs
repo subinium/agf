@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
-use crate::scanner::read_head_tail;
+use crate::scanner::{collapse_whitespace, read_head_tail};
 
 /// Per-file I/O cap for `scan_session_metadata`. Files larger than the sum
 /// fall back to head + tail reads; smaller files are read in full. Sized so
@@ -149,20 +149,19 @@ fn extract_worktree(val: &Value, worktree: &mut Option<String>) {
     if worktree.is_some() {
         return;
     }
-    if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str()) {
-        if let Some((_, wt)) = cwd.split_once("/.claude/worktrees/") {
-            if !wt.is_empty() {
-                *worktree = Some(wt.to_string());
-            }
-        }
+    if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str())
+        && let Some((_, wt)) = cwd.split_once("/.claude/worktrees/")
+        && !wt.is_empty()
+    {
+        *worktree = Some(wt.to_string());
     }
 }
 
 fn extract_ai_title(val: &Value, ai_title: &mut Option<String>) {
-    if val.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
-        if let Some(title) = val.get("aiTitle").and_then(|t| t.as_str()) {
-            *ai_title = Some(title.to_string());
-        }
+    if val.get("type").and_then(|t| t.as_str()) == Some("ai-title")
+        && let Some(title) = val.get("aiTitle").and_then(|t| t.as_str())
+    {
+        *ai_title = Some(title.to_string());
     }
 }
 
@@ -187,15 +186,14 @@ fn extract_recap(
     if latest_recap_ts
         .as_deref()
         .is_none_or(|prev| ts.as_str() > prev)
+        && let Some(content) = val.get("content").and_then(|c| c.as_str())
     {
-        if let Some(content) = val.get("content").and_then(|c| c.as_str()) {
-            // Strip the "(disable recaps in /config)" suffix
-            let clean = content
-                .trim_end_matches("(disable recaps in /config)")
-                .trim();
-            *latest_recap = Some(clean.to_string());
-            *latest_recap_ts = Some(ts);
-        }
+        // Strip the "(disable recaps in /config)" suffix
+        let clean = content
+            .trim_end_matches("(disable recaps in /config)")
+            .trim();
+        *latest_recap = Some(clean.to_string());
+        *latest_recap_ts = Some(ts);
     }
 }
 
@@ -234,11 +232,11 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             Ok(l) => l,
             Err(_) => continue,
         };
-        let line = line.trim().to_owned();
+        let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let entry: ClaudeEntry = match serde_json::from_str(&line) {
+        let entry: ClaudeEntry = match serde_json::from_str(line) {
             Ok(e) => e,
             Err(_) => continue,
         };
@@ -246,6 +244,14 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             Some(id) if !id.is_empty() => id.clone(),
             _ => continue,
         };
+        if !existing_ids.contains(&session_id) {
+            // Orphans (no per-session JSONL under ~/.claude/projects/) are
+            // dropped by the final filter anyway; skip early so unbounded
+            // history.jsonl growth (#27) doesn't accumulate dead SessionData
+            // and summary tuples for the whole scan. Mirrors the
+            // codex::read_history_summaries pre-filter from v0.11.4.
+            continue;
+        }
         let ts = entry.timestamp.unwrap_or(0.0);
 
         let data = sessions_map
@@ -266,7 +272,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
 
         if let Some(display) = entry.display {
             // Collapse multi-line content (e.g. pasted text) into a single line.
-            let display: String = display.split_whitespace().collect::<Vec<_>>().join(" ");
+            let display = collapse_whitespace(&display);
             if !display.is_empty() {
                 data.summaries.push((ts, display));
             }

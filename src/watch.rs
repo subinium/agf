@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::model::{Agent, Session};
@@ -35,6 +35,11 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
             if let Ok((new_sessions, new_running)) = rx.try_recv() {
                 state.sessions = new_sessions;
                 state.running_agents = new_running;
+                // Clamp the cursor: a refresh can shrink the list (sessions
+                // deleted elsewhere), and a stale `selected` past the end
+                // would push the scroll offset past the list and blank the
+                // viewport until the user pressed Up repeatedly.
+                state.selected = state.selected.min(state.sessions.len().saturating_sub(1));
                 state.last_refresh = Instant::now();
             }
 
@@ -180,8 +185,7 @@ fn detect_running_agents() -> Vec<Agent> {
             std::process::Command::new("pgrep")
                 .args(["-x", agent.cli_name()])
                 .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
+                .is_ok_and(|o| o.status.success())
         })
         .collect()
 }

@@ -61,10 +61,10 @@ fn rewrite_jsonl_excluding(path: &Path, json_key: &str, value: &str) -> Result<(
 
 /// Check if a JSON line contains `"key": "value"`.
 fn line_has_field_value(line: &str, key: &str, value: &str) -> bool {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
-        if let Some(v) = parsed.get(key).and_then(|v| v.as_str()) {
-            return v == value;
-        }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
+        && let Some(v) = parsed.get(key).and_then(|v| v.as_str())
+    {
+        return v == value;
     }
     false
 }
@@ -98,7 +98,7 @@ fn remove_dirs_matching_name(base: &Path, name: &str) -> Result<(), io::Error> {
     if !base.is_dir() {
         return Ok(());
     }
-    for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(base).into_iter().flatten() {
         let path = entry.path();
         if path.is_dir() && path.file_name().and_then(|n| n.to_str()) == Some(name) {
             fs::remove_dir_all(path)?;
@@ -113,7 +113,7 @@ fn remove_files_matching_name(base: &Path, name: &str) -> Result<(), io::Error> 
     if !base.is_dir() {
         return Ok(());
     }
-    for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(base).into_iter().flatten() {
         let path = entry.path();
         if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(name) {
             fs::remove_file(path)?;
@@ -162,23 +162,20 @@ fn delete_codex_session(session: &Session) -> Result<(), io::Error> {
 /// file are swallowed so one corrupt or older-schema db cannot block the
 /// delete on the others.
 fn delete_codex_sqlite_rows(codex_dir: &Path, session_id: &str) -> Result<(), io::Error> {
-    let entries = match fs::read_dir(codex_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Ok(entries) = fs::read_dir(codex_dir) else {
+        return Ok(());
     };
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.flatten() {
         let path = entry.path();
         let is_state_db = path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("state_") && n.ends_with(".sqlite"))
-            .unwrap_or(false);
+            .is_some_and(|n| n.starts_with("state_") && n.ends_with(".sqlite"));
         if !is_state_db {
             continue;
         }
-        let conn = match rusqlite::Connection::open(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(conn) = rusqlite::Connection::open(&path) else {
+            continue;
         };
         // `threads` is the only table the Codex scanner reads from. Older
         // Codex CLI versions may not have this table — ignore the error.
@@ -189,18 +186,14 @@ fn delete_codex_sqlite_rows(codex_dir: &Path, session_id: &str) -> Result<(), io
 
 /// Find and delete the Codex rollout JSONL file matching the given session ID.
 fn delete_codex_session_file(sessions_dir: &Path, session_id: &str) -> Result<(), io::Error> {
-    for entry in WalkDir::new(sessions_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(sessions_dir).into_iter().flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
 
-        let content = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
         };
 
         let first_line = match content.lines().next() {
@@ -245,10 +238,7 @@ fn delete_opencode_session(session: &Session) -> Result<(), io::Error> {
     // Also remove JSON storage mirror if it exists
     let session_storage = opencode_dir.join("storage/session");
     if session_storage.exists() {
-        for entry in WalkDir::new(&session_storage)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for entry in WalkDir::new(&session_storage).into_iter().flatten() {
             let path = entry.path();
             if path.is_file()
                 && path.file_stem().and_then(|n| n.to_str()) == Some(&session.session_id)
@@ -273,18 +263,14 @@ fn delete_pi_session(session: &Session) -> Result<(), io::Error> {
         return Ok(());
     }
 
-    for entry in WalkDir::new(&sessions_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&sessions_dir).into_iter().flatten() {
         let path = entry.path();
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
 
-        let content = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
         };
 
         let first_line = match content.lines().next() {
@@ -292,13 +278,12 @@ fn delete_pi_session(session: &Session) -> Result<(), io::Error> {
             _ => continue,
         };
 
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line) {
-            if value.get("type").and_then(|v| v.as_str()) == Some("session")
-                && value.get("id").and_then(|v| v.as_str()) == Some(&session.session_id)
-            {
-                fs::remove_file(path)?;
-                return Ok(());
-            }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line)
+            && value.get("type").and_then(|v| v.as_str()) == Some("session")
+            && value.get("id").and_then(|v| v.as_str()) == Some(&session.session_id)
+        {
+            fs::remove_file(path)?;
+            return Ok(());
         }
     }
 
@@ -380,13 +365,13 @@ fn delete_gemini_session(session: &Session) -> Result<(), io::Error> {
         return Ok(());
     }
 
-    for project_entry in fs::read_dir(&tmp_dir)?.filter_map(|e| e.ok()) {
+    for project_entry in fs::read_dir(&tmp_dir)?.flatten() {
         let chats_dir = project_entry.path().join("chats");
         if !chats_dir.is_dir() {
             continue;
         }
 
-        for chat_entry in fs::read_dir(&chats_dir)?.filter_map(|e| e.ok()) {
+        for chat_entry in fs::read_dir(&chats_dir)?.flatten() {
             let path = chat_entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -396,16 +381,14 @@ fn delete_gemini_session(session: &Session) -> Result<(), io::Error> {
                 continue;
             };
 
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if json
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+                && json
                     .get("sessionId")
                     .and_then(|v| v.as_str())
-                    .map(|id| id == session.session_id)
-                    .unwrap_or(false)
-                {
-                    fs::remove_file(&path)?;
-                    return Ok(());
-                }
+                    .is_some_and(|id| id == session.session_id)
+            {
+                fs::remove_file(&path)?;
+                return Ok(());
             }
         }
     }
@@ -473,10 +456,11 @@ fn delete_hermes_session(session: &Session) -> Result<(), io::Error> {
         let prefix = format!("session_{}", session.session_id);
         if let Ok(entries) = fs::read_dir(&sessions_dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(&prefix) && name.ends_with(".json") {
-                        let _ = fs::remove_file(entry.path());
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && name.starts_with(&prefix)
+                    && name.ends_with(".json")
+                {
+                    let _ = fs::remove_file(entry.path());
                 }
             }
         }

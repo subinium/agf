@@ -3,6 +3,8 @@ use rusqlite::Connection;
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
+use super::{project_name_from_path, push_concat_titles};
+
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let db_path = crate::config::opencode_data_dir()?.join("opencode.db");
 
@@ -39,25 +41,15 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         })?
         .filter_map(|r| r.ok())
         .map(|(id, title, directory, time_updated, sub_titles)| {
-            let project_name = std::path::Path::new(&directory)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string();
+            let project_name = project_name_from_path(&directory);
 
             // Parent title first, then deduplicated subagent titles.
             let mut summaries: Vec<String> = Vec::new();
             if !title.is_empty() {
                 summaries.push(title);
             }
-            if let Some(sub) = sub_titles {
-                let mut seen = std::collections::HashSet::new();
-                for t in sub.split("|||") {
-                    let t = t.trim();
-                    if !t.is_empty() && seen.insert(t.to_string()) {
-                        summaries.push(t.to_string());
-                    }
-                }
+            if let Some(ref blob) = sub_titles {
+                push_concat_titles(&mut summaries, blob);
             }
 
             Session {

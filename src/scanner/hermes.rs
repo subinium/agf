@@ -3,6 +3,8 @@ use rusqlite::Connection;
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
+use super::{char_prefix, collapse_whitespace, push_concat_titles};
+
 /// Trim a chunk of message text down to a single-line preview that fits in
 /// a TUI summary row. Collapses whitespace, drops common wrapper tags, and
 /// caps to ~160 chars.
@@ -10,18 +12,16 @@ fn message_preview(raw: &str) -> Option<String> {
     let stripped = raw
         .replace("<user_query>", " ")
         .replace("</user_query>", " ");
-    let collapsed: String = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(&stripped);
     if collapsed.is_empty() {
         return None;
     }
     let max_chars = 160;
-    let truncated: String = if collapsed.chars().count() > max_chars {
-        let head: String = collapsed.chars().take(max_chars).collect();
-        format!("{head}…")
+    if collapsed.chars().count() > max_chars {
+        Some(format!("{}…", char_prefix(&collapsed, max_chars)))
     } else {
-        collapsed
-    };
-    Some(truncated)
+        Some(collapsed)
+    }
 }
 
 /// True iff the id looks like a session a user actually started from the
@@ -137,19 +137,13 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 // shows how the conversation actually went, not just one
                 // line.
                 let mut summaries: Vec<String> = Vec::new();
-                if let Some(ref t) = title {
-                    if !t.is_empty() {
-                        summaries.push(t.clone());
-                    }
+                if let Some(ref t) = title
+                    && !t.is_empty()
+                {
+                    summaries.push(t.clone());
                 }
                 if let Some(ref children) = child_titles {
-                    let mut seen = std::collections::HashSet::new();
-                    for t in children.split("|||") {
-                        let t = t.trim();
-                        if !t.is_empty() && seen.insert(t.to_string()) {
-                            summaries.push(t.to_string());
-                        }
-                    }
+                    push_concat_titles(&mut summaries, children);
                 }
                 // Only surface user-message previews for ids that look like
                 // CLI/TUI sessions. dashboard:*/api-*/named ids get messages
@@ -157,16 +151,16 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 // crons, dashboard callers), so their `role='user'` rows
                 // are not the user's own prompts and would mislead the
                 // TUI summary.
-                if is_user_cli_session(&id) {
-                    if let Some(ref blob) = user_msgs {
-                        let mut seen: std::collections::HashSet<String> =
-                            summaries.iter().cloned().collect();
-                        for raw in blob.split("|||") {
-                            if let Some(preview) = message_preview(raw) {
-                                if seen.insert(preview.clone()) {
-                                    summaries.push(preview);
-                                }
-                            }
+                if is_user_cli_session(&id)
+                    && let Some(ref blob) = user_msgs
+                {
+                    let mut seen: std::collections::HashSet<String> =
+                        summaries.iter().cloned().collect();
+                    for raw in blob.split("|||") {
+                        if let Some(preview) = message_preview(raw)
+                            && seen.insert(preview.clone())
+                        {
+                            summaries.push(preview);
                         }
                     }
                 }
@@ -175,12 +169,12 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 // so the row is never blank.
                 if summaries.is_empty() {
                     let mut fallback = format!("{source} session");
-                    if let Some(ref m) = model {
-                        if !m.is_empty() {
-                            // Extract short model name (e.g. "claude-opus-4-6" from "anthropic/claude-opus-4-6")
-                            let short = m.rsplit('/').next().unwrap_or(m);
-                            fallback = format!("{fallback} ({short})");
-                        }
+                    if let Some(ref m) = model
+                        && !m.is_empty()
+                    {
+                        // Extract short model name (e.g. "claude-opus-4-6" from "anthropic/claude-opus-4-6")
+                        let short = m.rsplit('/').next().unwrap_or(m);
+                        fallback = format!("{fallback} ({short})");
                     }
                     if message_count > 0 {
                         fallback = format!("{fallback} — {message_count} msgs");
