@@ -6,15 +6,12 @@ on:
   pull_request:
     branches: [main]
 
-jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check
+# Rapid pushes to the same PR/branch cancel superseded runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
+jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -23,7 +20,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy -- -D warnings
+      - uses: Swatinem/rust-cache@v2
+      # --all-targets matches the local gate (lints tests too); clippy
+      # subsumes cargo check, so there is no separate check job.
+      - run: cargo clippy --all-targets --locked -- -D warnings
 
   fmt:
     name: Format
@@ -41,7 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
 
   windows:
     name: Windows
@@ -49,5 +50,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check
-      - run: cargo test
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Lint here too so #[cfg(windows)]-gated code is covered.
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
