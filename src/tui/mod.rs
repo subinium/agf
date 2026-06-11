@@ -319,13 +319,11 @@ impl App {
         let id = session.session_id.clone();
         let offset = self.summary_offsets.get(&id).copied().unwrap_or(0);
         let new_offset = if forward {
-            if offset + 1 < count {
-                offset + 1
-            } else {
-                offset
-            }
+            (offset + 1) % count
+        } else if offset == 0 {
+            count - 1
         } else {
-            offset.saturating_sub(1)
+            offset - 1
         };
         self.summary_offsets.insert(id, new_offset);
     }
@@ -349,10 +347,14 @@ impl App {
             return;
         }
         let visible = self.viewport_height.max(1);
+        let margin = 3usize.min(visible.saturating_sub(1));
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
-        } else if self.selected >= self.scroll_offset + visible {
-            self.scroll_offset = self.selected - visible + 1;
+        } else if self.selected >= self.scroll_offset + visible.saturating_sub(margin) {
+            // Saturating form: the margin branch can trigger while
+            // selected < visible (e.g. viewport 10, margin 3, selected 7),
+            // where `selected - visible` would underflow usize.
+            self.scroll_offset = (self.selected + margin + 1).saturating_sub(visible);
         }
         let max_offset = self.filtered_indices.len().saturating_sub(visible);
         if self.scroll_offset > max_offset {
@@ -591,6 +593,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     let ctrl_sort = ui.key_mod('s', slt::KeyModifiers::CONTROL);
     let ctrl_bulk = ui.key_mod('d', slt::KeyModifiers::CONTROL);
     let ctrl_clear = ui.key_mod('u', slt::KeyModifiers::CONTROL);
+    let ctrl_left = ui.key_mod('h', slt::KeyModifiers::CONTROL);
     let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
     let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
     // Consume ctrl chars to prevent textarea insertion
@@ -610,6 +613,9 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     }
     if ctrl_clear {
         ui.consume_key('u');
+    }
+    if ctrl_left {
+        ui.consume_key('h');
     }
     if ctrl_right {
         ui.consume_key('l');
@@ -777,7 +783,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
             &[
                 ("↑↓", "nav"),
                 ("Tab", "agent"),
-                ("[/]", "summary"),
+                ("[ or ]", "summary"),
                 ("→", "detail"),
                 ("Enter", "select"),
                 ("^S", "sort"),
@@ -821,6 +827,8 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
         ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
     let ctrl_down =
         ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
+    let ctrl_left = ui.key_mod('h', slt::KeyModifiers::CONTROL);
+    let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
     let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
     if ctrl_up {
         ui.consume_key('p');
@@ -830,6 +838,12 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
         ui.consume_key('n');
         ui.consume_key('j');
     }
+    if ctrl_left {
+        ui.consume_key('h');
+    }
+    if ctrl_right {
+        ui.consume_key('l');
+    }
     if ctrl_group {
         ui.consume_key('g');
     }
@@ -837,6 +851,16 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     if esc || ctrl_group {
         app.mode = Mode::Browse;
         return;
+    }
+    if ctrl_right {
+        if let Some((gi, Some(ci))) = app.grouped_row_at(app.grouped_selected) {
+            let session_idx = app.groups[gi].sessions[ci];
+            if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
+                app.selected = vi;
+                app.mode = Mode::Preview;
+                return;
+            }
+        }
     }
 
     let total_rows = app.grouped_row_count();
@@ -874,10 +898,15 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
 
     // Scroll
     let visible = app.viewport_height.max(1);
+    let margin = 3usize.min(visible.saturating_sub(1));
     if app.grouped_selected < app.grouped_scroll {
         app.grouped_scroll = app.grouped_selected;
-    } else if app.grouped_selected >= app.grouped_scroll + visible {
-        app.grouped_scroll = app.grouped_selected - visible + 1;
+    } else if app.grouped_selected >= app.grouped_scroll + visible.saturating_sub(margin) {
+        app.grouped_scroll = (app.grouped_selected + margin + 1).saturating_sub(visible);
+    }
+    let max_grouped_offset = total_rows.saturating_sub(visible);
+    if app.grouped_scroll > max_grouped_offset {
+        app.grouped_scroll = max_grouped_offset;
     }
 
     // --- Render ---
@@ -1085,12 +1114,14 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         || ui.key_code(slt::KeyCode::Up)
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
         || ui.key_mod('k', slt::KeyModifiers::CONTROL)
+        || ui.key('k')
     {
         app.action_index = (app.action_index + action_count - 1) % action_count;
     } else if ui.consume_key_code(slt::KeyCode::Tab)
         || ui.key_code(slt::KeyCode::Down)
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL)
+        || ui.key('j')
     {
         app.action_index = (app.action_index + 1) % action_count;
     }
@@ -1244,7 +1275,10 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        render_footer(ui, &[("Tab", "nav"), ("Enter", "select"), ("Esc", "back")]);
+        render_footer(
+            ui,
+            &[("Tab/jk", "nav"), ("Enter", "select"), ("Esc", "back")],
+        );
     });
 }
 
@@ -2039,15 +2073,24 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         app.mode = Mode::Browse;
     }
 
-    if (ui.key_code(slt::KeyCode::Up) || ui.key_mod('k', slt::KeyModifiers::CONTROL))
-        && app.help_selected > 0
-    {
+    let ctrl_up =
+        ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
+    let ctrl_down =
+        ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
+    if ctrl_up {
+        ui.consume_key('p');
+        ui.consume_key('k');
+    }
+    if ctrl_down {
+        ui.consume_key('n');
+        ui.consume_key('j');
+    }
+
+    if (ui.key_code(slt::KeyCode::Up) || ctrl_up) && app.help_selected > 0 {
         app.help_selected -= 1;
     }
 
-    if (ui.key_code(slt::KeyCode::Down) || ui.key_mod('j', slt::KeyModifiers::CONTROL))
-        && app.help_selected < 2
-    {
+    if (ui.key_code(slt::KeyCode::Down) || ctrl_down) && app.help_selected < 2 {
         app.help_selected += 1;
     }
 
@@ -2102,7 +2145,13 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
             ui.text("Keybindings").fg(GRAY_400).bold();
             ui.text("").dim();
             help_line(ui, "↑ / ↓", "Navigate sessions");
-            help_line(ui, "[ / ]", "Cycle summary");
+            let _ = ui.row(|ui| {
+                ui.styled("  [", slt::Style::new().fg(GRAY_500));
+                ui.styled(" or ", slt::Style::new().fg(GRAY_400));
+                ui.styled("]", slt::Style::new().fg(GRAY_500));
+                ui.styled("          ", slt::Style::new());
+                ui.text("Cycle summary").fg(GRAY_400);
+            });
             help_line(ui, "→", "Session detail");
             help_line(ui, "Enter", "Action menu");
             help_line(ui, "Tab", "Cycle agent filter");
@@ -2600,5 +2649,71 @@ fn truncate_str(s: &str, max_width: usize) -> String {
         format!("{}...", &s[..e])
     } else {
         s[..end].to_string()
+    }
+}
+
+#[cfg(test)]
+mod scroll_margin_tests {
+    use super::*;
+
+    fn make_app(n: usize) -> App {
+        let sessions = (0..n)
+            .map(|i| crate::model::Session {
+                agent: crate::model::Agent::all()[0],
+                session_id: format!("s{i}"),
+                project_name: "p".into(),
+                project_path: "/tmp/p".into(),
+                summaries: Vec::new(),
+                timestamp: i as i64,
+                git_branch: None,
+                worktree: None,
+                recap: None,
+            })
+            .collect();
+        App::new(
+            sessions,
+            None,
+            5,
+            false,
+            None,
+            Vec::new(),
+            crate::settings::Settings::default(),
+            None,
+            HashSet::new(),
+        )
+    }
+
+    /// The margin branch triggers while `selected < visible` (viewport 10,
+    /// margin 3 → at selected == 7); the pre-fix `selected - visible + 1 +
+    /// margin` underflowed usize and panicked in debug builds.
+    #[test]
+    fn adjust_scroll_does_not_underflow_when_margin_branch_fires_early() {
+        let mut app = make_app(8);
+        app.viewport_height = 10;
+        app.selected = 7;
+        app.adjust_scroll();
+        // All 8 rows fit in a 10-row viewport: no scrolling at all.
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn adjust_scroll_keeps_margin_rows_below_cursor_mid_list() {
+        let mut app = make_app(30);
+        app.viewport_height = 10;
+        app.selected = 12;
+        app.adjust_scroll();
+        // offset = selected + margin + 1 - visible → rows 6..=15 visible,
+        // cursor at 12 leaves margin (3) rows below it.
+        assert_eq!(app.scroll_offset, 6);
+    }
+
+    #[test]
+    fn adjust_scroll_clamps_to_list_end_instead_of_overscrolling() {
+        let mut app = make_app(15);
+        app.viewport_height = 10;
+        app.selected = 14;
+        app.adjust_scroll();
+        // Margin would push offset to 8, but max_offset = 15 - 10 = 5.
+        assert_eq!(app.scroll_offset, 5);
     }
 }
