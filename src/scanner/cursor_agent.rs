@@ -353,10 +353,10 @@ fn solve(parts: &[&str], idx: usize, current: &Path) -> Option<PathBuf> {
             if candidate.is_dir() {
                 return Some(candidate);
             }
-        } else if candidate.is_dir() {
-            if let Some(result) = solve(parts, end, &candidate) {
-                return Some(result);
-            }
+        } else if candidate.is_dir()
+            && let Some(result) = solve(parts, end, &candidate)
+        {
+            return Some(result);
         }
     }
     None

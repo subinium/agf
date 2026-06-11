@@ -224,13 +224,7 @@ impl App {
         // Pinning is still honored because it's an explicit user action.
         let pinned = self.pinned_sessions.clone();
         self.sessions.sort_by(|a, b| {
-            let rank = |s: &Session| -> u8 {
-                if pinned.contains(&s.session_id) {
-                    0
-                } else {
-                    1
-                }
-            };
+            let rank = |s: &Session| -> u8 { if pinned.contains(&s.session_id) { 0 } else { 1 } };
             rank(a).cmp(&rank(b))
         });
 
@@ -240,15 +234,14 @@ impl App {
         self.update_filter();
 
         // Restore the selection to the same session after reordering.
-        if let Some(id) = pivot_id {
-            if let Some(new_pos) = self
+        if let Some(id) = pivot_id
+            && let Some(new_pos) = self
                 .filtered_indices
                 .iter()
                 .position(|&i| self.sessions[i].session_id == id)
-            {
-                self.selected = new_pos;
-                self.adjust_scroll();
-            }
+        {
+            self.selected = new_pos;
+            self.adjust_scroll();
         }
     }
 
@@ -531,12 +524,12 @@ impl App {
         }
         // Restore selection if the same id is still present after the swap;
         // apply_sort() (run by the caller) will re-derive the index.
-        if let Some(id) = selected_id {
-            if let Some(pos) = self.sessions.iter().position(|s| s.session_id == id) {
-                // Stash via a side channel: filtered_indices is stale here, so
-                // we just record the id; apply_sort() restores cursor.
-                let _ = pos;
-            }
+        if let Some(id) = selected_id
+            && let Some(pos) = self.sessions.iter().position(|s| s.session_id == id)
+        {
+            // Stash via a side channel: filtered_indices is stale here, so
+            // we just record the id; apply_sort() restores cursor.
+            let _ = pos;
         }
     }
 
@@ -852,14 +845,12 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
         app.mode = Mode::Browse;
         return;
     }
-    if ctrl_right {
-        if let Some((gi, Some(ci))) = app.grouped_row_at(app.grouped_selected) {
-            let session_idx = app.groups[gi].sessions[ci];
-            if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
-                app.selected = vi;
-                app.mode = Mode::Preview;
-                return;
-            }
+    if ctrl_right && let Some((gi, Some(ci))) = app.grouped_row_at(app.grouped_selected) {
+        let session_idx = app.groups[gi].sessions[ci];
+        if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
+            app.selected = vi;
+            app.mode = Mode::Preview;
+            return;
         }
     }
 
@@ -872,25 +863,25 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     }
 
     // Enter/Space on header: toggle expand. Enter on child: open action menu.
-    if enter || space {
-        if let Some((gi, child)) = app.grouped_row_at(app.grouped_selected) {
-            match child {
-                None => {
-                    let path = app.groups[gi].project_path.clone();
-                    if app.group_expanded.contains(&path) {
-                        app.group_expanded.remove(&path);
-                    } else {
-                        app.group_expanded.insert(path);
-                    }
+    if (enter || space)
+        && let Some((gi, child)) = app.grouped_row_at(app.grouped_selected)
+    {
+        match child {
+            None => {
+                let path = app.groups[gi].project_path.clone();
+                if app.group_expanded.contains(&path) {
+                    app.group_expanded.remove(&path);
+                } else {
+                    app.group_expanded.insert(path);
                 }
-                Some(ci) => {
-                    let session_idx = app.groups[gi].sessions[ci];
-                    // Find this session in filtered_indices to set app.selected
-                    if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
-                        app.selected = vi;
-                        app.action_index = 0;
-                        app.mode = Mode::ActionSelect;
-                    }
+            }
+            Some(ci) => {
+                let session_idx = app.groups[gi].sessions[ci];
+                // Find this session in filtered_indices to set app.selected
+                if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
+                    app.selected = vi;
+                    app.action_index = 0;
+                    app.mode = Mode::ActionSelect;
                 }
             }
         }
@@ -1314,11 +1305,11 @@ fn dispatch_action(
             app.mode = Mode::Browse;
         }
         _ => {
-            if let Some(session) = app.selected_session().cloned() {
-                if let Some(cmd) = action::generate_command(&session, selected_action, None) {
-                    result.replace(cmd);
-                    ui.quit();
-                }
+            if let Some(session) = app.selected_session().cloned()
+                && let Some(cmd) = action::generate_command(&session, selected_action, None)
+            {
+                result.replace(cmd);
+                ui.quit();
             }
         }
     }
@@ -1462,11 +1453,11 @@ fn dispatch_agent_option(ui: &mut slt::Context, app: &mut App, result: &mut Opti
     if let Some(opt) = app.new_session_options.get(app.agent_index) {
         let agent = opt.agent;
         let suffix = opt.command_suffix;
-        if let Some(session) = app.selected_session().cloned() {
-            if let Some(cmd) = action::new_session_with_flags(&session, agent, suffix) {
-                result.replace(cmd);
-                ui.quit();
-            }
+        if let Some(session) = app.selected_session().cloned()
+            && let Some(cmd) = action::new_session_with_flags(&session, agent, suffix)
+        {
+            result.replace(cmd);
+            ui.quit();
         }
     }
 }
@@ -1572,15 +1563,15 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 }
 
 fn dispatch_mode_option(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
-    if let Some((_, flags)) = app.mode_options.get(app.mode_index) {
-        if let Some(opt) = app.new_session_options.get(app.agent_index) {
-            let agent = opt.agent;
-            if let Some(session) = app.selected_session().cloned() {
-                if let Some(cmd) = action::new_session_with_flags(&session, agent, flags) {
-                    result.replace(cmd);
-                    ui.quit();
-                }
-            }
+    if let Some((_, flags)) = app.mode_options.get(app.mode_index)
+        && let Some(opt) = app.new_session_options.get(app.agent_index)
+    {
+        let agent = opt.agent;
+        if let Some(session) = app.selected_session().cloned()
+            && let Some(cmd) = action::new_session_with_flags(&session, agent, flags)
+        {
+            result.replace(cmd);
+            ui.quit();
         }
     }
 }
@@ -1682,12 +1673,12 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 }
 
 fn dispatch_resume_mode(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
-    if let Some((_, flags)) = app.resume_mode_options.get(app.resume_mode_index) {
-        if let Some(session) = app.selected_session().cloned() {
-            let cmd = action::resume_with_flags(&session, flags);
-            result.replace(cmd);
-            ui.quit();
-        }
+    if let Some((_, flags)) = app.resume_mode_options.get(app.resume_mode_index)
+        && let Some(session) = app.selected_session().cloned()
+    {
+        let cmd = action::resume_with_flags(&session, flags);
+        result.replace(cmd);
+        ui.quit();
     }
 }
 
@@ -1717,10 +1708,10 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
     }
 
     if ui.key(' ') {
-        if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
-            if !app.selected_set.remove(&idx) {
-                app.selected_set.insert(idx);
-            }
+        if let Some(idx) = app.filtered_indices.get(app.selected).copied()
+            && !app.selected_set.remove(&idx)
+        {
+            app.selected_set.insert(idx);
         }
         if !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
             app.selected += 1;
@@ -2513,19 +2504,19 @@ fn build_session_row(
     let left_used = indicator_width + chunk_width(&chunks);
     let available = total_width.saturating_sub(left_used + git_info_width + right_display_width);
 
-    if available > 7 {
-        if let Some(summary) = summary_text {
-            let sep = "  ";
-            let max_summary = available.saturating_sub(sep.len());
-            if max_summary > 5 {
-                let truncated = truncate_str(summary, max_summary);
-                chunks.push((sep.to_string(), slt::Style::new().bg(bg)));
-                if let Some(rest) = truncated.strip_prefix("recap: ") {
-                    chunks.push(("recap: ".to_string(), slt::Style::new().fg(VIOLET).bg(bg)));
-                    chunks.push((rest.to_string(), slt::Style::new().fg(GRAY_400).bg(bg)));
-                } else {
-                    chunks.push((truncated, slt::Style::new().fg(GRAY_400).bg(bg)));
-                }
+    if available > 7
+        && let Some(summary) = summary_text
+    {
+        let sep = "  ";
+        let max_summary = available.saturating_sub(sep.len());
+        if max_summary > 5 {
+            let truncated = truncate_str(summary, max_summary);
+            chunks.push((sep.to_string(), slt::Style::new().bg(bg)));
+            if let Some(rest) = truncated.strip_prefix("recap: ") {
+                chunks.push(("recap: ".to_string(), slt::Style::new().fg(VIOLET).bg(bg)));
+                chunks.push((rest.to_string(), slt::Style::new().fg(GRAY_400).bg(bg)));
+            } else {
+                chunks.push((truncated, slt::Style::new().fg(GRAY_400).bg(bg)));
             }
         }
     }

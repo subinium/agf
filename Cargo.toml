@@ -1,7 +1,7 @@
 [package]
 name = "agf"
 version = "0.11.4"
-edition = "2021"
+edition = "2024"
 # 1.88 = let-chains (edition 2024); also covers usize::is_multiple_of (1.87).
 rust-version = "1.88"
 description = "Find and resume local AI coding-agent sessions across Claude Code, Codex, Gemini, Cursor CLI, OpenCode, Kiro, pi, and Hermes"

@@ -79,16 +79,15 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
         bytes_read += line.len() + 1;
 
         let line = line.trim();
-        if !line.is_empty() {
-            if let Ok(value) = serde_json::from_str::<Value>(line) {
-                if header.is_none() && value.get("type").and_then(Value::as_str) == Some("session")
-                {
-                    header = serde_json::from_value::<PiSessionHeader>(value.clone()).ok();
-                }
+        if !line.is_empty()
+            && let Ok(value) = serde_json::from_str::<Value>(line)
+        {
+            if header.is_none() && value.get("type").and_then(Value::as_str) == Some("session") {
+                header = serde_json::from_value::<PiSessionHeader>(value.clone()).ok();
+            }
 
-                if let Some(summary) = extract_user_summary(&value) {
-                    summaries.push(summary);
-                }
+            if let Some(summary) = extract_user_summary(&value) {
+                summaries.push(summary);
             }
         }
 
@@ -305,14 +304,17 @@ mod tests {
             )
             .unwrap();
         }
-        std::env::set_var("HOME", &home);
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("HOME", &home) };
 
         let sessions = scan().unwrap();
 
         if let Some(old_home) = old_home {
-            std::env::set_var("HOME", old_home);
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("HOME", old_home) };
         } else {
-            std::env::remove_var("HOME");
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("HOME") };
         }
 
         let ids: Vec<_> = sessions.iter().map(|s| s.session_id.as_str()).collect();

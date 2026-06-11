@@ -79,16 +79,14 @@ fn collect_live_session_ids(codex_dir: &std::path::Path) -> Option<HashSet<Strin
             Some(line) => line,
             None => continue,
         };
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line.trim()) {
-            if let Some(id) = value
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line.trim())
+            && let Some(id) = value
                 .get("payload")
                 .and_then(|p| p.get("id"))
                 .and_then(|v| v.as_str())
-            {
-                if !id.is_empty() {
-                    ids.insert(id.to_string());
-                }
-            }
+            && !id.is_empty()
+        {
+            ids.insert(id.to_string());
         }
     }
     // If the walk itself failed (permission denied, transient I/O), treat
@@ -199,11 +197,11 @@ fn scan_sqlite(
         // Only filter/prune when we have a trustworthy live set. If the
         // sessions tree could not be enumerated (`None`), surface the row
         // as-is — better stale than nuked.
-        if let Some(live) = live_session_ids {
-            if !live.contains(&session_id) {
-                orphan_ids.push(session_id);
-                continue;
-            }
+        if let Some(live) = live_session_ids
+            && !live.contains(&session_id)
+        {
+            orphan_ids.push(session_id);
+            continue;
         }
 
         let project_name = std::path::Path::new(&cwd)
@@ -421,10 +419,10 @@ fn read_history_summaries(
             Some(id) if !id.is_empty() => id,
             _ => continue,
         };
-        if let Some(live) = live_session_ids {
-            if !live.contains(&session_id) {
-                continue;
-            }
+        if let Some(live) = live_session_ids
+            && !live.contains(&session_id)
+        {
+            continue;
         }
         let ts = entry.ts.unwrap_or(0.0);
         let text = match entry.text {

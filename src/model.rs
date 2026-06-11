@@ -213,10 +213,10 @@ impl Session {
         if self.project_path.is_empty() {
             return "—".to_string();
         }
-        if let Some(home) = dirs::home_dir() {
-            if let Some(rest) = self.project_path.strip_prefix(home.to_str().unwrap_or("")) {
-                return format!("~{rest}");
-            }
+        if let Some(home) = dirs::home_dir()
+            && let Some(rest) = self.project_path.strip_prefix(home.to_str().unwrap_or(""))
+        {
+            return format!("~{rest}");
         }
         self.project_path.clone()
     }

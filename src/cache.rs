@@ -151,12 +151,11 @@ fn get_max_mtime(paths: &[PathBuf]) -> u64 {
             .into_iter()
             .filter_map(|e| e.ok())
         {
-            if let Ok(m) = entry.metadata() {
-                if let Ok(t) = m.modified() {
-                    if let Ok(d) = t.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                        max = max.max(d.as_secs());
-                    }
-                }
+            if let Ok(m) = entry.metadata()
+                && let Ok(t) = m.modified()
+                && let Ok(d) = t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+            {
+                max = max.max(d.as_secs());
             }
         }
     }
@@ -263,21 +262,20 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
     // gates this on schema AND binary version: entries written by another
     // binary are exactly the stale data issue #37 is about, so on upgrade we
     // drop them and let the next launch rescan those agents instead.
-    if !skip_agents.is_empty() {
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(prior) = parse_cache(&content, AGF_VERSION) {
-                for skip in skip_agents {
-                    let key = agent_to_str(*skip).to_string();
-                    if let Some(entry) = prior.agents.get(&key) {
-                        agents.insert(
-                            key,
-                            AgentCache {
-                                mtime: entry.mtime,
-                                sessions: entry.sessions.iter().map(clone_cached).collect(),
-                            },
-                        );
-                    }
-                }
+    if !skip_agents.is_empty()
+        && let Ok(content) = fs::read_to_string(&path)
+        && let Ok(prior) = parse_cache(&content, AGF_VERSION)
+    {
+        for skip in skip_agents {
+            let key = agent_to_str(*skip).to_string();
+            if let Some(entry) = prior.agents.get(&key) {
+                agents.insert(
+                    key,
+                    AgentCache {
+                        mtime: entry.mtime,
+                        sessions: entry.sessions.iter().map(clone_cached).collect(),
+                    },
+                );
             }
         }
     }

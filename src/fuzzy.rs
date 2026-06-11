@@ -1,6 +1,6 @@
 use nucleo::{
-    pattern::{AtomKind, CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
+    pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
 
 use crate::model::Session;

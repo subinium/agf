@@ -137,10 +137,10 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 // shows how the conversation actually went, not just one
                 // line.
                 let mut summaries: Vec<String> = Vec::new();
-                if let Some(ref t) = title {
-                    if !t.is_empty() {
-                        summaries.push(t.clone());
-                    }
+                if let Some(ref t) = title
+                    && !t.is_empty()
+                {
+                    summaries.push(t.clone());
                 }
                 if let Some(ref children) = child_titles {
                     let mut seen = std::collections::HashSet::new();
@@ -157,16 +157,16 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 // crons, dashboard callers), so their `role='user'` rows
                 // are not the user's own prompts and would mislead the
                 // TUI summary.
-                if is_user_cli_session(&id) {
-                    if let Some(ref blob) = user_msgs {
-                        let mut seen: std::collections::HashSet<String> =
-                            summaries.iter().cloned().collect();
-                        for raw in blob.split("|||") {
-                            if let Some(preview) = message_preview(raw) {
-                                if seen.insert(preview.clone()) {
-                                    summaries.push(preview);
-                                }
-                            }
+                if is_user_cli_session(&id)
+                    && let Some(ref blob) = user_msgs
+                {
+                    let mut seen: std::collections::HashSet<String> =
+                        summaries.iter().cloned().collect();
+                    for raw in blob.split("|||") {
+                        if let Some(preview) = message_preview(raw)
+                            && seen.insert(preview.clone())
+                        {
+                            summaries.push(preview);
                         }
                     }
                 }
@@ -175,12 +175,12 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 // so the row is never blank.
                 if summaries.is_empty() {
                     let mut fallback = format!("{source} session");
-                    if let Some(ref m) = model {
-                        if !m.is_empty() {
-                            // Extract short model name (e.g. "claude-opus-4-6" from "anthropic/claude-opus-4-6")
-                            let short = m.rsplit('/').next().unwrap_or(m);
-                            fallback = format!("{fallback} ({short})");
-                        }
+                    if let Some(ref m) = model
+                        && !m.is_empty()
+                    {
+                        // Extract short model name (e.g. "claude-opus-4-6" from "anthropic/claude-opus-4-6")
+                        let short = m.rsplit('/').next().unwrap_or(m);
+                        fallback = format!("{fallback} ({short})");
                     }
                     if message_count > 0 {
                         fallback = format!("{fallback} — {message_count} msgs");

@@ -43,20 +43,20 @@ pub fn action_preview(session: &Session, action: Action) -> String {
 /// Detect editor from config, then $EDITOR, then $VISUAL, fallback to "vim".
 pub fn detect_editor() -> String {
     let config = crate::settings::Settings::load();
-    if let Some(ref editor) = config.editor {
-        if !editor.is_empty() {
-            return editor.clone();
-        }
+    if let Some(ref editor) = config.editor
+        && !editor.is_empty()
+    {
+        return editor.clone();
     }
-    if let Ok(editor) = std::env::var("EDITOR") {
-        if !editor.is_empty() {
-            return editor;
-        }
+    if let Ok(editor) = std::env::var("EDITOR")
+        && !editor.is_empty()
+    {
+        return editor;
     }
-    if let Ok(editor) = std::env::var("VISUAL") {
-        if !editor.is_empty() {
-            return editor;
-        }
+    if let Ok(editor) = std::env::var("VISUAL")
+        && !editor.is_empty()
+    {
+        return editor;
     }
     "vim".to_string()
 }

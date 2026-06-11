@@ -149,20 +149,19 @@ fn extract_worktree(val: &Value, worktree: &mut Option<String>) {
     if worktree.is_some() {
         return;
     }
-    if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str()) {
-        if let Some((_, wt)) = cwd.split_once("/.claude/worktrees/") {
-            if !wt.is_empty() {
-                *worktree = Some(wt.to_string());
-            }
-        }
+    if let Some(cwd) = val.get("cwd").and_then(|c| c.as_str())
+        && let Some((_, wt)) = cwd.split_once("/.claude/worktrees/")
+        && !wt.is_empty()
+    {
+        *worktree = Some(wt.to_string());
     }
 }
 
 fn extract_ai_title(val: &Value, ai_title: &mut Option<String>) {
-    if val.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
-        if let Some(title) = val.get("aiTitle").and_then(|t| t.as_str()) {
-            *ai_title = Some(title.to_string());
-        }
+    if val.get("type").and_then(|t| t.as_str()) == Some("ai-title")
+        && let Some(title) = val.get("aiTitle").and_then(|t| t.as_str())
+    {
+        *ai_title = Some(title.to_string());
     }
 }
 
@@ -187,15 +186,14 @@ fn extract_recap(
     if latest_recap_ts
         .as_deref()
         .is_none_or(|prev| ts.as_str() > prev)
+        && let Some(content) = val.get("content").and_then(|c| c.as_str())
     {
-        if let Some(content) = val.get("content").and_then(|c| c.as_str()) {
-            // Strip the "(disable recaps in /config)" suffix
-            let clean = content
-                .trim_end_matches("(disable recaps in /config)")
-                .trim();
-            *latest_recap = Some(clean.to_string());
-            *latest_recap_ts = Some(ts);
-        }
+        // Strip the "(disable recaps in /config)" suffix
+        let clean = content
+            .trim_end_matches("(disable recaps in /config)")
+            .trim();
+        *latest_recap = Some(clean.to_string());
+        *latest_recap_ts = Some(ts);
     }
 }
 

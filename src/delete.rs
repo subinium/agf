@@ -61,10 +61,10 @@ fn rewrite_jsonl_excluding(path: &Path, json_key: &str, value: &str) -> Result<(
 
 /// Check if a JSON line contains `"key": "value"`.
 fn line_has_field_value(line: &str, key: &str, value: &str) -> bool {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
-        if let Some(v) = parsed.get(key).and_then(|v| v.as_str()) {
-            return v == value;
-        }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
+        && let Some(v) = parsed.get(key).and_then(|v| v.as_str())
+    {
+        return v == value;
     }
     false
 }
@@ -292,13 +292,12 @@ fn delete_pi_session(session: &Session) -> Result<(), io::Error> {
             _ => continue,
         };
 
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line) {
-            if value.get("type").and_then(|v| v.as_str()) == Some("session")
-                && value.get("id").and_then(|v| v.as_str()) == Some(&session.session_id)
-            {
-                fs::remove_file(path)?;
-                return Ok(());
-            }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line)
+            && value.get("type").and_then(|v| v.as_str()) == Some("session")
+            && value.get("id").and_then(|v| v.as_str()) == Some(&session.session_id)
+        {
+            fs::remove_file(path)?;
+            return Ok(());
         }
     }
 
@@ -396,16 +395,15 @@ fn delete_gemini_session(session: &Session) -> Result<(), io::Error> {
                 continue;
             };
 
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if json
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+                && json
                     .get("sessionId")
                     .and_then(|v| v.as_str())
                     .map(|id| id == session.session_id)
                     .unwrap_or(false)
-                {
-                    fs::remove_file(&path)?;
-                    return Ok(());
-                }
+            {
+                fs::remove_file(&path)?;
+                return Ok(());
             }
         }
     }
@@ -473,10 +471,11 @@ fn delete_hermes_session(session: &Session) -> Result<(), io::Error> {
         let prefix = format!("session_{}", session.session_id);
         if let Ok(entries) = fs::read_dir(&sessions_dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(&prefix) && name.ends_with(".json") {
-                        let _ = fs::remove_file(entry.path());
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && name.starts_with(&prefix)
+                    && name.ends_with(".json")
+                {
+                    let _ = fs::remove_file(entry.path());
                 }
             }
         }
