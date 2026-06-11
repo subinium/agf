@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
-use super::truncate;
+use super::{collapse_whitespace, truncate};
 
 /// Maximum bytes to read from a single session file.
 /// Gemini session files can balloon to 28 MB+ when tool calls embed full file
@@ -202,14 +202,14 @@ fn extract_summary(json: &serde_json::Value) -> Option<String> {
         if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
             for part in arr {
                 if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let normalized = collapse_whitespace(text);
                     if !normalized.is_empty() {
                         return Some(truncate(&normalized, 100));
                     }
                 }
             }
         } else if let Some(text) = msg.get("content").and_then(|v| v.as_str()) {
-            let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let normalized = collapse_whitespace(text);
             if !normalized.is_empty() {
                 return Some(truncate(&normalized, 100));
             }
@@ -226,10 +226,15 @@ fn extract_summary_partial(s: &str) -> Option<String> {
     let user_pos = s.find("\"type\":\"user\"")?;
     let after = &s[user_pos..];
 
-    // Look for "text":"..." within the next 1 KB
-    let window = &after[..after.len().min(1024)];
+    // Look for "text":"..." within the next 1 KB (char-boundary safe:
+    // byte 1024 may fall inside a multi-byte codepoint).
+    let mut end = after.len().min(1024);
+    while !after.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &after[..end];
     let text = extract_str_field(window, "text")?;
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = collapse_whitespace(&text);
     if normalized.is_empty() {
         return None;
     }
@@ -273,4 +278,34 @@ fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the 1 KB lookahead window used to slice at a raw byte
+    /// offset (`&after[..after.len().min(1024)]`), which panics when byte
+    /// 1024 past the `"type":"user"` marker falls inside a multi-byte
+    /// codepoint (CJK prompts make this common). A panic here kills the
+    /// whole Gemini scanner thread via scan_all's join-swallow, silently
+    /// erasing every Gemini session.
+    #[test]
+    fn extract_summary_partial_survives_char_boundary_at_window_edge() {
+        let mut s =
+            String::from(r#"{"messages":[{"type":"user","content":[{"text":"hello world"}]},"#);
+        let marker = s.find("\"type\":\"user\"").unwrap();
+        // Pad so the next char pushed starts at byte offset 1023 from the
+        // marker, making offset 1024 land mid-codepoint in the 3-byte '한'.
+        while s.len() < marker + 1023 {
+            s.push('a');
+        }
+        s.push_str("한한한한");
+        assert!(
+            !s[marker..].is_char_boundary(1024),
+            "fixture must place byte 1024 inside a multi-byte char"
+        );
+
+        assert_eq!(extract_summary_partial(&s).as_deref(), Some("hello world"));
+    }
 }

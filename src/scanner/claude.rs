@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
-use crate::scanner::read_head_tail;
+use crate::scanner::{collapse_whitespace, read_head_tail};
 
 /// Per-file I/O cap for `scan_session_metadata`. Files larger than the sum
 /// fall back to head + tail reads; smaller files are read in full. Sized so
@@ -232,11 +232,11 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             Ok(l) => l,
             Err(_) => continue,
         };
-        let line = line.trim().to_owned();
+        let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let entry: ClaudeEntry = match serde_json::from_str(&line) {
+        let entry: ClaudeEntry = match serde_json::from_str(line) {
             Ok(e) => e,
             Err(_) => continue,
         };
@@ -244,6 +244,14 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             Some(id) if !id.is_empty() => id.clone(),
             _ => continue,
         };
+        if !existing_ids.contains(&session_id) {
+            // Orphans (no per-session JSONL under ~/.claude/projects/) are
+            // dropped by the final filter anyway; skip early so unbounded
+            // history.jsonl growth (#27) doesn't accumulate dead SessionData
+            // and summary tuples for the whole scan. Mirrors the
+            // codex::read_history_summaries pre-filter from v0.11.4.
+            continue;
+        }
         let ts = entry.timestamp.unwrap_or(0.0);
 
         let data = sessions_map
@@ -264,7 +272,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
 
         if let Some(display) = entry.display {
             // Collapse multi-line content (e.g. pasted text) into a single line.
-            let display: String = display.split_whitespace().collect::<Vec<_>>().join(" ");
+            let display = collapse_whitespace(&display);
             if !display.is_empty() {
                 data.summaries.push((ts, display));
             }

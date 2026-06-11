@@ -6,7 +6,7 @@ use walkdir::WalkDir;
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
-use super::truncate;
+use super::{project_name_from_path, truncate};
 
 /// Max chars stored per session summary.
 const SUMMARY_MAX_CHARS: usize = 100;
@@ -55,62 +55,54 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
         let ext = path.extension().and_then(|e| e.to_str());
 
         // Resolve (agent_transcripts_dir, session_id) for each format.
-        let (agent_transcripts_dir, session_id) =
-            match ext {
-                Some("txt") => {
-                    // Legacy: parent must be "agent-transcripts"
-                    let parent = match path.parent().filter(|p| {
-                        p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts")
-                    }) {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let id = match path.file_stem().and_then(|n| n.to_str()) {
-                        Some(id) => id.to_string(),
-                        None => continue,
-                    };
-                    (parent, id)
+        let (agent_transcripts_dir, session_id) = match ext {
+            Some("txt") => {
+                // Legacy: parent must be "agent-transcripts"
+                let Some(parent) = path.parent().filter(|p| {
+                    p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts")
+                }) else {
+                    continue;
+                };
+                let Some(id) = path.file_stem().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                (parent, id.to_string())
+            }
+            Some("jsonl") => {
+                // Current layout: agent-transcripts/<uuid>/<uuid>.jsonl
+                // The parent dir name must equal the file stem (both are the
+                // same session UUID). Without this invariant a stray jsonl
+                // would produce a session_id that mismatches both the
+                // store.db lookup key and what `cursor-agent --resume` expects.
+                let Some(parent) = path.parent() else {
+                    continue;
+                };
+                let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let Some(id) = path.file_stem().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if parent_name != id {
+                    continue;
                 }
-                Some("jsonl") => {
-                    // Current layout: agent-transcripts/<uuid>/<uuid>.jsonl
-                    // The parent dir name must equal the file stem (both are the
-                    // same session UUID). Without this invariant a stray jsonl
-                    // would produce a session_id that mismatches both the
-                    // store.db lookup key and what `cursor-agent --resume` expects.
-                    let parent = match path.parent() {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let parent_name = match parent.file_name().and_then(|n| n.to_str()) {
-                        Some(n) => n,
-                        None => continue,
-                    };
-                    let id = match path.file_stem().and_then(|n| n.to_str()) {
-                        Some(id) => id,
-                        None => continue,
-                    };
-                    if parent_name != id {
-                        continue;
-                    }
-                    let grandparent = match parent.parent().filter(|p| {
-                        p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts")
-                    }) {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    (grandparent, id.to_string())
-                }
-                _ => continue,
-            };
+                let Some(grandparent) = parent.parent().filter(|p| {
+                    p.file_name().and_then(|n| n.to_str()) == Some("agent-transcripts")
+                }) else {
+                    continue;
+                };
+                (grandparent, id.to_string())
+            }
+            _ => continue,
+        };
 
         // Parent of agent-transcripts is the dash-encoded project path
-        let encoded_dir = match agent_transcripts_dir
+        let Some(encoded_dir) = agent_transcripts_dir
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-        {
-            Some(name) => name.to_string(),
-            None => continue,
+        else {
+            continue;
         };
 
         // Skip macOS temp directories
@@ -118,16 +110,11 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
             continue;
         }
 
-        let project_path = match decode_dash_path(&encoded_dir) {
-            Some(p) => p,
-            None => continue,
+        let Some(project_path) = decode_dash_path(encoded_dir) else {
+            continue;
         };
 
-        let project_name = project_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let project_name = project_name_from_path(&project_path);
 
         let project_path_str = project_path.to_string_lossy().to_string();
 
@@ -239,7 +226,11 @@ fn read_store_db(store_path: &Path) -> Option<StoreMeta> {
 
 /// Decode a hex-encoded string to bytes.
 fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
+    // Non-ASCII input would make `&hex[i..i + 2]` panic mid-codepoint; a
+    // corrupt store.db must yield None, not kill the scanner thread (a panic
+    // here would silently erase every Cursor session via scan_all's
+    // join-swallow).
+    if !hex.len().is_multiple_of(2) || !hex.is_ascii() {
         return None;
     }
     (0..hex.len())
@@ -285,22 +276,20 @@ fn extract_first_prompt(jsonl_path: &Path) -> Option<String> {
         if value.get("role").and_then(|v| v.as_str()) != Some("user") {
             continue;
         }
-        let parts = match value
+        let Some(parts) = value
             .get("message")
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_array())
-        {
-            Some(p) => p,
-            None => continue,
+        else {
+            continue;
         };
 
         for part in parts {
             if part.get("type").and_then(|t| t.as_str()) != Some("text") {
                 continue;
             }
-            let text = match part.get("text").and_then(|t| t.as_str()) {
-                Some(t) => t,
-                None => continue,
+            let Some(text) = part.get("text").and_then(|t| t.as_str()) else {
+                continue;
             };
             if text.trim_start().starts_with("<user_info>") {
                 continue;
@@ -560,6 +549,20 @@ mod tests {
         assert_eq!(decode_dash_path(&encoded), Some(real));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: `&hex[i..i + 2]` slices at byte offsets, so a multibyte
+    /// char spanning an even offset (e.g. '€' at 0, or a 2-byte char at an
+    /// odd offset) panicked on a char boundary before `from_str_radix`
+    /// could reject it. Corrupt store.db content must yield None — a panic
+    /// in this thread silently erases every Cursor session.
+    #[test]
+    fn hex_decode_returns_none_for_non_ascii_input() {
+        assert_eq!(hex_decode("\u{20AC}a"), None); // 3-byte char spans even offset
+        assert_eq!(hex_decode("a\u{0100}b"), None); // 2-byte char at odd offset
+        assert_eq!(hex_decode("\u{0100}ab"), None); // aligned non-ASCII: None before and after
+        assert_eq!(hex_decode("abc"), None); // odd length still rejected
+        assert_eq!(hex_decode("48656c6c6f"), Some(b"Hello".to_vec()));
     }
 
     #[test]

@@ -24,9 +24,13 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 /// Read only the first non-empty line of a file without loading the rest.
 pub(crate) fn read_first_line(path: &std::path::Path) -> Option<String> {
     use std::fs::File;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
+    /// Defensive cap matching the 512 KiB budgets used by cursor/pi scanners;
+    /// a real first line is ~1 KB, and a truncated line just fails JSON
+    /// parse upstream and is skipped.
+    const MAX_FIRST_LINE_BYTES: u64 = 512 * 1024;
     let file = File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(file).take(MAX_FIRST_LINE_BYTES);
     let mut line = String::new();
     loop {
         line.clear();
@@ -45,6 +49,20 @@ pub(crate) fn char_prefix(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
+/// Collapse all whitespace runs (incl. newlines/tabs) into single spaces.
+/// Equivalent to `s.split_whitespace().collect::<Vec<_>>().join(" ")` without
+/// the intermediate Vec.
+pub(crate) fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for w in s.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    out
+}
+
 /// Extract first non-empty line, truncated to `max_len` chars with '…' suffix.
 pub(crate) fn first_line_truncated(s: &str, max_len: usize) -> Option<String> {
     let line = s.lines().next().unwrap_or("").trim();
@@ -55,6 +73,30 @@ pub(crate) fn first_line_truncated(s: &str, max_len: usize) -> Option<String> {
         Some(format!("{}…", char_prefix(line, max_len)))
     } else {
         Some(line.to_string())
+    }
+}
+
+/// Last path component as the display project name ("unknown" when absent
+/// or non-UTF-8).
+pub(crate) fn project_name_from_path(path: impl AsRef<std::path::Path>) -> String {
+    path.as_ref()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Split a GROUP_CONCAT('|||') blob into trimmed, non-empty titles,
+/// deduplicated within the blob only, appended to `out`. Entries already in
+/// `out` are intentionally NOT considered: a child title equal to the
+/// already-pushed parent title is re-pushed (preserves existing behavior).
+pub(crate) fn push_concat_titles(out: &mut Vec<String>, blob: &str) {
+    let mut seen = std::collections::HashSet::new();
+    for t in blob.split("|||") {
+        let t = t.trim();
+        if !t.is_empty() && seen.insert(t) {
+            out.push(t.to_string());
+        }
     }
 }
 
@@ -169,6 +211,63 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content).unwrap();
         path
+    }
+
+    #[test]
+    fn read_first_line_returns_first_non_empty_line() {
+        let path = write_tmp("agf-test-first-line.jsonl", b"\n\n{\"a\":1}\n{\"b\":2}\n");
+        assert_eq!(read_first_line(&path).unwrap(), "{\"a\":1}\n");
+    }
+
+    #[test]
+    fn read_first_line_caps_newline_free_files() {
+        // A pathological newline-free file must not be slurped whole: the
+        // `take` cap returns at most 512 KiB, which then fails JSON parse
+        // upstream and is skipped — the defensive outcome.
+        let content = vec![b'x'; 600 * 1024];
+        let path = write_tmp("agf-test-first-line-cap.jsonl", &content);
+        let line = read_first_line(&path).expect("truncated line should be returned");
+        assert_eq!(line.len(), 512 * 1024);
+    }
+
+    #[test]
+    fn collapse_whitespace_matches_split_join_semantics() {
+        assert_eq!(collapse_whitespace("  hello\n\tworld  "), "hello world");
+        assert_eq!(collapse_whitespace(""), "");
+        assert_eq!(collapse_whitespace("   \n\t  "), "");
+        assert_eq!(collapse_whitespace("one"), "one");
+        // Unicode whitespace (ideographic space) collapses like split_whitespace.
+        assert_eq!(collapse_whitespace("a\u{3000}b"), "a b");
+    }
+
+    #[test]
+    fn project_name_from_path_takes_last_component() {
+        assert_eq!(
+            project_name_from_path("/home/user/my-project"),
+            "my-project"
+        );
+        assert_eq!(project_name_from_path("relative/dir"), "dir");
+        // No final component → "unknown".
+        assert_eq!(project_name_from_path("/"), "unknown");
+        assert_eq!(project_name_from_path(""), "unknown");
+        // Also accepts owned PathBuf (the cursor_agent call site).
+        assert_eq!(
+            project_name_from_path(std::path::PathBuf::from("/tmp/proj")),
+            "proj"
+        );
+    }
+
+    #[test]
+    fn push_concat_titles_dedups_within_blob_only() {
+        let mut out = vec!["parent".to_string()];
+        push_concat_titles(&mut out, " a ||| b |||a||| ||| c ");
+        // "a" deduped within the blob; existing "parent" is not considered.
+        assert_eq!(out, vec!["parent", "a", "b", "c"]);
+
+        let mut out2 = vec!["dup".to_string()];
+        push_concat_titles(&mut out2, "dup");
+        // Blob-only dedup scope: a title equal to the parent is re-pushed.
+        assert_eq!(out2, vec!["dup", "dup"]);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use walkdir::WalkDir;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
-use crate::scanner::first_line_truncated;
+use crate::scanner::{first_line_truncated, project_name_from_path};
 
 const SUMMARY_MAX_CHARS: usize = 120;
 
@@ -118,11 +118,7 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
                 .unwrap_or(0)
         });
 
-    let project_name = std::path::Path::new(&cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let project_name = project_name_from_path(&cwd);
 
     Some(Session {
         agent: Agent::Pi,
@@ -304,16 +300,16 @@ mod tests {
             )
             .unwrap();
         }
-        // TODO: Audit that the environment access only happens in single-threaded code.
+        // Serialized by the HOME_LOCK guard above.
         unsafe { std::env::set_var("HOME", &home) };
 
         let sessions = scan().unwrap();
 
         if let Some(old_home) = old_home {
-            // TODO: Audit that the environment access only happens in single-threaded code.
+            // Serialized by the HOME_LOCK guard above.
             unsafe { std::env::set_var("HOME", old_home) };
         } else {
-            // TODO: Audit that the environment access only happens in single-threaded code.
+            // Serialized by the HOME_LOCK guard above.
             unsafe { std::env::remove_var("HOME") };
         }
 

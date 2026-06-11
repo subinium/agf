@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
-use super::truncate;
+use super::{project_name_from_path, truncate};
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let db_path = crate::config::kiro_data_dir()?.join("data.sqlite3");
@@ -39,11 +39,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         })?
         .filter_map(|r| r.ok())
         .map(|(directory, conversation_id, value, updated_at)| {
-            let project_name = std::path::Path::new(&directory)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string();
+            let project_name = project_name_from_path(&directory);
 
             let summaries = match extract_summary(&value) {
                 Some(s) => vec![s],
