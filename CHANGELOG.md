@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.12.0] - 2026-06-11
+
+### Added
+
+- **Grouped view: `Ctrl+L` previews the selected session** ([#50](https://github.com/subinium/agf/pull/50), by @soomtong) — the first grouped→preview path; child rows jump straight to the session detail pane.
+- **`j` / `k` navigation in the action menu, `Ctrl+P` / `Ctrl+N` in the help screen** ([#50](https://github.com/subinium/agf/pull/50), by @soomtong) — consistent with the other modes; the footer advertises `Tab/jk`.
+
+### Changed
+
+- **List scrolling keeps a 3-row margin below the cursor** ([#50](https://github.com/subinium/agf/pull/50), by @soomtong) — browse, grouped browse, and `agf watch` all scroll before the cursor hits the bottom edge. Review fixups hardened the arithmetic (see Fixed) and added the missing end-of-list clamps so the margin can't overscroll into blank rows.
+- **Summary cycling `[` / `]` now wraps around** ([#50](https://github.com/subinium/agf/pull/50), by @soomtong) — cycling past the last summary returns to the first; the help screen reads `[ or ]` to avoid `/`-key confusion.
+- **Deletes only disappear from the UI when the delete actually succeeded** — both delete paths previously did `let _ = delete_session(...)` and removed the row unconditionally, so a permissions failure looked like success until the session reappeared on next launch. Failed deletes now stay visible.
+- **Rust edition 2024, `rust-version = "1.88"` declared** ([#52](https://github.com/subinium/agf/pull/52)) — the floor is set by let-chains; the code already used 1.87 APIs (`usize::is_multiple_of`), which `clippy::incompatible_msrv` surfaced the moment an MSRV was declared.
+- **rusqlite 0.32 → 0.40, toml 0.8 → 1** ([#52](https://github.com/subinium/agf/pull/52)) — both verified zero-code-change bumps; the bundled SQLite moves to libsqlite3-sys 0.38. sha2 0.11 (breaks `{:x}` digest formatting) and superlighttui 0.21 (adds 29 `#[must_use]` call sites) were evaluated and deliberately deferred.
+
+### Fixed
+
+- **Windows without the shell wrapper: bare `agf` no longer crashes with `program not found`** ([#49](https://github.com/subinium/agf/pull/49), by @MilkClouds) — with `AGF_SHELL` unset the shell defaulted to POSIX on every OS, so native Windows exec'd `cd '…' && agent` via a nonexistent `sh`. The default is now OS-aware via a pure, unit-tested `default_shell` (native Windows → PowerShell; `MSYSTEM`/unix-style `SHELL` → POSIX). POSIX hosts are bit-for-bit unaffected.
+- **Upgrades no longer serve stale per-session cache data** ([#51](https://github.com/subinium/agf/pull/51), closes [#37](https://github.com/subinium/agf/issues/37)) — mtime freshness can't see "the data didn't change but its interpretation did" when scanner logic changes within one `CACHE_VERSION`. The cache now stamps the writing binary's version and any mismatch forces a one-time rescan; `AGF_DEBUG=1` logs `cache built by X, current Y → rescanning`. The write-side carry-over path is gated the same way, and per-release `CACHE_VERSION` bumps are no longer part of the release checklist.
+- **Gemini scanner: UTF-8 char-boundary panic in `extract_summary_partial`** ([#52](https://github.com/subinium/agf/pull/52)) — a multi-byte (e.g. CJK) character straddling the 1 KiB partial-read window made the byte slice panic and silently killed the entire Gemini scan. The window now backs up to a char boundary; CJK regression test added.
+- **`agf resume --list 0 <query>` no longer panics** ([#52](https://github.com/subinium/agf/pull/52)) — `--list 0` underflowed `top_n.len() - 1`; it now shows the top result instead.
+- **Cursor scanner: `hex_decode` panic on non-ASCII store.db metadata** ([#52](https://github.com/subinium/agf/pull/52)) — a corrupt `meta` blob could index mid-char; an `is_ascii` guard rejects it and the scan continues.
+- **Scroll-margin arithmetic underflow** (review fixups on [#50](https://github.com/subinium/agf/pull/50)) — the margin branch can fire while `selected < visible`, where `selected - visible + 1 + margin` underflows usize: debug builds panicked on routine down-navigation (release builds wrapped to the right value by accident). All three sites now use saturating arithmetic; regression tests pin no-underflow, margin, and end-clamp behavior.
+- **`agf watch`: selection clamped when a refresh shrinks the list** ([#52](https://github.com/subinium/agf/pull/52)) — a background refresh that removed sessions could leave the cursor past the end, blanking the viewport.
+- **Ctrl+H no longer leaks into the fuzzy-search textarea** ([#50](https://github.com/subinium/agf/pull/50), by @soomtong).
+
+### Internal
+
+- **Audit-driven modernization** ([#52](https://github.com/subinium/agf/pull/52)) — 31 verified findings applied: three shared scanner helpers (`collapse_whitespace`, `project_name_from_path`, `push_concat_titles`) replacing 5–6 duplicated sites each; `Agent` derives serde and the hand-rolled string maps are deleted (on-disk cache format pinned byte-identical by a round-trip test); let-else/let-chain flattening across scanners, delete, and TUI dispatch; per-frame allocation cuts (`render_chunks` takes its chunks by value, `update_filter`/`apply_sort` stop cloning, `detect_editor` caches config for the process lifetime); claude `history.jsonl` pre-filters orphaned sessions the way codex has since v0.11.4; `read_first_line` gets the same 512 KiB byte budget as the other bounded readers. Tests grew 53 → 75.
+- **CI hardening** ([#52](https://github.com/subinium/agf/pull/52)) — clippy runs `--all-targets` (tests were unlinted in CI) including a new Windows lint job that caught a real platform gap on its first run; `Swatinem/rust-cache` (Test job 35s → 17s); per-ref concurrency cancellation; `--locked` everywhere cargo resolves. The release workflow gains a tag↔`Cargo.toml` version guard, loud checksum failures, and a graceful publish skip when `CARGO_REGISTRY_TOKEN` is unset instead of a red run on every release.
+
 ## [0.11.4] - 2026-05-29
 
 ### Fixed
