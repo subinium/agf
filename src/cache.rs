@@ -53,7 +53,7 @@ struct CacheFile {
     /// match in `parse_cache` and forces the rescan we want.
     #[serde(default)]
     agf_version: String,
-    agents: HashMap<String, AgentCache>,
+    agents: HashMap<Agent, AgentCache>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ struct AgentCache {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedSession {
-    agent: String,
+    agent: Agent,
     session_id: String,
     project_name: String,
     project_path: String,
@@ -82,36 +82,15 @@ fn cache_path() -> PathBuf {
         .join("sessions.json")
 }
 
-fn agent_from_str(s: &str) -> Option<Agent> {
-    match s {
-        "ClaudeCode" => Some(Agent::ClaudeCode),
-        "Codex" => Some(Agent::Codex),
-        "OpenCode" => Some(Agent::OpenCode),
-        "Pi" => Some(Agent::Pi),
-        "Kiro" => Some(Agent::Kiro),
-        "CursorAgent" => Some(Agent::CursorAgent),
-        "Gemini" => Some(Agent::Gemini),
-        "Hermes" => Some(Agent::Hermes),
-        _ => None,
-    }
-}
-
-fn agent_to_str(a: Agent) -> &'static str {
-    match a {
-        Agent::ClaudeCode => "ClaudeCode",
-        Agent::Codex => "Codex",
-        Agent::OpenCode => "OpenCode",
-        Agent::Pi => "Pi",
-        Agent::Kiro => "Kiro",
-        Agent::CursorAgent => "CursorAgent",
-        Agent::Gemini => "Gemini",
-        Agent::Hermes => "Hermes",
-    }
+/// True when the `AGF_DEBUG` env var is set (any value), probed once per process.
+fn debug_enabled() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| std::env::var("AGF_DEBUG").is_ok())
 }
 
 fn to_cached(s: &Session) -> CachedSession {
     CachedSession {
-        agent: agent_to_str(s.agent).to_string(),
+        agent: s.agent,
         session_id: s.session_id.clone(),
         project_name: s.project_name.clone(),
         project_path: s.project_path.clone(),
@@ -123,10 +102,9 @@ fn to_cached(s: &Session) -> CachedSession {
     }
 }
 
-fn from_cached(c: &CachedSession) -> Option<Session> {
-    let agent = agent_from_str(&c.agent)?;
-    Some(Session {
-        agent,
+fn from_cached(c: &CachedSession) -> Session {
+    Session {
+        agent: c.agent,
         session_id: c.session_id.clone(),
         project_name: c.project_name.clone(),
         project_path: c.project_path.clone(),
@@ -135,7 +113,7 @@ fn from_cached(c: &CachedSession) -> Option<Session> {
         git_branch: c.git_branch.clone(),
         worktree: c.worktree.clone(),
         recap: c.recap.clone(),
-    })
+    }
 }
 
 fn get_max_mtime(paths: &[PathBuf]) -> u64 {
@@ -201,7 +179,7 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
     let cache = match parse_cache(&content, AGF_VERSION) {
         Ok(c) => c,
         Err(why) => {
-            if std::env::var("AGF_DEBUG").is_ok() {
+            if debug_enabled() {
                 eprintln!("[agf] {why} → rescanning");
             }
             return (Vec::new(), Agent::all().to_vec());
@@ -218,17 +196,12 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
         if !installed.contains(&p.agent()) {
             continue;
         }
-        let key = agent_to_str(p.agent());
         let current_mtime = get_max_mtime(&p.data_sources());
 
-        match cache.agents.get(key) {
+        match cache.agents.get(&p.agent()) {
             Some(ac) if ac.mtime >= current_mtime && current_mtime > 0 => {
                 // Cache is fresh
-                for cs in &ac.sessions {
-                    if let Some(s) = from_cached(cs) {
-                        sessions.push(s);
-                    }
-                }
+                sessions.extend(ac.sessions.iter().map(from_cached));
             }
             _ => {
                 stale.push(p.agent());
@@ -256,7 +229,7 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
     let installed: std::collections::HashSet<Agent> =
         crate::config::installed_agents().into_iter().collect();
     let plugins = plugin::all_plugins();
-    let mut agents: HashMap<String, AgentCache> = HashMap::new();
+    let mut agents: HashMap<Agent, AgentCache> = HashMap::new();
 
     // Carry over prior cache entries for in-flight agents. `parse_cache`
     // gates this on schema AND binary version: entries written by another
@@ -264,18 +237,13 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
     // drop them and let the next launch rescan those agents instead.
     if !skip_agents.is_empty()
         && let Ok(content) = fs::read_to_string(&path)
-        && let Ok(prior) = parse_cache(&content, AGF_VERSION)
+        && let Ok(mut prior) = parse_cache(&content, AGF_VERSION)
     {
         for skip in skip_agents {
-            let key = agent_to_str(*skip).to_string();
-            if let Some(entry) = prior.agents.get(&key) {
-                agents.insert(
-                    key,
-                    AgentCache {
-                        mtime: entry.mtime,
-                        sessions: entry.sessions.iter().map(clone_cached).collect(),
-                    },
-                );
+            // `prior` is owned and dropped right after this block, so move
+            // the carried-over entries out instead of cloning them.
+            if let Some(entry) = prior.agents.remove(skip) {
+                agents.insert(*skip, entry);
             }
         }
     }
@@ -287,7 +255,6 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
         if skip_agents.contains(&p.agent()) {
             continue;
         }
-        let key = agent_to_str(p.agent()).to_string();
         let agent_sessions: Vec<CachedSession> = sessions
             .iter()
             .filter(|s| s.agent == p.agent())
@@ -295,7 +262,7 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
             .collect();
         let mtime = get_max_mtime(&p.data_sources());
         agents.insert(
-            key,
+            p.agent(),
             AgentCache {
                 mtime,
                 sessions: agent_sessions,
@@ -317,20 +284,6 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
     }
 }
 
-fn clone_cached(c: &CachedSession) -> CachedSession {
-    CachedSession {
-        agent: c.agent.clone(),
-        session_id: c.session_id.clone(),
-        project_name: c.project_name.clone(),
-        project_path: c.project_path.clone(),
-        summaries: c.summaries.clone(),
-        timestamp: c.timestamp,
-        git_branch: c.git_branch.clone(),
-        worktree: c.worktree.clone(),
-        recap: c.recap.clone(),
-    }
-}
-
 /// One agent's scan result, streamed back from a worker thread.
 pub struct ScanResult {
     pub agent: Agent,
@@ -348,7 +301,7 @@ pub fn start_stale_scan(stale: &[Agent]) -> std::sync::mpsc::Receiver<ScanResult
     use std::thread;
     use std::time::Instant;
 
-    let debug = std::env::var("AGF_DEBUG").is_ok();
+    let debug = debug_enabled();
     let installed: std::collections::HashSet<Agent> =
         crate::config::installed_agents().into_iter().collect();
     let stale: Vec<Agent> = stale
@@ -437,5 +390,51 @@ mod tests {
     fn parse_cache_rejects_garbage() {
         let err = parse_cache("not json", AGF_VERSION).unwrap_err();
         assert!(err.contains("cache parse failed"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn cache_file_round_trips_and_agent_serializes_as_variant_name() {
+        // Protects the on-disk format: `Agent` unit variants must serialize
+        // as their exact variant-name strings — the same strings the old
+        // hand-rolled agent_to_str/agent_from_str mapping produced.
+        assert_eq!(
+            serde_json::to_string(&Agent::ClaudeCode).unwrap(),
+            "\"ClaudeCode\""
+        );
+
+        let mut agents = HashMap::new();
+        agents.insert(
+            Agent::ClaudeCode,
+            AgentCache {
+                mtime: 42,
+                sessions: vec![CachedSession {
+                    agent: Agent::ClaudeCode,
+                    session_id: "sid".to_string(),
+                    project_name: "proj".to_string(),
+                    project_path: "/p".to_string(),
+                    summaries: vec!["hello".to_string()],
+                    timestamp: 7,
+                    git_branch: Some("main".to_string()),
+                    worktree: None,
+                    recap: None,
+                }],
+            },
+        );
+        let cache = CacheFile {
+            version: CACHE_VERSION,
+            agf_version: AGF_VERSION.to_string(),
+            agents,
+        };
+
+        let json = serde_json::to_string(&cache).unwrap();
+        assert!(json.contains("\"ClaudeCode\""), "unexpected json: {json}");
+
+        let parsed = parse_cache(&json, AGF_VERSION).expect("round-trip parse");
+        let entry = &parsed.agents[&Agent::ClaudeCode];
+        assert_eq!(entry.mtime, 42);
+        assert_eq!(entry.sessions.len(), 1);
+        assert_eq!(entry.sessions[0].agent, Agent::ClaudeCode);
+        assert_eq!(entry.sessions[0].session_id, "sid");
+        assert_eq!(entry.sessions[0].git_branch.as_deref(), Some("main"));
     }
 }

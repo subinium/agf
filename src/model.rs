@@ -1,6 +1,9 @@
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+// Serde derives are load-bearing for the session cache: unit variants
+// serialize as their exact variant names ("ClaudeCode", "Codex", ...), which
+// is the on-disk format of ~/.cache/agf/sessions.json.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::enum_variant_names)]
 pub enum Agent {
     ClaudeCode,
