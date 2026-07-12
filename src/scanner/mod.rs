@@ -10,6 +10,7 @@ pub mod hermes;
 pub mod kiro;
 pub mod opencode;
 pub mod pi;
+pub mod yolop;
 
 /// Truncate a string to `max` chars, appending "..." if truncated.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
@@ -183,6 +184,7 @@ pub fn scan_all() -> Vec<Session> {
         thread::spawn(|| cursor_agent::scan().unwrap_or_default()),
         thread::spawn(|| gemini::scan().unwrap_or_default()),
         thread::spawn(|| hermes::scan().unwrap_or_default()),
+        thread::spawn(|| yolop::scan().unwrap_or_default()),
     ];
     let mut sessions: Vec<Session> = handles
         .into_iter()

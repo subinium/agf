@@ -39,7 +39,15 @@ use crate::plugin;
 //   entries written by 0.10.x would surface as stale "cli session (...)"
 //   summaries until the source DB mtime happens to change.
 //   Bumping the version forces a one-time rescan on first 0.11.0 launch.
-const CACHE_VERSION: u32 = 6;
+// Bumped to 7 after v0.12.0:
+// - Yolop support adds a new per-agent cache key.
+// - Yolop worktree sessions use repo_root for the project name instead of the
+//   generated session directory. Local builds share the released 0.12.0
+//   package version, so agf_version alone cannot invalidate their old entries.
+// - Older nested Yolop worktree sessions recover the original repository name
+//   through their `.git` indirection.
+// - Deleted nested worktrees recover it from their parent session metadata.
+const CACHE_VERSION: u32 = 7;
 
 /// The binary version stamped into every cache write; any mismatch on read
 /// invalidates the whole cache (see `parse_cache`).
@@ -324,6 +332,7 @@ pub fn start_stale_scan(stale: &[Agent]) -> std::sync::mpsc::Receiver<ScanResult
                 Agent::CursorAgent => crate::scanner::cursor_agent::scan().unwrap_or_default(),
                 Agent::Gemini => crate::scanner::gemini::scan().unwrap_or_default(),
                 Agent::Hermes => crate::scanner::hermes::scan().unwrap_or_default(),
+                Agent::Yolop => crate::scanner::yolop::scan().unwrap_or_default(),
             };
             if debug {
                 eprintln!(

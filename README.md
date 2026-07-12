@@ -8,7 +8,7 @@
 > Find the AI coding session you meant to resume.
 
 `agf` is a local-first fuzzy finder for AI coding-agent sessions.
-Search local sessions across **Claude Code**, **Codex**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, **pi**, and **Hermes** — then resume the right one in a keystroke.
+Search local sessions across **Claude Code**, **Codex**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, **pi**, **Hermes**, and **Yolop** — then resume the right one in a keystroke.
 
 ![agf demo](./assets/demo.gif)
 
@@ -51,6 +51,7 @@ Then you either dig through history files or start over.
 | [Kiro](https://kiro.dev) | `kiro-cli chat --resume` *(no per-session resume — always opens the latest session for the cwd)* | `~/Library/Application Support/kiro-cli/data.sqlite3` |
 | [pi](https://github.com/badlogic/pi-mono) | `pi --session <id>` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
 | [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes --resume <id>` *(cwd-independent — resumes in your current shell directory)* | `~/.hermes/state.db` |
+| [Yolop](https://github.com/everruns/yolop) | `yolop --session <id>` | Platform data directory under `yolop/sessions/` |
 
 <details>
 <summary>Full session storage paths</summary>
@@ -65,6 +66,7 @@ Then you either dig through history files or start over.
 | Cursor CLI | SQLite + JSONL/TXT | `~/.cursor/chats/<workspace>/<id>/store.db` (metadata; required for `.jsonl` to be resumable)<br>`~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+ transcript)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy transcript) |
 | Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
 | Hermes | SQLite | `~/.hermes/state.db` (sessions + messages)<br>JSON dumps in `~/.hermes/sessions/session_<id>.json`<br>Hermes is cwd-independent — resume runs in your current shell directory |
+| Yolop | JSONL + JSON | macOS: `~/Library/Application Support/yolop/sessions/<id>/`<br>Linux: `$XDG_DATA_HOME/yolop/sessions/<id>/`<br>Windows: `%APPDATA%\yolop\sessions\<id>\` |
 
 </details>
 
@@ -166,7 +168,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 ## Requirements
 
 - macOS, Linux, or Windows (PowerShell 5.1+ / PowerShell 7+)
-- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`
+- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `yolop`
 
 ## Install from source
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Yolop session support** — discover, preview, resume, and delete sessions from Yolop's platform-native session store, including repository-name recovery for nested worktrees.
+
 ## [0.12.0] - 2026-06-11
 
 ### Added

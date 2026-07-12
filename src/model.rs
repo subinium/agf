@@ -14,6 +14,7 @@ pub enum Agent {
     CursorAgent,
     Gemini,
     Hermes,
+    Yolop,
 }
 
 impl fmt::Display for Agent {
@@ -27,6 +28,7 @@ impl fmt::Display for Agent {
             Agent::CursorAgent => write!(f, "Cursor CLI"),
             Agent::Gemini => write!(f, "Gemini"),
             Agent::Hermes => write!(f, "Hermes"),
+            Agent::Yolop => write!(f, "Yolop"),
         }
     }
 }
@@ -42,6 +44,7 @@ impl Agent {
             Agent::CursorAgent => (245, 184, 65), // #F5B841 Cursor brand yellow
             Agent::Gemini => (66, 133, 244),     // #4285F4 Google blue
             Agent::Hermes => (168, 85, 247),     // #A855F7 purple (Nous Research)
+            Agent::Yolop => (34, 197, 94),       // #22C55E green
         }
     }
 
@@ -55,6 +58,7 @@ impl Agent {
             Agent::CursorAgent,
             Agent::Gemini,
             Agent::Hermes,
+            Agent::Yolop,
         ]
     }
 
@@ -69,6 +73,7 @@ impl Agent {
             Agent::CursorAgent => "cursor-agent",
             Agent::Gemini => "gemini",
             Agent::Hermes => "hermes",
+            Agent::Yolop => "yolop",
         }
     }
 
@@ -85,6 +90,7 @@ impl Agent {
             Agent::CursorAgent => format!("cursor-agent --resume '{session_id}'"),
             Agent::Gemini => format!("gemini --resume '{session_id}'"),
             Agent::Hermes => format!("hermes --resume '{session_id}'"),
+            Agent::Yolop => format!("yolop --session '{session_id}'"),
         }
     }
 
@@ -128,6 +134,7 @@ impl Agent {
             Agent::CursorAgent => "cursor-agent",
             Agent::Gemini => "gemini",
             Agent::Hermes => "hermes",
+            Agent::Yolop => "yolop",
         }
     }
 }
@@ -285,6 +292,14 @@ mod tests {
         assert_eq!(
             Agent::Pi.resume_cmd("019e14f4-c9a5-76dc-b7b6-0613e602a620"),
             "pi --session '019e14f4-c9a5-76dc-b7b6-0613e602a620'"
+        );
+    }
+
+    #[test]
+    fn yolop_resume_command_uses_selected_session_id() {
+        assert_eq!(
+            Agent::Yolop.resume_cmd("session_019e3db018a17450aba5407af5777237"),
+            "yolop --session 'session_019e3db018a17450aba5407af5777237'"
         );
     }
 }
