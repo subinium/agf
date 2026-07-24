@@ -4,7 +4,7 @@
 
 ### Added
 
-- **Yolop session support** — discover, preview, resume, and delete sessions from Yolop's platform-native session store, including repository-name recovery for nested worktrees.
+- **Yolop session support** — discover, preview, resume, and delete sessions from Yolop's platform-native session store. Current metadata supplies session titles, canonical repository names, timestamps, and concise worktree labels; older sessions fall back to first prompts and repository-name recovery.
 
 ## [0.12.0] - 2026-06-11
 

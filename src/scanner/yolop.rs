@@ -1,14 +1,15 @@
 use serde_json::Value;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
-use crate::scanner::{first_line_truncated, project_name_from_path};
+use crate::scanner::{
+    collapse_whitespace, first_line_truncated, project_name_from_path, read_head_tail,
+};
 
 const SUMMARY_MAX_CHARS: usize = 120;
-const MAX_PARSE_BYTES: usize = 512 * 1024;
+const EVENT_HEAD_BYTES: u64 = 512 * 1024;
+const EVENT_TAIL_BYTES: u64 = 64 * 1024;
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     scan_from(&crate::config::yolop_sessions_dir()?)
@@ -53,12 +54,14 @@ fn parse_session(dir: &Path, session_id: String) -> Option<Session> {
         serde_json::from_slice(&std::fs::read(dir.join("workspace.json")).ok()?).ok()?;
     let project_path = workspace
         .get("active_root")
-        .or_else(|| workspace.get("workspace_root"))?
-        .as_str()?
+        .and_then(Value::as_str)
+        .or_else(|| workspace.get("workspace_root").and_then(Value::as_str))?
         .to_string();
     let mut project_name = workspace
-        .get("repo_root")
+        .get("canonical_repo_root")
         .and_then(Value::as_str)
+        .filter(|root| !root.is_empty())
+        .or_else(|| workspace.get("repo_root").and_then(Value::as_str))
         .map(project_name_from_path)
         .unwrap_or_else(|| project_name_from_path(&project_path));
     if project_name.starts_with("session_")
@@ -71,45 +74,71 @@ fn parse_session(dir: &Path, session_id: String) -> Option<Session> {
         .pointer("/worktree/branch")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let worktree = workspace
-        .pointer("/worktree/path")
+    let worktree = worktree_label(&workspace);
+    let metadata_title = workspace.get("title").and_then(Value::as_str);
+    let metadata_summary = workspace.get("summary").and_then(Value::as_str);
+    let metadata_timestamp = workspace
+        .get("updated_at")
         .and_then(Value::as_str)
-        .map(str::to_owned);
+        .and_then(parse_timestamp)
+        .or_else(|| {
+            workspace
+                .get("created_at")
+                .and_then(Value::as_str)
+                .and_then(parse_timestamp)
+        })
+        .unwrap_or(0);
 
-    let file = File::open(&log_path).ok()?;
-    let mut summaries = Vec::new();
+    let events = read_head_tail(&log_path, EVENT_HEAD_BYTES, EVENT_TAIL_BYTES)?;
+    let mut prompt_summaries = Vec::new();
+    let mut event_title = None;
     let mut latest_ts = None;
-    let mut bytes_read = 0usize;
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { continue };
-        bytes_read += line.len() + 1;
-        if let Ok(event) = serde_json::from_str::<Value>(&line) {
+    for line in events.head.lines().chain(events.tail.lines()) {
+        if let Ok(event) = serde_json::from_str::<Value>(line) {
             if event.get("session_id").and_then(Value::as_str) != Some(&session_id) {
                 continue;
             }
             if let Some(ts) = event
                 .get("ts")
                 .and_then(Value::as_str)
-                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                .map(|ts| ts.timestamp_millis())
+                .and_then(parse_timestamp)
             {
                 latest_ts = Some(latest_ts.map_or(ts, |current: i64| current.max(ts)));
+            }
+            if event.get("type").and_then(Value::as_str) == Some("session.title.updated")
+                && let Some(title) = event.pointer("/data/title").and_then(Value::as_str)
+            {
+                event_title = Some(title.to_string());
             }
             if event.get("type").and_then(Value::as_str) == Some("input.message")
                 && let Some(message) = event.pointer("/data/message")
                 && message.get("role").and_then(Value::as_str) == Some("user")
                 && let Some(summary) = message.get("content").and_then(extract_text)
             {
-                summaries.push(summary);
+                push_unique_summary(&mut prompt_summaries, &summary);
             }
         }
-        if bytes_read >= MAX_PARSE_BYTES {
-            break;
-        }
     }
-    // The prompt scan is intentionally bounded, so the newest event may be
-    // beyond the read window. The log mtime tracks the latest append.
-    let timestamp = modified_ms(&log_path).max(latest_ts.unwrap_or(0));
+    let mut summaries = Vec::new();
+    if let Some(title) = event_title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .or(metadata_title)
+    {
+        push_unique_summary(&mut summaries, title);
+    }
+    if let Some(summary) = metadata_summary {
+        push_unique_summary(&mut summaries, summary);
+    }
+    for summary in prompt_summaries {
+        push_unique_summary(&mut summaries, &summary);
+    }
+
+    // Explicit metadata is useful for idle sessions, while the log mtime and
+    // event timestamps keep active sessions fresh between metadata writes.
+    let timestamp = metadata_timestamp
+        .max(modified_ms(&log_path))
+        .max(latest_ts.unwrap_or(0));
 
     Some(Session {
         agent: Agent::Yolop,
@@ -124,6 +153,19 @@ fn parse_session(dir: &Path, session_id: String) -> Option<Session> {
     })
 }
 
+fn parse_timestamp(timestamp: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn push_unique_summary(summaries: &mut Vec<String>, summary: &str) {
+    let summary = collapse_whitespace(summary);
+    if !summary.is_empty() && !summaries.contains(&summary) {
+        summaries.push(summary);
+    }
+}
+
 fn extract_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => first_line_truncated(text, SUMMARY_MAX_CHARS),
@@ -134,6 +176,30 @@ fn extract_text(value: &Value) -> Option<String> {
             .and_then(|text| first_line_truncated(text, SUMMARY_MAX_CHARS)),
         _ => None,
     }
+}
+
+fn worktree_label(workspace: &Value) -> Option<String> {
+    let worktree = workspace.get("worktree")?;
+    if let Some(slug) = worktree
+        .get("slug")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|slug| !slug.is_empty())
+    {
+        return Some(slug.to_string());
+    }
+
+    let path_label = worktree
+        .get("path")
+        .and_then(Value::as_str)
+        .map(project_name_from_path)
+        .filter(|label| !label.starts_with("session_"));
+    path_label.or_else(|| {
+        worktree
+            .get("branch")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
 }
 
 fn modified_ms(path: &Path) -> i64 {
@@ -168,7 +234,12 @@ fn linked_session_repo_name(session_dir: &Path, project_path: &Path) -> Option<S
         &std::fs::read(session_dir.parent()?.join(linked_id).join("workspace.json")).ok()?,
     )
     .ok()?;
-    let name = project_name_from_path(workspace.get("repo_root")?.as_str()?);
+    let root = workspace
+        .get("canonical_repo_root")
+        .and_then(Value::as_str)
+        .filter(|root| !root.is_empty())
+        .or_else(|| workspace.get("repo_root").and_then(Value::as_str))?;
+    let name = project_name_from_path(root);
     (!name.starts_with("session_")).then_some(name)
 }
 
@@ -222,8 +293,89 @@ mod tests {
         assert_eq!(session.project_path, "/tmp/example-wt");
         assert_eq!(session.summaries, ["add support for yolop"]);
         assert_eq!(session.git_branch.as_deref(), Some("feat/yolop"));
-        assert_eq!(session.worktree.as_deref(), Some("/tmp/example-wt"));
+        assert_eq!(session.worktree.as_deref(), Some("example-wt"));
         assert!(session.timestamp >= 1_783_684_860_000);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_metadata_supplies_title_project_time_and_worktree_slug() {
+        let root = temp_root("current-metadata");
+        let dir = root.join(SESSION_ID);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("workspace.json"),
+            r#"{
+                "active_root":"/tmp/yolop/worktrees/session_generated",
+                "repo_root":"/tmp/yolop/worktrees/session_generated",
+                "canonical_repo_root":"/Users/example/Projects/everruns/yolop",
+                "title":"Release   Yolop\nand Tuika",
+                "summary":"Prepare and publish both releases",
+                "created_at":"2026-07-10T11:00:00Z",
+                "updated_at":"2030-07-10T12:00:00Z",
+                "worktree":{
+                    "path":"/tmp/yolop/worktrees/session_generated",
+                    "branch":"feat/release",
+                    "slug":"release-new-version"
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("events.jsonl"),
+            concat!(
+                r#"{"type":"input.message","ts":"2026-07-10T12:00:00Z","session_id":"session_019e3db018a17450aba5407af5777237","data":{"message":{"role":"user","content":"Prepare and publish both releases"}}}"#,
+                "\n",
+                r#"{"type":"input.message","ts":"2026-07-10T12:01:00Z","session_id":"session_019e3db018a17450aba5407af5777237","data":{"message":{"role":"user","content":"Verify the release artifacts"}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+
+        assert_eq!(session.project_name, "yolop");
+        assert_eq!(
+            session.summaries,
+            [
+                "Release Yolop and Tuika",
+                "Prepare and publish both releases",
+                "Verify the release artifacts"
+            ]
+        );
+        assert_eq!(session.worktree.as_deref(), Some("release-new-version"));
+        assert_eq!(session.timestamp, 1_909_915_200_000);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn latest_title_event_overrides_stale_metadata_title() {
+        let root = temp_root("title-event");
+        let dir = write_session(&root);
+        let workspace_path = dir.join("workspace.json");
+        let mut workspace: Value =
+            serde_json::from_slice(&fs::read(&workspace_path).unwrap()).unwrap();
+        workspace["title"] = Value::String("Old generated title".to_string());
+        fs::write(&workspace_path, serde_json::to_vec(&workspace).unwrap()).unwrap();
+        fs::write(
+            dir.join("events.jsonl"),
+            concat!(
+                r#"{"type":"session.title.updated","ts":"2026-07-10T12:02:00Z","session_id":"session_019e3db018a17450aba5407af5777237","data":{"title":"First generated title"}}"#,
+                "\n",
+                r#"{"type":"session.title.updated","ts":"2026-07-10T12:03:00Z","session_id":"session_019e3db018a17450aba5407af5777237","data":{"title":"Useful current title"}}"#,
+                "\n",
+                r#"{"type":"input.message","ts":"2026-07-10T12:04:00Z","session_id":"session_019e3db018a17450aba5407af5777237","data":{"message":{"role":"user","content":"original request"}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+
+        assert_eq!(
+            session.summaries,
+            ["Useful current title", "original request"]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

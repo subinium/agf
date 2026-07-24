@@ -39,7 +39,7 @@ use crate::plugin;
 //   entries written by 0.10.x would surface as stale "cli session (...)"
 //   summaries until the source DB mtime happens to change.
 //   Bumping the version forces a one-time rescan on first 0.11.0 launch.
-// Bumped to 7 after v0.12.0:
+// Bumped to 8 after v0.12.0:
 // - Yolop support adds a new per-agent cache key.
 // - Yolop worktree sessions use repo_root for the project name instead of the
 //   generated session directory. Local builds share the released 0.12.0
@@ -47,7 +47,9 @@ use crate::plugin;
 // - Older nested Yolop worktree sessions recover the original repository name
 //   through their `.git` indirection.
 // - Deleted nested worktrees recover it from their parent session metadata.
-const CACHE_VERSION: u32 = 7;
+// - Yolop's persisted titles, canonical roots, timestamps, and short worktree
+//   slugs now replace inferred summaries, generated paths, and log-only times.
+const CACHE_VERSION: u32 = 8;
 
 /// The binary version stamped into every cache write; any mismatch on read
 /// invalidates the whole cache (see `parse_cache`).
