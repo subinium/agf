@@ -21,6 +21,7 @@ pub fn delete_session(session: &Session) -> Result<(), io::Error> {
         Agent::Codex => delete_codex_session(session),
         Agent::OpenCode => delete_opencode_session(session),
         Agent::Pi => delete_pi_session(session),
+        Agent::OhMyPi => delete_oh_my_pi_session(session),
         Agent::Kiro => delete_kiro_session(session),
         Agent::CursorAgent => delete_cursor_agent_session(session),
         Agent::Gemini => delete_gemini_session(session),
@@ -259,11 +260,22 @@ fn delete_opencode_session(session: &Session) -> Result<(), io::Error> {
 /// `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<sessionId>.jsonl`.
 fn delete_pi_session(session: &Session) -> Result<(), io::Error> {
     let sessions_dir = config::pi_sessions_dir().map_err(io::Error::other)?;
+    delete_pi_style_session(session, &sessions_dir)
+}
+
+/// Oh My Pi uses the same JSONL session format as pi under
+/// `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<sessionId>.jsonl`.
+fn delete_oh_my_pi_session(session: &Session) -> Result<(), io::Error> {
+    let sessions_dir = config::oh_my_pi_sessions_dir().map_err(io::Error::other)?;
+    delete_pi_style_session(session, &sessions_dir)
+}
+
+fn delete_pi_style_session(session: &Session, sessions_dir: &Path) -> Result<(), io::Error> {
     if !sessions_dir.exists() {
         return Ok(());
     }
 
-    for entry in WalkDir::new(&sessions_dir).into_iter().flatten() {
+    for entry in WalkDir::new(sessions_dir).into_iter().flatten() {
         let path = entry.path();
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
@@ -273,15 +285,18 @@ fn delete_pi_session(session: &Session) -> Result<(), io::Error> {
             continue;
         };
 
-        let first_line = match content.lines().next() {
-            Some(line) if !line.trim().is_empty() => line.trim(),
-            _ => continue,
-        };
-
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(first_line)
-            && value.get("type").and_then(|v| v.as_str()) == Some("session")
-            && value.get("id").and_then(|v| v.as_str()) == Some(&session.session_id)
-        {
+        let matches = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .any(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .is_some_and(|value| {
+                        value.get("type").and_then(|v| v.as_str()) == Some("session")
+                            && value.get("id").and_then(|v| v.as_str()) == Some(&session.session_id)
+                    })
+            });
+        if matches {
             fs::remove_file(path)?;
             return Ok(());
         }
@@ -612,5 +627,42 @@ mod tests {
             sibling_file.exists(),
             "unrelated sibling legacy .txt must survive",
         );
+    }
+
+    #[test]
+    fn delete_pi_style_session_accepts_oh_my_pi_title_slot() {
+        let root = make_codex_dir("agf-test-omp-delete");
+        let target = root.join("target.jsonl");
+        let sibling = root.join("sibling.jsonl");
+        fs::write(
+            &target,
+            concat!(
+                "{\"type\":\"title\",\"title\":\"Target\"}\n",
+                "{\"type\":\"session\",\"id\":\"target-id\",\"cwd\":\"/tmp/x\"}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &sibling,
+            "{\"type\":\"session\",\"id\":\"sibling-id\",\"cwd\":\"/tmp/x\"}\n",
+        )
+        .unwrap();
+        let session = Session {
+            agent: Agent::OhMyPi,
+            session_id: "target-id".to_string(),
+            project_name: "x".to_string(),
+            project_path: "/tmp/x".to_string(),
+            summaries: Vec::new(),
+            timestamp: 0,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+        };
+
+        delete_pi_style_session(&session, &root).unwrap();
+
+        assert!(!target.exists());
+        assert!(sibling.exists());
+        let _ = fs::remove_dir_all(root);
     }
 }

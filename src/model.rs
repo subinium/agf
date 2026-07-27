@@ -10,6 +10,7 @@ pub enum Agent {
     Codex,
     OpenCode,
     Pi,
+    OhMyPi,
     Kiro,
     CursorAgent,
     Gemini,
@@ -23,6 +24,7 @@ impl fmt::Display for Agent {
             Agent::Codex => write!(f, "Codex"),
             Agent::OpenCode => write!(f, "OpenCode"),
             Agent::Pi => write!(f, "pi"),
+            Agent::OhMyPi => write!(f, "Oh My Pi"),
             Agent::Kiro => write!(f, "Kiro"),
             Agent::CursorAgent => write!(f, "Cursor CLI"),
             Agent::Gemini => write!(f, "Gemini"),
@@ -38,6 +40,7 @@ impl Agent {
             Agent::Codex => (0, 166, 126),       // #00A67E teal green (OpenAI)
             Agent::OpenCode => (59, 130, 246),   // #3B82F6 blue
             Agent::Pi => (236, 72, 153),         // #EC4899 pink
+            Agent::OhMyPi => (249, 115, 22),     // #F97316 orange
             Agent::Kiro => (136, 69, 244),       // #8845F4 deep purple (AWS Kiro)
             Agent::CursorAgent => (245, 184, 65), // #F5B841 Cursor brand yellow
             Agent::Gemini => (66, 133, 244),     // #4285F4 Google blue
@@ -51,6 +54,7 @@ impl Agent {
             Agent::Codex,
             Agent::OpenCode,
             Agent::Pi,
+            Agent::OhMyPi,
             Agent::Kiro,
             Agent::CursorAgent,
             Agent::Gemini,
@@ -65,6 +69,7 @@ impl Agent {
             Agent::Codex => "codex",
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
+            Agent::OhMyPi => "omp",
             Agent::Kiro => "kiro-cli",
             Agent::CursorAgent => "cursor-agent",
             Agent::Gemini => "gemini",
@@ -79,6 +84,7 @@ impl Agent {
             Agent::Codex => format!("codex resume '{session_id}'"),
             Agent::OpenCode => format!("opencode -s '{session_id}'"),
             Agent::Pi => format!("pi --session '{session_id}'"),
+            Agent::OhMyPi => format!("omp --resume '{session_id}'"),
             // Kiro CLI has no per-session resume flag — `--resume` always
             // reopens the latest session for the cwd, so session_id is unused.
             Agent::Kiro => "kiro-cli chat --resume".to_string(),
@@ -124,6 +130,7 @@ impl Agent {
             Agent::Codex => "codex",
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
+            Agent::OhMyPi => "omp",
             Agent::Kiro => "kiro-cli chat",
             Agent::CursorAgent => "cursor-agent",
             Agent::Gemini => "gemini",
@@ -285,6 +292,14 @@ mod tests {
         assert_eq!(
             Agent::Pi.resume_cmd("019e14f4-c9a5-76dc-b7b6-0613e602a620"),
             "pi --session '019e14f4-c9a5-76dc-b7b6-0613e602a620'"
+        );
+    }
+
+    #[test]
+    fn oh_my_pi_resume_command_uses_selected_session_id() {
+        assert_eq!(
+            Agent::OhMyPi.resume_cmd("019e14f4-c9a5-76dc-b7b6-0613e602a620"),
+            "omp --resume '019e14f4-c9a5-76dc-b7b6-0613e602a620'"
         );
     }
 }
