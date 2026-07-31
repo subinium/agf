@@ -136,23 +136,29 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
 
         let meta = store_db_path.as_deref().and_then(read_store_db);
 
+        // Last-activity time: the transcript file is appended on every turn,
+        // so its mtime tracks when the session was last used. Prefer it over
+        // the store.db `createdAt` (which never advances after creation) so a
+        // recently-used old session sorts by last use, not creation — matching
+        // how the other agents' timestamps behave and fixing the "recent
+        // session buried under old ones" time-sort complaint.
+        let file_mtime = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64);
+
         let (summary, timestamp) = match meta {
-            Some(m) => (m.name, m.created_at),
+            Some(m) => (m.name, file_mtime.unwrap_or(m.created_at)),
             None => {
-                let mtime = path
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
                 // Prompt extraction only applies to JSONL; .txt format is unknown
                 let prompt = if ext == Some("jsonl") {
                     extract_first_prompt(path)
                 } else {
                     None
                 };
-                (prompt, mtime)
+                (prompt, file_mtime.unwrap_or(0))
             }
         };
 

@@ -103,20 +103,21 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
 
     let session_id = header.id?;
     let cwd = header.cwd?;
-    let timestamp = header
+    // pi's session-header timestamp is the CREATION time and never advances as
+    // the session is used. The transcript file is appended on every turn, so
+    // its mtime tracks last activity — take the max of the two so a
+    // recently-used old session sorts by when it was last touched, not created.
+    let header_ts = header
         .timestamp
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
-        .map(|dt| dt.timestamp_millis())
-        .unwrap_or_else(|| {
-            path.metadata()
-                .and_then(|m| m.modified())
-                .map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64
-                })
-                .unwrap_or(0)
-        });
+        .map(|dt| dt.timestamp_millis());
+    let file_mtime = path
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+    let timestamp = header_ts.into_iter().chain(file_mtime).max().unwrap_or(0);
 
     let project_name = project_name_from_path(&cwd);
 
@@ -289,9 +290,25 @@ mod tests {
         ));
         let session_dir = home.join(".pi/agent/sessions/--tmp-project--");
         fs::create_dir_all(&session_dir).unwrap();
-        for (file, id, ts) in [
-            ("old.jsonl", "old-session", "2026-05-01T00:00:00Z"),
-            ("new.jsonl", "new-session", "2026-05-02T00:00:00Z"),
+        // `old-session` has the OLDER creation header but the NEWER file mtime
+        // (it was resumed/used more recently); `new-session` was created later
+        // but not touched since. Sorting is by last activity (max of header ts
+        // and file mtime), so old-session must rank ABOVE new-session — proving
+        // we no longer sort pi sessions by their immutable creation timestamp.
+        use std::time::{Duration, SystemTime};
+        for (file, id, ts, mtime_secs) in [
+            (
+                "old.jsonl",
+                "old-session",
+                "2026-05-01T00:00:00Z",
+                1_800_000_000u64,
+            ),
+            (
+                "new.jsonl",
+                "new-session",
+                "2026-05-02T00:00:00Z",
+                1_790_000_000u64,
+            ),
         ] {
             let mut f = fs::File::create(session_dir.join(file)).unwrap();
             writeln!(
@@ -299,6 +316,8 @@ mod tests {
                 r#"{{"type":"session","id":"{id}","timestamp":"{ts}","cwd":"/tmp/project"}}"#
             )
             .unwrap();
+            f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs))
+                .unwrap();
         }
         // Serialized by the HOME_LOCK guard above.
         unsafe { std::env::set_var("HOME", &home) };
@@ -314,6 +333,6 @@ mod tests {
         }
 
         let ids: Vec<_> = sessions.iter().map(|s| s.session_id.as_str()).collect();
-        assert_eq!(ids, vec!["new-session", "old-session"]);
+        assert_eq!(ids, vec!["old-session", "new-session"]);
     }
 }
