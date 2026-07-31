@@ -37,6 +37,12 @@ pub fn hermes_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".hermes"))
 }
 
+pub fn yolop_sessions_dir() -> Result<PathBuf, AgfError> {
+    dirs::data_dir()
+        .map(|d| d.join("yolop").join("sessions"))
+        .ok_or(AgfError::NoHomeDir)
+}
+
 pub fn kiro_data_dir() -> Result<PathBuf, AgfError> {
     // Kiro CLI stores data via dirs::data_local_dir()
     // macOS: ~/Library/Application Support/kiro-cli/
