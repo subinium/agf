@@ -11,7 +11,7 @@ pub fn generate_command(
 
     match action {
         Action::Resume => {
-            let cmd = session.agent.resume_cmd(&session.session_id);
+            let cmd = session.agent.resume_cmd(&session.session_id, &shell);
             Some(shell.cd_and(&quoted_path, &cmd))
         }
         Action::NewSession => {
@@ -30,7 +30,9 @@ pub fn generate_command(
 
 pub fn action_preview(session: &Session, action: Action) -> String {
     match action {
-        Action::Resume => session.agent.resume_cmd(&session.session_id),
+        Action::Resume => session
+            .agent
+            .resume_cmd(&session.session_id, &CommandShell::from_env()),
         Action::NewSession => "choose agent CLI...".to_string(),
         Action::Open => format!("{} .", detect_editor()),
         Action::Cd => CommandShell::from_env().cd_only(&session.display_path()),
@@ -67,7 +69,7 @@ pub fn detect_editor() -> String {
 pub fn resume_with_flags(session: &Session, flags: &str) -> String {
     let shell = CommandShell::from_env();
     let quoted_path = shell.quote(&session.project_path);
-    let base_cmd = session.agent.resume_cmd(&session.session_id);
+    let base_cmd = session.agent.resume_cmd(&session.session_id, &shell);
     shell.cd_and(&quoted_path, &format!("{base_cmd}{flags}"))
 }
 

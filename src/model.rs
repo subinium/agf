@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::shell::CommandShell;
+
 // Serde derives are load-bearing for the session cache: unit variants
 // serialize as their exact variant names ("ClaudeCode", "Codex", ...), which
 // is the on-disk format of ~/.cache/agf/sessions.json.
@@ -73,18 +75,24 @@ impl Agent {
     }
 
     /// Shell command to resume the most recent session.
-    pub fn resume_cmd(&self, session_id: &str) -> String {
+    ///
+    /// `session_id` is escaped for `shell` rather than wrapped in raw single
+    /// quotes: session ids come from parsed on-disk files and are not
+    /// guaranteed to be quote-free, so an unescaped id could break the
+    /// generated command — or inject shell — once the wrapper `eval`s it.
+    pub fn resume_cmd(&self, session_id: &str, shell: &CommandShell) -> String {
+        let id = shell.quote(session_id);
         match self {
-            Agent::ClaudeCode => format!("claude --resume '{session_id}'"),
-            Agent::Codex => format!("codex resume '{session_id}'"),
-            Agent::OpenCode => format!("opencode -s '{session_id}'"),
-            Agent::Pi => format!("pi --session '{session_id}'"),
+            Agent::ClaudeCode => format!("claude --resume {id}"),
+            Agent::Codex => format!("codex resume {id}"),
+            Agent::OpenCode => format!("opencode -s {id}"),
+            Agent::Pi => format!("pi --session {id}"),
             // Kiro CLI has no per-session resume flag — `--resume` always
             // reopens the latest session for the cwd, so session_id is unused.
             Agent::Kiro => "kiro-cli chat --resume".to_string(),
-            Agent::CursorAgent => format!("cursor-agent --resume '{session_id}'"),
-            Agent::Gemini => format!("gemini --resume '{session_id}'"),
-            Agent::Hermes => format!("hermes --resume '{session_id}'"),
+            Agent::CursorAgent => format!("cursor-agent --resume {id}"),
+            Agent::Gemini => format!("gemini --resume {id}"),
+            Agent::Hermes => format!("hermes --resume {id}"),
         }
     }
 
@@ -283,8 +291,26 @@ mod tests {
     #[test]
     fn pi_resume_command_uses_selected_session_id() {
         assert_eq!(
-            Agent::Pi.resume_cmd("019e14f4-c9a5-76dc-b7b6-0613e602a620"),
+            Agent::Pi.resume_cmd(
+                "019e14f4-c9a5-76dc-b7b6-0613e602a620",
+                &crate::shell::CommandShell::Posix
+            ),
             "pi --session '019e14f4-c9a5-76dc-b7b6-0613e602a620'"
+        );
+    }
+
+    #[test]
+    fn resume_cmd_escapes_session_id() {
+        // A session id containing a single quote must not break out of the
+        // quoted argument (broken command) or inject shell.
+        assert_eq!(
+            Agent::ClaudeCode.resume_cmd("a'b", &crate::shell::CommandShell::Posix),
+            r#"claude --resume 'a'\''b'"#
+        );
+        // PowerShell doubles the embedded quote instead of `'\''`.
+        assert_eq!(
+            Agent::ClaudeCode.resume_cmd("a'b", &crate::shell::CommandShell::PowerShell),
+            "claude --resume 'a''b'"
         );
     }
 }
