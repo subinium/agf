@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-07-31
+
+Post-release audit of 0.13.0. No new features and no CLI changes; everything below is a correctness, durability, or performance fix found by reading the 0.13.0 diff and then the rest of the tree.
+
+### Fixed
+
+- **Delete had no path-traversal guard in release builds** — the check was a `debug_assert!`, which the release profile compiles out. `Session`s are rebuilt from `~/.cache/agf/sessions.json`, an ordinary user-writable file that re-runs no scanner validation, and Yolop's delete joins the id straight onto its sessions directory before calling `remove_dir_all`. The guard is now a runtime check on every agent, plus a Yolop-specific `session_<32 hex>` shape check.
+- **Rewriting `history.jsonl` was not crash-safe** — deleting a Claude Code or Codex session read the whole history file, filtered it in memory, and wrote it back over the original. An interruption between the truncate and the last byte left a half-written file with no original. All full-file rewrites (including `agf setup`'s shell rc edit) now write a fsync'd temp and `rename` over the destination.
+- **Claude Code recaps were always one idle cycle stale** — cache freshness keyed on `history.jsonl` alone, but `away_summary` recaps, `aiTitle`, and the worktree label all come from `~/.claude/projects/*/<id>.jsonl`, which changes without touching history. `projects/` is now part of the freshness check (measured: ~5 ms added per launch on a 1,478-file tree).
+- **CJK project names broke column alignment** in `agf list`, `agf stats`, and the compact TUI layout — column budgets were measured in terminal columns but padded with `{:<n$}`, which pads by `char` count. A 5-character Hangul name rendered 15 columns wide and pushed every column after it out of line; `agf stats` measured names in *bytes*, which saturated the padding to zero. All display-width work now goes through one width-aware helper.
+- **`agf list --format csv` did not escape every field** — `session_id`, `agent`, `time`, and `branch` were written raw. Git permits commas in branch names, which silently shifted every later column in the consuming tool.
+- **Yolop: an unreadable `events.jsonl` dropped the whole session** — `workspace.json` already supplies the project, title, and worktree, and the session is still resumable, so a failed log read now degrades the entry instead of removing it from the listing.
+- **Yolop: an implausible future timestamp pinned a session to the top forever** — `updated_at`, event `ts`, and the log mtime are all self-reported or clock-dependent. Candidates more than a day ahead of now are ignored, falling back to "now" so such a session ages normally.
+- **Agent counts drifted from the list they label** — with `max_sessions` set, an incoming scan recorded its batch size *before* truncation, so the agent badge advertised sessions that had just been dropped off the end. Counts are now recomputed from the list after every merge and delete.
+- **Codex would read a superseded database at `state_10.sqlite`** — `state_*.sqlite` files were ranked lexicographically, which sorts `state_10` below `state_9`. They are now ranked by their numeric suffix.
+- **Action previews showed commands that would not run** — the `cd` preview interpolated an unquoted path (breaking on any path with a space), and cwd-independent agents rendered as `cd — && hermes` because `display_path()` renders their empty path as an em dash. Previews now quote exactly like the executed command and drop the `cd` where the real command does.
+
+### Performance
+
+- **Bulk delete is one filesystem pass per agent, not per session** — deleting N sessions previously meant N full walks of `~/.claude/projects` (or of the pi/Oh My Pi tree, reading every transcript in full on each walk) plus N read-modify-write cycles over `history.jsonl`. Deletes are now batched by agent.
+- **pi / Oh My Pi delete reads a bounded header** instead of every byte of every transcript; the session record is on line 1 (pi) or line 2 (Oh My Pi). Codex's rollout delete likewise reads only the first line.
+- **Search-match highlighting uses a binary search** over the sorted match positions rather than a linear scan per character, per row, per frame.
+- **`agf watch` probes only installed agents** and stops probing entirely when `pgrep` is absent (Windows, minimal containers), instead of spawning one failing process per known agent every refresh tick.
+
+### Changed
+
+- **Removed the unused `AgentPlugin` trait** (`src/plugin.rs`) — only 2 of its 8 methods were ever called through the trait, and `name()` duplicated `Display for Agent` string-for-string, yet `docs/adding-an-agent.md` required filling it in for every new agent. Cache freshness paths moved to `config::data_sources()`; adding an agent now touches 8 sites instead of 12.
+- **`CACHE_VERSION` 7 → 8** — forces one rescan so upgraded entries pick up the new Claude freshness inputs and drop any persisted far-future Yolop timestamps.
+- **`AgfError::NoDataDir`** distinguishes a missing platform data directory from a missing home directory (Kiro and Yolop previously reported "No home directory found" when the home directory was present).
+
 ## [0.13.0] - 2026-07-31
 
 ### Added
