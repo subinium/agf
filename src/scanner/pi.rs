@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 use walkdir::WalkDir;
 
 use crate::error::AgfError;
@@ -30,22 +31,31 @@ struct PiSessionHeader {
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let sessions_dir = crate::config::pi_sessions_dir()?;
+    Ok(scan_from(&sessions_dir, Agent::Pi, None))
+}
+
+pub(crate) fn scan_from(
+    sessions_dir: &Path,
+    agent: Agent,
+    max_depth: Option<usize>,
+) -> Vec<Session> {
     if !sessions_dir.exists() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     let mut sessions = Vec::new();
+    let mut walker = WalkDir::new(sessions_dir);
+    if let Some(depth) = max_depth {
+        walker = walker.max_depth(depth);
+    }
 
-    for entry in WalkDir::new(&sessions_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in walker.into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
 
-        if let Some(session) = parse_session(path) {
+        if let Some(session) = parse_session(path, agent) {
             sessions.push(session);
         }
     }
@@ -54,10 +64,10 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     // so keep older sessions from the same project selectable.
     sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
 
-    Ok(sessions)
+    sessions
 }
 
-fn parse_session(path: &std::path::Path) -> Option<Session> {
+fn parse_session(path: &Path, agent: Agent) -> Option<Session> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
     let mut header = None;
@@ -122,7 +132,7 @@ fn parse_session(path: &std::path::Path) -> Option<Session> {
     let project_name = project_name_from_path(&cwd);
 
     Some(Session {
-        agent: Agent::Pi,
+        agent,
         session_id,
         project_name,
         project_path: cwd,
@@ -196,7 +206,7 @@ mod tests {
             ],
         );
 
-        let session = parse_session(&path);
+        let session = parse_session(&path, Agent::Pi);
         let _ = fs::remove_file(&path);
 
         let session = session.expect("session header should parse");
@@ -222,7 +232,7 @@ mod tests {
         let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         let path = temp_session_file("byte-budget", &line_refs);
 
-        let session = parse_session(&path);
+        let session = parse_session(&path, Agent::Pi);
         let _ = fs::remove_file(&path);
 
         let session = session.expect("header on line 1 should parse within the budget");
@@ -264,7 +274,7 @@ mod tests {
         );
         fs::write(&path, &bytes).unwrap();
 
-        let session = parse_session(&path);
+        let session = parse_session(&path, Agent::Pi);
         let _ = fs::remove_file(&path);
 
         let session = session.expect("session should surface despite invalid UTF-8 on line 1");

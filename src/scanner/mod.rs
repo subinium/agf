@@ -8,6 +8,7 @@ pub mod cursor_agent;
 pub mod gemini;
 pub mod hermes;
 pub mod kiro;
+pub mod oh_my_pi;
 pub mod opencode;
 pub mod pi;
 pub mod yolop;
@@ -180,6 +181,7 @@ pub fn scan_all() -> Vec<Session> {
         thread::spawn(|| codex::scan().unwrap_or_default()),
         thread::spawn(|| opencode::scan().unwrap_or_default()),
         thread::spawn(|| pi::scan().unwrap_or_default()),
+        thread::spawn(|| oh_my_pi::scan().unwrap_or_default()),
         thread::spawn(|| kiro::scan().unwrap_or_default()),
         thread::spawn(|| cursor_agent::scan().unwrap_or_default()),
         thread::spawn(|| gemini::scan().unwrap_or_default()),
