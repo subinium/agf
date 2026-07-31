@@ -378,16 +378,23 @@ impl App {
                 }
             })
             .collect();
-        // Sort groups: most recent session first
+        // Sort groups: most recent session first. Use the MAX timestamp across
+        // each group's sessions, not `.first()` — `.first()` is only the newest
+        // when the list is in Time sort; in Name/Agent sort it is not, which
+        // ordered the groups incorrectly.
         self.groups.sort_by(|a, b| {
             let a_ts = a
                 .sessions
-                .first()
-                .map_or(0, |&i| self.sessions[i].timestamp);
+                .iter()
+                .map(|&i| self.sessions[i].timestamp)
+                .max()
+                .unwrap_or(0);
             let b_ts = b
                 .sessions
-                .first()
-                .map_or(0, |&i| self.sessions[i].timestamp);
+                .iter()
+                .map(|&i| self.sessions[i].timestamp)
+                .max()
+                .unwrap_or(0);
             b_ts.cmp(&a_ts)
         });
     }
