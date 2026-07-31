@@ -1,6 +1,6 @@
 [package]
 name = "agf"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 # 1.88 = let-chains (edition 2024); also covers usize::is_multiple_of (1.87).
 rust-version = "1.88"

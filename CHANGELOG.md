@@ -2,13 +2,30 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-31
+
 ### Added
 
-- **Yolop session support** — discover, preview, resume, and delete sessions from Yolop's platform-native session store. Current metadata supplies session titles, canonical repository names, timestamps, and concise worktree labels; older sessions fall back to first prompts and repository-name recovery.
+- **Oh My Pi (`omp`) session support** ([#56](https://github.com/subinium/agf/pull/56), by @Michelh91) — discover, preview, resume (`omp --resume <id>`), and delete Oh My Pi sessions under `~/.omp/agent/sessions/`, reusing the pi JSONL parser and excluding nested subagent transcripts.
+- **Yolop session support** ([#55](https://github.com/subinium/agf/pull/55), by @chaliy) — discover, preview, resume, and delete sessions from Yolop's platform-native session store. Current metadata supplies session titles, canonical repository names, timestamps, and concise worktree labels; older sessions fall back to first prompts and repository-name recovery.
+- **Contributor guide for adding an agent** — [`docs/adding-an-agent.md`](docs/adding-an-agent.md) documents the full wiring checklist, including the three `Vec` registrations the compiler can't enforce.
 
 ### Fixed
 
-- **Streaming startup keeps the initial cursor at the top** — when a fast scanner (commonly OpenCode) returned before a slower one (commonly Claude Code), the later merge preserved the fast scanner's initially selected session and pushed the cursor down the newly sorted list. The top row now follows incoming results until the user moves away from it, while explicit selections remain anchored.
+- **Bulk delete could delete the wrong sessions** ([#58](https://github.com/subinium/agf/pull/58)) — multi-select stored `sessions` Vec indices captured at toggle time, but a background scan landing mid-selection reorders that Vec, so confirming a bulk delete removed different sessions than the ones checked. Selections are now keyed by `(agent, session_id)` and resolved at delete time.
+- **`session_id` is shell-escaped in resume commands** ([#58](https://github.com/subinium/agf/pull/58)) — the id was wrapped in raw single quotes, so an id containing `'` broke the eval'd command and a crafted transcript filename could inject shell. It now goes through the shell-aware quoter (POSIX and PowerShell).
+- **Cursor and pi sorted by creation time, not last activity** ([#58](https://github.com/subinium/agf/pull/58)) — a session created long ago but used today sorted as old and sank below stale ones. Both now use the transcript's last-modified time (pi: the max of its header timestamp and mtime), matching the other agents. Oh My Pi inherits the pi fix.
+- **Grouped view ordered projects by the first session, not the newest** ([#58](https://github.com/subinium/agf/pull/58)) — correct only under Time sort; grouped view now keys on each group's max session timestamp.
+- **Codex timestamp overflow on corrupt data** ([#58](https://github.com/subinium/agf/pull/58)) — `updated_at * 1000` now saturates instead of wrapping to a garbage sort key.
+- **Streaming startup keeps the initial cursor at the top** ([#57](https://github.com/subinium/agf/pull/57), by @MilkClouds) — when a fast scanner (commonly OpenCode) returned before a slower one (commonly Claude Code), the later merge pushed the cursor down the newly sorted list. The top row now follows incoming results until the user moves away from it, while explicit selections remain anchored.
+
+### Performance
+
+- **Faster cold scan on large `~/.claude/projects` trees** ([#58](https://github.com/subinium/agf/pull/58)) — the Claude metadata scan read whole transcript bodies (up to 272 KB each) just to reach the tail for the off-by-default recap. The tail window is now 32 KB; measured read I/O dropped 62 MB → 29 MB (−53%) on a 714-file tree, with the recap unchanged.
+
+### Changed
+
+- **Dropped `panic = "abort"`** ([#58](https://github.com/subinium/agf/pull/58)) — restores `scan_all`'s per-thread panic isolation so one malformed session file can't abort the whole listing.
 
 ## [0.12.0] - 2026-06-11
 
