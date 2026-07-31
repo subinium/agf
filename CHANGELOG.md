@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Streaming startup keeps the initial cursor at the top** — when a fast scanner (commonly OpenCode) returned before a slower one (commonly Claude Code), the later merge preserved the fast scanner's initially selected session and pushed the cursor down the newly sorted list. The top row now follows incoming results until the user moves away from it, while explicit selections remain anchored.
+
 ## [0.12.0] - 2026-06-11
 
 ### Added

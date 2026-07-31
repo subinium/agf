@@ -192,10 +192,15 @@ impl App {
     }
 
     pub fn apply_sort(&mut self) {
-        // Snapshot the currently selected session's id so we can restore the
+        // Snapshot the selected session's identity so we can restore the
         // cursor position after the underlying Vec is reordered.
-        let pivot_id = self.selected_session().map(|s| s.session_id.clone());
+        let pivot = self
+            .selected_session()
+            .map(|s| (s.agent, s.session_id.clone()));
+        self.apply_sort_preserving(pivot);
+    }
 
+    fn apply_sort_preserving(&mut self, pivot: Option<(Agent, String)>) {
         match self.sort_mode {
             SortMode::Time => self
                 .sessions
@@ -230,11 +235,11 @@ impl App {
         self.update_filter();
 
         // Restore the selection to the same session after reordering.
-        if let Some(id) = pivot_id
+        if let Some((agent, id)) = pivot
             && let Some(new_pos) = self
                 .filtered_indices
                 .iter()
-                .position(|&i| self.sessions[i].session_id == id)
+                .position(|&i| self.sessions[i].agent == agent && self.sessions[i].session_id == id)
         {
             self.selected = new_pos;
             self.adjust_scroll();
@@ -465,6 +470,17 @@ impl App {
             return;
         };
 
+        // At the top of the browse list, follow the top-ranked session as
+        // streaming results arrive. Once the user has moved lower (or opened
+        // another mode), keep the chosen session anchored across refreshes.
+        // Capture before merging because filtered_indices still refer to the
+        // pre-merge Vec.
+        let pivot = if self.mode == Mode::Browse && self.selected == 0 {
+            None
+        } else {
+            self.selected_session()
+                .map(|s| (s.agent, s.session_id.clone()))
+        };
         let mut received_any = false;
         let mut channel_open = true;
         loop {
@@ -488,7 +504,7 @@ impl App {
         if received_any {
             // Re-apply current sort + filter so new sessions land in the
             // correct order and the cached column width is recomputed.
-            self.apply_sort();
+            self.apply_sort_preserving(pivot);
         }
     }
 
@@ -2682,5 +2698,98 @@ mod scroll_margin_tests {
         app.adjust_scroll();
         // Margin would push offset to 8, but max_offset = 15 - 10 = 5.
         assert_eq!(app.scroll_offset, 5);
+    }
+}
+
+#[cfg(test)]
+mod streaming_selection_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn session(agent: Agent, id: &str, timestamp: i64) -> Session {
+        Session {
+            agent,
+            session_id: id.into(),
+            project_name: "p".into(),
+            project_path: "/tmp/p".into(),
+            summaries: Vec::new(),
+            timestamp,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+        }
+    }
+
+    fn make_app(
+        sessions: Vec<Session>,
+        scan_rx: mpsc::Receiver<ScanResult>,
+        scanning_agents: HashSet<Agent>,
+    ) -> App {
+        App::new(
+            sessions,
+            None,
+            5,
+            false,
+            None,
+            Vec::new(),
+            crate::settings::Settings::default(),
+            Some(scan_rx),
+            scanning_agents,
+        )
+    }
+
+    #[test]
+    fn streaming_newer_sessions_keep_initial_cursor_at_top() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = make_app(
+            Vec::new(),
+            rx,
+            HashSet::from([Agent::OpenCode, Agent::ClaudeCode]),
+        );
+
+        tx.send(ScanResult {
+            agent: Agent::OpenCode,
+            sessions: vec![session(Agent::OpenCode, "opencode", 10)],
+        })
+        .unwrap();
+        app.ingest_scan_results();
+        assert_eq!(app.selected_session().unwrap().session_id, "opencode");
+
+        tx.send(ScanResult {
+            agent: Agent::ClaudeCode,
+            sessions: vec![session(Agent::ClaudeCode, "claude", 20)],
+        })
+        .unwrap();
+        app.ingest_scan_results();
+
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.selected_session().unwrap().session_id, "claude");
+    }
+
+    #[test]
+    fn streaming_newer_sessions_preserve_non_top_selection() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = make_app(
+            vec![
+                session(Agent::OpenCode, "newer-opencode", 20),
+                session(Agent::OpenCode, "chosen-opencode", 10),
+            ],
+            rx,
+            HashSet::from([Agent::ClaudeCode]),
+        );
+        app.apply_sort();
+        app.selected = 1;
+
+        tx.send(ScanResult {
+            agent: Agent::ClaudeCode,
+            sessions: vec![session(Agent::ClaudeCode, "claude", 30)],
+        })
+        .unwrap();
+        app.ingest_scan_results();
+
+        assert_eq!(
+            app.selected_session().unwrap().session_id,
+            "chosen-opencode"
+        );
     }
 }
