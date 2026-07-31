@@ -11,6 +11,16 @@ const SUMMARY_MAX_CHARS: usize = 120;
 const EVENT_HEAD_BYTES: u64 = 512 * 1024;
 const EVENT_TAIL_BYTES: u64 = 64 * 1024;
 
+/// How far ahead of "now" a session timestamp may claim to be before we stop
+/// believing it.
+///
+/// Every candidate is self-reported (`updated_at`, event `ts`) or comes from a
+/// filesystem whose clock we don't control, so a corrupt file or a skewed clock
+/// can name an arbitrary future instant — which would pin that session to the
+/// top of the time sort permanently. One day absorbs ordinary timezone/NTP
+/// skew while still rejecting the "year 2087" case.
+const MAX_FUTURE_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
+
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     scan_from(&crate::config::yolop_sessions_dir()?)
 }
@@ -40,7 +50,13 @@ fn scan_from(sessions_dir: &Path) -> Result<Vec<Session>, AgfError> {
     Ok(sessions)
 }
 
-fn valid_session_id(id: &str) -> bool {
+/// A Yolop session directory name: `session_` followed by 32 hex digits.
+///
+/// Also used by `delete::delete_yolop_session_from`, which joins the id onto
+/// the sessions directory and calls `remove_dir_all` — the id reaching that
+/// call can come from the on-disk cache rather than from this scanner, so the
+/// shape gets re-checked there rather than assumed.
+pub(crate) fn valid_session_id(id: &str) -> bool {
     id.strip_prefix("session_")
         .is_some_and(|suffix| suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()))
 }
@@ -89,7 +105,11 @@ fn parse_session(dir: &Path, session_id: String) -> Option<Session> {
         })
         .unwrap_or(0);
 
-    let events = read_head_tail(&log_path, EVENT_HEAD_BYTES, EVENT_TAIL_BYTES)?;
+    // An unreadable event log degrades the entry, it does not remove it:
+    // workspace.json already supplies the project, title and worktree, and
+    // `yolop --session <id>` still resumes. Propagating the failure with `?`
+    // would drop an otherwise-resumable session from the listing entirely.
+    let events = read_head_tail(&log_path, EVENT_HEAD_BYTES, EVENT_TAIL_BYTES).unwrap_or_default();
     let mut prompt_summaries = Vec::new();
     let mut event_title = None;
     let mut latest_ts = None;
@@ -136,9 +156,14 @@ fn parse_session(dir: &Path, session_id: String) -> Option<Session> {
 
     // Explicit metadata is useful for idle sessions, while the log mtime and
     // event timestamps keep active sessions fresh between metadata writes.
-    let timestamp = metadata_timestamp
-        .max(modified_ms(&log_path))
-        .max(latest_ts.unwrap_or(0));
+    let timestamp = newest_plausible(
+        [
+            metadata_timestamp,
+            modified_ms(&log_path),
+            latest_ts.unwrap_or(0),
+        ],
+        chrono::Utc::now().timestamp_millis(),
+    );
 
     Some(Session {
         agent: Agent::Yolop,
@@ -151,6 +176,19 @@ fn parse_session(dir: &Path, session_id: String) -> Option<Session> {
         worktree,
         recap: None,
     })
+}
+
+/// Newest candidate that isn't implausibly far in the future (see
+/// [`MAX_FUTURE_SKEW_MS`]). Falls back to `now` when every candidate is
+/// rejected, so such a session sorts as "just used" and then ages normally
+/// instead of staying pinned above everything forever.
+fn newest_plausible(candidates: [i64; 3], now: i64) -> i64 {
+    let ceiling = now.saturating_add(MAX_FUTURE_SKEW_MS);
+    candidates
+        .into_iter()
+        .filter(|&ts| ts <= ceiling)
+        .max()
+        .unwrap_or(now)
 }
 
 fn parse_timestamp(timestamp: &str) -> Option<i64> {
@@ -298,6 +336,17 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Backdate a file's mtime so the metadata timestamp is the newest
+    /// candidate (a freshly written file would otherwise carry "now").
+    fn backdate(path: &Path, unix_secs: u64) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs))
+            .unwrap();
+    }
+
     #[test]
     fn current_metadata_supplies_title_project_time_and_worktree_slug() {
         let root = temp_root("current-metadata");
@@ -312,7 +361,7 @@ mod tests {
                 "title":"Release   Yolop\nand Tuika",
                 "summary":"Prepare and publish both releases",
                 "created_at":"2026-07-10T11:00:00Z",
-                "updated_at":"2030-07-10T12:00:00Z",
+                "updated_at":"2026-07-30T12:00:00Z",
                 "worktree":{
                     "path":"/tmp/yolop/worktrees/session_generated",
                     "branch":"feat/release",
@@ -331,6 +380,7 @@ mod tests {
             ),
         )
         .unwrap();
+        backdate(&dir.join("events.jsonl"), 1_700_000_000);
 
         let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
 
@@ -344,7 +394,78 @@ mod tests {
             ]
         );
         assert_eq!(session.worktree.as_deref(), Some("release-new-version"));
-        assert_eq!(session.timestamp, 1_909_915_200_000);
+        // `updated_at` is newer than both the (backdated) log mtime and every
+        // event `ts`, so it wins.
+        assert_eq!(session.timestamp, rfc3339_ms("2026-07-30T12:00:00Z"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn rfc3339_ms(ts: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    /// Regression: an `updated_at` far in the future used to win the `max()`
+    /// outright and pin the session above every real session forever.
+    #[test]
+    fn implausible_future_metadata_does_not_pin_the_session_to_the_top() {
+        let root = temp_root("future-metadata");
+        let dir = root.join(SESSION_ID);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("workspace.json"),
+            r#"{"active_root":"/tmp/example","repo_root":"/tmp/example","updated_at":"2087-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("events.jsonl"), b"").unwrap();
+        backdate(&dir.join("events.jsonl"), 1_700_000_000);
+
+        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+
+        // The bogus value is discarded; the real log mtime is used instead.
+        assert_eq!(session.timestamp, 1_700_000_000_000);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn newest_plausible_falls_back_to_now_when_every_candidate_is_bogus() {
+        let now = 1_800_000_000_000;
+        let future = now + MAX_FUTURE_SKEW_MS * 10;
+        assert_eq!(newest_plausible([future, future, future], now), now);
+        // Inside the skew window the value is still trusted.
+        assert_eq!(
+            newest_plausible([now + 1000, 0, 0], now),
+            now + 1000,
+            "small skew must not be discarded"
+        );
+    }
+
+    /// An unreadable event log must degrade the entry, not remove it: the
+    /// session is still resumable and workspace.json still names the project.
+    #[test]
+    fn unreadable_event_log_still_yields_a_session() {
+        let root = temp_root("unreadable-log");
+        let dir = root.join(SESSION_ID);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("workspace.json"),
+            r#"{"active_root":"/tmp/example","repo_root":"/tmp/example","title":"Still here"}"#,
+        )
+        .unwrap();
+        // A directory named `events.jsonl` passes nothing but `is_file()` is
+        // false, so make it a real file we then make unreadable by content
+        // shape rather than permissions (portable across CI users).
+        fs::write(
+            dir.join("events.jsonl"),
+            b"\xff\xfe not utf-8 and no newline",
+        )
+        .unwrap();
+
+        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+
+        assert_eq!(session.project_name, "example");
+        assert_eq!(session.summaries, ["Still here"]);
         fs::remove_dir_all(root).unwrap();
     }
 

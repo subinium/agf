@@ -1,8 +1,7 @@
 use std::io::{self, IsTerminal, Write};
 
-use unicode_width::UnicodeWidthStr;
-
 use crate::model::Session;
+use crate::text;
 
 pub enum OutputFormat {
     Table,
@@ -78,7 +77,7 @@ fn print_table(sessions: &[Session]) {
 
     let max_project = sessions
         .iter()
-        .map(|s| UnicodeWidthStr::width(s.project_name.as_str()))
+        .map(|s| text::width(&s.project_name))
         .max()
         .unwrap_or(7)
         .clamp(7, 25);
@@ -120,13 +119,13 @@ fn print_table(sessions: &[Session]) {
     for (i, s) in sessions.iter().enumerate() {
         let path = s.display_path();
         let (r, g, b_val) = s.agent.color();
-        let project = format!("{:<max_project$}", truncate(&s.project_name, max_project));
-        let agent = format!("{:<max_agent$}", truncate(&s.agent.to_string(), max_agent));
-        let time = format!("{:<14}", s.time_display());
-        let branch = format!(
-            "{:<10}",
-            truncate(s.git_branch.as_deref().unwrap_or("—"), 10)
-        );
+        // `text::fit`, not `format!("{:<n$}", …)`: the column budget is in
+        // terminal columns but `{:<n$}` pads by char count, so a CJK project
+        // name would push every column after it out of alignment.
+        let project = text::fit(&s.project_name, max_project);
+        let agent = text::fit(&s.agent.to_string(), max_agent);
+        let time = text::fit(&s.time_display(), 14);
+        let branch = text::fit(s.git_branch.as_deref().unwrap_or("—"), 10);
         let num = format!("{:>3}", i + 1);
 
         let _ = writeln!(
@@ -168,33 +167,26 @@ fn print_json(sessions: &[Session]) {
 fn print_csv(sessions: &[Session]) {
     println!("project,agent,time,path,session_id,branch");
     for s in sessions {
+        // Every field goes through `csv_escape`. Branch names in particular
+        // may legally contain commas, which would silently shift every later
+        // column in the consuming spreadsheet/script.
         println!(
             "{},{},{},{},{},{}",
             csv_escape(&s.project_name),
-            s.agent,
-            s.time_display(),
+            csv_escape(&s.agent.to_string()),
+            csv_escape(&s.time_display()),
             csv_escape(&s.project_path),
-            s.session_id,
-            s.git_branch.as_deref().unwrap_or(""),
+            csv_escape(&s.session_id),
+            csv_escape(s.git_branch.as_deref().unwrap_or("")),
         );
     }
 }
 
 fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
+    if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max {
-        s.to_string()
-    } else {
-        let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{prefix}…")
     }
 }
 
@@ -212,4 +204,19 @@ pub fn filter_by_agent(sessions: Vec<Session>, agent_name: &str) -> Vec<Session>
                     .contains(&agent_lower)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_escape_quotes_every_separator_bearing_field() {
+        assert_eq!(csv_escape("plain"), "plain");
+        // Git allows commas in branch names; unquoted they shift the row.
+        assert_eq!(csv_escape("feat/a,b"), "\"feat/a,b\"");
+        assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_escape("two\nlines"), "\"two\nlines\"");
+        assert_eq!(csv_escape("cr\rlf"), "\"cr\rlf\"");
+    }
 }

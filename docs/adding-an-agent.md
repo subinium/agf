@@ -4,8 +4,8 @@
 plugin binaries, no config. Adding a new agent (harness) is a self-contained
 change: implement one scanner and register it in a handful of match arms. The
 compiler enforces most of the wiring — every `match self { Agent::… }` becomes
-non-exhaustive until you add the new arm — but three registrations live in
-plain `Vec`s the compiler can't check, so they're called out below.
+non-exhaustive until you add the new arm — but two registrations live in plain
+arrays/`Vec`s the compiler can't check, so they're called out below.
 
 Community integrations are welcome even if the agent isn't a "main" harness;
 keep them scoped like the existing ones (read-only scan, deletion limited to the
@@ -24,7 +24,14 @@ Say the new agent is `Foo`, CLI `foo`, sessions under `~/.foo/sessions/`.
      shell metacharacters.
 
 2. **`src/config.rs`** — add a `foo_sessions_dir()` (or `_dir()`) helper returning
-   the on-disk location. Use `dirs::` for platform-correct paths.
+   the on-disk location. Use `dirs::` for platform-correct paths, and
+   `AgfError::NoDataDir` (not `NoHomeDir`) when a `dirs::data_dir()` lookup fails.
+   Then add the `data_sources()` arm: the paths whose mtime decides cache
+   freshness.
+   - It must cover **every** file your scanner reads, not just its primary index —
+     a source you omit can change without invalidating the cache, so `agf` keeps
+     serving a stale payload. Within that constraint keep it narrow: each path is
+     stat-walked on every launch.
 
 3. **`src/scanner/foo.rs`** — implement `pub fn scan() -> Result<Vec<Session>, AgfError>`.
    - Return a `Session` per resumable session. Set `timestamp` (Unix **ms**) to the
@@ -37,23 +44,24 @@ Say the new agent is `Foo`, CLI `foo`, sessions under `~/.foo/sessions/`.
      `thread::spawn(|| foo::scan().unwrap_or_default())` line in `scan_all()`
      *(plain `Vec` — the compiler won't remind you)*.
 
-4. **`src/plugin.rs`** — add `Box::new(PluginAdapter(Agent::Foo))` to `all_plugins()`
-   *(plain `Vec` — not compiler-checked)*, then fill the `name()`, `scan()`, and
-   `data_sources()` arms. `data_sources()` returns the paths whose mtime decides
-   cache freshness — keep it as narrow as possible (a single file/db beats a whole
-   tree; see the perf note in `scanner/claude.rs`).
-
-5. **`src/cache.rs`** — add the `Agent::Foo => scanner::foo::scan().unwrap_or_default()`
+4. **`src/cache.rs`** — add the `Agent::Foo => scanner::foo::scan().unwrap_or_default()`
    arm in `start_stale_scan()`. Bump `CACHE_VERSION` only if the cached payload
    *shape* can change within a single released package version (a new agent key
    alone doesn't require it — the `agf_version` stamp forces a rescan on upgrade).
 
-6. **`src/delete.rs`** — add `Agent::Foo => delete_foo_session(session)` and
-   implement it. **Scope deletion to the one validated session** (match by id in
-   file content / a validated dir name); never delete by unvalidated path. Add a
-   test proving a sibling session survives.
+5. **`src/delete.rs`** — add the `Agent::Foo` arm in `delete_agent_sessions()` and
+   implement `delete_foo_sessions(ids: &HashSet<&str>)`.
+   - It receives a **batch**: bulk delete does one pass per agent, so do the walk
+     or open the database once and act on every id in `ids`.
+   - **Scope deletion to validated sessions** — match by id in file content or by a
+     validated directory name. `is_safe_session_id` already rejects traversal, but
+     if you join an id onto a path, re-check it against your own id format first
+     (see `delete_yolop_session_from`).
+   - Bound what you read: the id lives in a header, so use `read_first_line` /
+     `read_head_lines` rather than slurping transcripts.
+   - Add a test proving a sibling session survives.
 
-7. **Tests + docs** — unit-test the scanner against a fixture session, add a
+6. **Tests + docs** — unit-test the scanner against a fixture session, add a
    `resume_cmd` test, add a row to the *Supported agents* and storage tables in
    `README.md`, and add the CLI name to the Requirements list.
 

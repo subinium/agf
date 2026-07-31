@@ -46,6 +46,38 @@ pub(crate) fn read_first_line(path: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Read up to `max_lines` lines from the start of a file, reading at most
+/// `max_bytes` in total.
+///
+/// For JSONL session logs whose header record sits within the first handful of
+/// lines, this replaces a `read_to_string` of a transcript that can be tens of
+/// MB — the caller only ever looks at the head.
+pub(crate) fn read_head_lines(
+    path: &std::path::Path,
+    max_lines: usize,
+    max_bytes: u64,
+) -> Vec<String> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Read};
+
+    let Ok(file) = File::open(path) else {
+        return Vec::new();
+    };
+    let mut reader = BufReader::new(file).take(max_bytes);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    while lines.len() < max_lines {
+        line.clear();
+        // A non-UTF-8 line is an IO error here; stop rather than skip, since
+        // the header we are looking for precedes any binary garbage.
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => lines.push(line.trim().to_string()),
+        }
+    }
+    lines
+}
+
 /// Char-safe slice: take first `max` chars (never panics on UTF-8 boundaries).
 pub(crate) fn char_prefix(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
@@ -151,6 +183,10 @@ pub(crate) fn read_head_tail(
     })
 }
 
+/// `Default` is the "readable file, nothing in it" fallback: scanners that can
+/// still describe a session from other metadata use it so an unreadable log
+/// degrades the entry instead of dropping it from the listing.
+#[derive(Default)]
 pub(crate) struct HeadTail {
     pub head: String,
     pub tail: String,

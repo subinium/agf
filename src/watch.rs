@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::model::{Agent, Session};
 use crate::scanner;
+use crate::text;
 
 struct WatchState {
     sessions: Vec<Session>,
@@ -87,8 +88,11 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
             }
 
             // Render
-            let running_names: Vec<String> =
-                state.running_agents.iter().map(|a| a.to_string()).collect();
+            let running_names: Vec<String> = state
+                .running_agents
+                .iter()
+                .map(ToString::to_string)
+                .collect();
             let elapsed = state.last_refresh.elapsed().as_secs();
 
             let _ = ui.col(|ui| {
@@ -141,11 +145,11 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
                         let _ = ui.row(|ui| {
                             ui.styled(status.0.to_string(), slt::Style::new().fg(status.1).bg(bg));
                             ui.styled(
-                                format!("{:<14}", s.agent.to_string()),
+                                text::fit(&s.agent.to_string(), 14),
                                 slt::Style::new().fg(agent_color).bold().bg(bg),
                             );
                             ui.styled(
-                                format!("{:<20}", truncate(&s.project_name, 20)),
+                                text::fit(&s.project_name, 20),
                                 slt::Style::new().fg(slt::Color::Rgb(229, 229, 229)).bg(bg),
                             );
                             if let Some(branch) = &s.git_branch {
@@ -177,25 +181,27 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Which agent CLIs currently have a running process.
+///
+/// One `pgrep` spawn per candidate, so the candidate list is the *installed*
+/// agents rather than every agent `agf` knows about — probing for a CLI that
+/// isn't on this machine can never succeed. `output()` (not `status()`) is
+/// required: the child's stdout must be captured, or it would paint over the
+/// TUI. Note this runs on the refresh worker thread, not the render path.
 fn detect_running_agents() -> Vec<Agent> {
-    Agent::all()
-        .iter()
-        .copied()
-        .filter(|agent| {
-            std::process::Command::new("pgrep")
-                .args(["-x", agent.cli_name()])
-                .output()
-                .is_ok_and(|o| o.status.success())
-        })
-        .collect()
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max {
-        s.to_string()
-    } else {
-        let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{prefix}…")
+    let mut running = Vec::new();
+    for agent in crate::config::installed_agents() {
+        match std::process::Command::new("pgrep")
+            .args(["-x", agent.cli_name()])
+            .output()
+        {
+            Ok(output) if output.status.success() => running.push(agent),
+            // Ran, found nothing.
+            Ok(_) => {}
+            // `pgrep` itself is missing (Windows, minimal containers). Retrying
+            // it once per agent, every refresh tick, only burns process spawns.
+            Err(_) => break,
+        }
     }
+    running
 }

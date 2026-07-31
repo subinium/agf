@@ -247,11 +247,29 @@ fn find_state_db(codex_dir: &std::path::Path) -> Option<std::path::PathBuf> {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("state_") && n.ends_with(".sqlite"))
-                .unwrap_or(false)
+                .is_some_and(|n| n.starts_with("state_") && n.ends_with(".sqlite"))
         })
-        // Lexicographic max picks the latest db (state_5 > state_4 etc.).
-        .max()
+        // Rank by the numeric suffix, not the filename: lexicographic order
+        // puts `state_10.sqlite` *below* `state_9.sqlite`, which would silently
+        // start reading a superseded database the moment Codex reaches 10.
+        // An unparsable suffix sorts below every numbered db (`None < Some`)
+        // but is still eligible, so an unexpected name never empties the list.
+        .max_by(|a, b| {
+            state_db_index(a)
+                .cmp(&state_db_index(b))
+                .then_with(|| a.cmp(b))
+        })
+}
+
+/// Numeric suffix of a `state_<n>.sqlite` filename, or `None` if the name
+/// doesn't have that shape.
+fn state_db_index(path: &std::path::Path) -> Option<u64> {
+    path.file_name()
+        .and_then(|n| n.to_str())?
+        .strip_prefix("state_")?
+        .strip_suffix(".sqlite")?
+        .parse()
+        .ok()
 }
 
 /// Fallback: scan JSONL session files via walkdir (legacy format).
@@ -610,5 +628,65 @@ mod tests {
         assert_eq!(summaries.len(), 2);
         assert!(summaries.contains_key("a"));
         assert!(summaries.contains_key("b"));
+    }
+}
+
+#[cfg(test)]
+mod state_db_tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("agf-codex-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Regression: ranking by filename put `state_10.sqlite` *below*
+    /// `state_9.sqlite`, so the scanner would silently start reading a
+    /// superseded database once Codex's schema counter reached double digits.
+    #[test]
+    fn find_state_db_ranks_by_number_not_lexicographically() {
+        let dir = temp_dir("state-order");
+        for name in ["state_4.sqlite", "state_9.sqlite", "state_10.sqlite"] {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+
+        let found = find_state_db(&dir).unwrap();
+
+        assert_eq!(found.file_name().unwrap(), "state_10.sqlite");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn find_state_db_still_returns_an_unnumbered_db_when_it_is_all_there_is() {
+        let dir = temp_dir("state-unnumbered");
+        std::fs::write(dir.join("state_backup.sqlite"), b"").unwrap();
+        std::fs::write(dir.join("history.jsonl"), b"").unwrap();
+
+        let found = find_state_db(&dir).unwrap();
+
+        assert_eq!(found.file_name().unwrap(), "state_backup.sqlite");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn find_state_db_prefers_a_numbered_db_over_an_unnumbered_one() {
+        let dir = temp_dir("state-mixed");
+        std::fs::write(dir.join("state_backup.sqlite"), b"").unwrap();
+        std::fs::write(dir.join("state_2.sqlite"), b"").unwrap();
+
+        let found = find_state_db(&dir).unwrap();
+
+        assert_eq!(found.file_name().unwrap(), "state_2.sqlite");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn find_state_db_returns_none_without_any_state_file() {
+        let dir = temp_dir("state-none");
+        std::fs::write(dir.join("history.jsonl"), b"").unwrap();
+        assert!(find_state_db(&dir).is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

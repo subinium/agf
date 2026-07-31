@@ -195,7 +195,9 @@ pub fn setup() -> anyhow::Result<()> {
         content.push('\n');
     }
     content.push_str(&format!("\n# agf - AI Agent Session Finder\n{init_line}\n"));
-    fs::write(&rc_file, content)?;
+    // Atomic: this rewrites the user's shell rc in full, and a torn write here
+    // would leave them with a broken (or empty) login shell.
+    crate::fsx::write_atomic(&rc_file, content.as_bytes())?;
 
     eprintln!("Added to {}", rc_file.display());
     eprintln!("Restart your shell or run: source {}", rc_file.display());

@@ -106,11 +106,9 @@ impl Settings {
             existing.remove("show_recap");
         }
 
-        let content = existing.to_string();
-        let tmp = path.with_extension("toml.tmp");
-        if fs::write(&tmp, &content).is_ok() {
-            let _ = fs::rename(&tmp, &path);
-        }
+        // Best-effort: losing a pin or a search-scope toggle is not worth
+        // interrupting the user's session over.
+        let _ = crate::fsx::write_atomic(&path, existing.to_string().as_bytes());
     }
 }
 

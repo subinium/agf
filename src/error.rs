@@ -13,4 +13,10 @@ pub enum AgfError {
 
     #[error("No home directory found")]
     NoHomeDir,
+
+    /// Platform data dir (`dirs::data_dir` / `dirs::data_local_dir`) is
+    /// unavailable. Distinct from `NoHomeDir` so the message doesn't claim the
+    /// home directory is missing when it isn't.
+    #[error("No data directory found")]
+    NoDataDir,
 }

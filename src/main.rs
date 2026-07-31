@@ -3,14 +3,15 @@ mod cache;
 mod config;
 mod delete;
 mod error;
+mod fsx;
 mod fuzzy;
 mod list;
 mod model;
-mod plugin;
 mod scanner;
 mod settings;
 mod shell;
 mod stats;
+mod text;
 mod tui;
 mod watch;
 
@@ -212,10 +213,10 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
 
-        let scan_rx = if !stale_agents.is_empty() {
-            Some(cache::start_stale_scan(&stale_agents))
-        } else {
+        let scan_rx = if stale_agents.is_empty() {
             None
+        } else {
+            Some(cache::start_stale_scan(&stale_agents))
         };
         let scanning_agents: std::collections::HashSet<model::Agent> =
             stale_agents.iter().copied().collect();
@@ -231,7 +232,7 @@ fn main() -> anyhow::Result<()> {
 
         let cwd = std::env::current_dir()
             .ok()
-            .and_then(|p| p.to_str().map(|s| s.to_string()));
+            .and_then(|p| p.to_str().map(str::to_owned));
         let include_summaries = config.search_scope == "all";
         let mut app = tui::App::new(
             sessions,

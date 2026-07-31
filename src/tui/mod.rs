@@ -8,6 +8,11 @@ use crate::cache::ScanResult;
 use crate::config::installed_agents;
 use crate::fuzzy::FuzzyMatcher;
 use crate::model::{Action, Agent, Session, SortMode};
+use crate::text::{self, truncate_flat as truncate_str};
+
+/// Width of the agent-name column, shared by the row builder and the layout
+/// arithmetic that reserves space for it.
+const AGENT_COL_WIDTH: usize = 14;
 
 // Color constants
 const HIGHLIGHT_BG: slt::Color = slt::Color::Rgb(59, 59, 59);
@@ -68,12 +73,16 @@ pub struct App {
     pub scroll_offset: usize,
     pub viewport_height: usize,
     pub sort_mode: SortMode,
-    /// Multi-select set for bulk delete, keyed by session identity
-    /// `(agent, session_id)` — NOT by `sessions` Vec index. A background scan
-    /// can reorder/replace `sessions` between selection and delete (every
-    /// render frame drains scan results), so an index-keyed set would resolve
-    /// to the wrong sessions at delete time and destroy the wrong data.
-    pub selected_set: HashSet<(Agent, String)>,
+    /// Multi-select for bulk delete, keyed by session identity — NOT by
+    /// `sessions` Vec index. A background scan can reorder/replace `sessions`
+    /// between selection and delete (every render frame drains scan results),
+    /// so an index-keyed set would resolve to the wrong sessions at delete
+    /// time and destroy the wrong data.
+    ///
+    /// Grouped by agent so membership tests borrow (`HashSet<String>::contains`
+    /// accepts `&str`) instead of allocating a key per row per frame, and so
+    /// the delete pass gets its per-agent batches for free.
+    pub selected_set: HashMap<Agent, HashSet<String>>,
     pub summary_offsets: HashMap<String, usize>,
     pub summary_search_count: usize,
     pub include_summaries: bool,
@@ -170,7 +179,7 @@ impl App {
             scroll_offset: 0,
             viewport_height: 4,
             sort_mode: SortMode::Time,
-            selected_set: HashSet::new(),
+            selected_set: HashMap::new(),
             summary_offsets: HashMap::new(),
             summary_search_count,
             include_summaries,
@@ -301,6 +310,41 @@ impl App {
         self.filtered_indices
             .get(self.selected)
             .and_then(|&i| self.sessions.get(i))
+    }
+
+    /// Total number of sessions checked for bulk delete.
+    fn selection_count(&self) -> usize {
+        self.selected_set.values().map(HashSet::len).sum()
+    }
+
+    /// Is this session checked for bulk delete? Borrows the id — no allocation
+    /// on the per-row render path.
+    fn is_checked(&self, session: &Session) -> bool {
+        self.selected_set
+            .get(&session.agent)
+            .is_some_and(|ids| ids.contains(session.session_id.as_str()))
+    }
+
+    fn toggle_checked(&mut self, agent: Agent, session_id: &str) {
+        let ids = self.selected_set.entry(agent).or_default();
+        if !ids.remove(session_id) {
+            ids.insert(session_id.to_string());
+        }
+        if ids.is_empty() {
+            self.selected_set.remove(&agent);
+        }
+    }
+
+    /// Rebuild the per-agent counts from `sessions`.
+    ///
+    /// Cheaper to be right than to be incremental: `max_sessions` truncation
+    /// and failed deletes both make an adjust-by-delta count drift away from
+    /// the list it labels.
+    fn recount_agents(&mut self) {
+        self.agent_counts.clear();
+        for session in &self.sessions {
+            *self.agent_counts.entry(session.agent).or_insert(0) += 1;
+        }
     }
 
     pub fn cycle_summary(&mut self, forward: bool) {
@@ -524,19 +568,17 @@ impl App {
     /// responsible for re-sorting / re-filtering.
     fn merge_agent_sessions(&mut self, agent: Agent, new_sessions: Vec<Session>) {
         self.sessions.retain(|s| s.agent != agent);
-        // agent_counts: subtract old, add new.
-        self.agent_counts.remove(&agent);
-        if !new_sessions.is_empty() {
-            self.agent_counts.insert(agent, new_sessions.len());
-        }
-        let max = self.settings.max_sessions;
         self.sessions.extend(new_sessions);
-        if let Some(max) = max {
+        if let Some(max) = self.settings.max_sessions {
             // Keep most-recent first so truncation drops the tail.
             self.sessions
                 .sort_by_key(|s| std::cmp::Reverse(s.timestamp));
             self.sessions.truncate(max);
         }
+        // Recount *after* truncating. Counting the incoming batch instead left
+        // the agent badge claiming sessions that `max_sessions` had just
+        // dropped off the end of the list.
+        self.recount_agents();
     }
 
     pub fn run(&mut self) -> anyhow::Result<Option<String>> {
@@ -1123,8 +1165,9 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.action_index = (app.action_index + 1) % action_count;
     }
 
-    for i in 0..action_count.min(9) {
-        let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
+    // Iterate the digit chars themselves: deriving them via `b'1' + i as u8`
+    // needs a lossy usize->u8 cast to say something the range already states.
+    for (i, key) in ('1'..='9').enumerate().take(action_count.min(9)) {
         if ui.key(key) {
             app.action_index = i;
             // Number-key Resume should mirror the Enter flow: open the mode
@@ -1343,8 +1386,9 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         app.agent_index = (app.agent_index + 1) % option_count;
     }
 
-    for i in 0..option_count.min(9) {
-        let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
+    // Iterate the digit chars themselves: deriving them via `b'1' + i as u8`
+    // needs a lossy usize->u8 cast to say something the range already states.
+    for (i, key) in ('1'..='9').enumerate().take(option_count.min(9)) {
         if ui.key(key) {
             app.agent_index = i;
             dispatch_agent_option(ui, app, result);
@@ -1386,8 +1430,8 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
                 };
                 let indicator = format!(" {}) ", i + 1);
                 let preview = if let Some(s) = app.selected_session() {
-                    let base = opt.agent.new_session_cmd();
-                    crate::shell::CommandShell::from_env().cd_and(&s.display_path(), base)
+                    let shell = crate::shell::CommandShell::from_env();
+                    action::preview_cd_and(&shell, s, opt.agent.new_session_cmd())
                 } else {
                     String::new()
                 };
@@ -1487,8 +1531,9 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         app.mode_index = (app.mode_index + 1) % option_count;
     }
 
-    for i in 0..option_count.min(9) {
-        let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
+    // Iterate the digit chars themselves: deriving them via `b'1' + i as u8`
+    // needs a lossy usize->u8 cast to say something the range already states.
+    for (i, key) in ('1'..='9').enumerate().take(option_count.min(9)) {
         if ui.key(key) {
             app.mode_index = i;
             dispatch_mode_option(ui, app, result);
@@ -1597,8 +1642,9 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         app.resume_mode_index = (app.resume_mode_index + 1) % option_count;
     }
 
-    for i in 0..option_count.min(9) {
-        let key = char::from_u32((b'1' + i as u8) as u32).unwrap_or('1');
+    // Iterate the digit chars themselves: deriving them via `b'1' + i as u8`
+    // needs a lossy usize->u8 cast to say something the range already states.
+    for (i, key) in ('1'..='9').enumerate().take(option_count.min(9)) {
         if ui.key(key) {
             app.resume_mode_index = i;
             dispatch_resume_mode(ui, app, result);
@@ -1706,14 +1752,13 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
     }
 
     if ui.key(' ') {
-        if let Some(key) = app
+        if let Some((agent, id)) = app
             .filtered_indices
             .get(app.selected)
             .and_then(|&i| app.sessions.get(i))
             .map(|s| (s.agent, s.session_id.clone()))
-            && !app.selected_set.remove(&key)
         {
-            app.selected_set.insert(key);
+            app.toggle_checked(agent, &id);
         }
         if !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
             app.selected += 1;
@@ -1736,7 +1781,7 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
                 ui.line(|ui| {
                     ui.text(" DELETE MODE").fg(RED).bold();
                     if !app.selected_set.is_empty() {
-                        ui.text(format!("  ({} selected)", app.selected_set.len()))
+                        ui.text(format!("  ({} selected)", app.selection_count()))
                             .fg(RED);
                     }
                 });
@@ -1747,7 +1792,7 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
         });
 
         ui.line(|ui| {
-            ui.text(format!(" {} selected", app.selected_set.len()))
+            ui.text(format!(" {} selected", app.selection_count()))
                 .fg(RED)
                 .bold();
         });
@@ -1788,33 +1833,42 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
     if ui.key_code(slt::KeyCode::Enter) {
         if app.delete_index == 0 {
             if is_bulk {
-                // Resolve the selected (agent, session_id) keys to sessions at
-                // delete time. Keying by identity — not by Vec index captured at
-                // selection time — is what keeps this correct when a background
-                // scan reordered `sessions` in between.
-                let selected: HashSet<(Agent, String)> = app.selected_set.drain().collect();
-                let mut deleted: HashSet<(Agent, String)> = HashSet::new();
-                for s in &app.sessions {
-                    let key = (s.agent, s.session_id.clone());
-                    // Only mark the row deleted when the on-disk delete actually
-                    // succeeded; failed deletes stay visible.
-                    if selected.contains(&key) && crate::delete::delete_session(s).is_ok() {
-                        deleted.insert(key);
+                // Resolve identities to sessions at delete time. Keying by
+                // identity — not by a Vec index captured at selection time — is
+                // what keeps this correct when a background scan reordered
+                // `sessions` in between.
+                //
+                // Narrowed to what is currently listed first: a session that
+                // was scanned away since it was checked is no longer something
+                // the user can see, so it is not something we delete.
+                let mut targets: HashMap<Agent, HashSet<String>> = HashMap::new();
+                for session in &app.sessions {
+                    if app.is_checked(session) {
+                        targets
+                            .entry(session.agent)
+                            .or_default()
+                            .insert(session.session_id.clone());
                     }
                 }
-                for key in &deleted {
-                    decrement_agent_count(&mut app.agent_counts, key.0);
-                }
-                app.sessions
-                    .retain(|s| !deleted.contains(&(s.agent, s.session_id.clone())));
+                app.selected_set.clear();
+
+                // One filesystem/database pass per agent, not per session.
+                // Only agents whose pass succeeded come back, so a failed
+                // delete leaves its rows visible.
+                let deleted = crate::delete::delete_selection(&targets);
+                app.sessions.retain(|s| {
+                    !deleted
+                        .get(&s.agent)
+                        .is_some_and(|ids| ids.contains(s.session_id.as_str()))
+                });
+                app.recount_agents();
                 app.update_filter();
             } else if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
                 // Only drop the row from the UI when the on-disk delete
                 // actually succeeded; a failed delete stays visible.
                 if crate::delete::delete_session(&app.sessions[idx]).is_ok() {
-                    let agent = app.sessions[idx].agent;
                     app.sessions.remove(idx);
-                    decrement_agent_count(&mut app.agent_counts, agent);
+                    app.recount_agents();
                 }
                 app.update_filter();
             }
@@ -1897,17 +1951,16 @@ fn render_single_delete_confirm(ui: &mut slt::Context, app: &App) {
 }
 
 fn render_bulk_delete_confirm(ui: &mut slt::Context, app: &App) {
-    let count = app.selected_set.len();
+    // Names come from the listed sessions, so the confirmation shows exactly
+    // the rows the delete will act on (checked sessions that have since been
+    // scanned away are skipped by both).
     let mut names: Vec<String> = app
-        .selected_set
+        .sessions
         .iter()
-        .filter_map(|(agent, id)| {
-            app.sessions
-                .iter()
-                .find(|s| s.agent == *agent && &s.session_id == id)
-        })
+        .filter(|s| app.is_checked(s))
         .map(|s| s.project_name.clone())
         .collect();
+    let count = names.len();
     names.sort();
 
     let _ = ui.col(|ui| {
@@ -2325,9 +2378,7 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
         };
 
         if bulk_mode {
-            let is_checked = app
-                .selected_set
-                .contains(&(session.agent, session.session_id.clone()));
+            let is_checked = app.is_checked(session);
             let indicator = match (is_selected, is_checked) {
                 (true, true) => ">[x] ",
                 (true, false) => ">[ ] ",
@@ -2428,27 +2479,24 @@ fn render_session_list_compact(ui: &mut slt::Context, app: &App) {
                 indicator.to_string(),
                 slt::Style::new().fg(slt::Color::White).bg(bg),
             );
+            // `text::fit`, not `{:<n$}`: these are terminal columns, and
+            // `{:<n$}` pads by char count, so a CJK project name here skewed
+            // every column to its right.
             ui.styled(
-                format!("{:<14}", session.agent.to_string()),
+                text::fit(&session.agent.to_string(), AGENT_COL_WIDTH),
                 slt::Style::new()
                     .fg(agent_color(session.agent))
                     .bold()
                     .bg(bg),
             );
             ui.styled(
-                format!("{:<20}", truncate_str(&session.project_name, 20)),
+                text::fit(&session.project_name, 20),
                 slt::Style::new().fg(BRIGHT_WHITE).bold().bg(bg),
             );
             if let Some(wt) = &session.worktree {
-                ui.styled(
-                    format!("{:<8}", truncate_str(wt, 8)),
-                    slt::Style::new().fg(CYAN).bg(bg),
-                );
+                ui.styled(text::fit(wt, 8), slt::Style::new().fg(CYAN).bg(bg));
             } else if let Some(branch) = &session.git_branch {
-                ui.styled(
-                    format!("{:<8}", truncate_str(branch, 8)),
-                    slt::Style::new().fg(GREEN_400).bg(bg),
-                );
+                ui.styled(text::fit(branch, 8), slt::Style::new().fg(GREEN_400).bg(bg));
             } else {
                 ui.styled("        ", slt::Style::new().bg(bg));
             }
@@ -2473,7 +2521,7 @@ fn build_session_row(
 ) -> Vec<StyledChunk> {
     let mut chunks: Vec<StyledChunk> = Vec::new();
 
-    let agent_label = format!("{:<14}", session.agent.to_string());
+    let agent_label = text::fit(&session.agent.to_string(), AGENT_COL_WIDTH);
     chunks.push((
         agent_label,
         slt::Style::new()
@@ -2494,18 +2542,16 @@ fn build_session_row(
     let git_info_width = git_info_str.as_deref().map_or(0, UnicodeWidthStr::width);
 
     // Use fixed column width for project name (padded to align columns)
-    let fixed_left = indicator_width + 14;
+    let fixed_left = indicator_width + AGENT_COL_WIDTH;
     let max_proj =
         total_width.saturating_sub(fixed_left + right_display_width + git_info_width + 4);
     let col_width = name_col_width.min(max_proj);
     let proj_display = if col_width == 0 {
         String::new()
-    } else if UnicodeWidthStr::width(session.project_name.as_str()) > col_width {
+    } else if text::width(&session.project_name) > col_width {
         truncate_str(&session.project_name, col_width)
     } else {
-        let name_width = UnicodeWidthStr::width(session.project_name.as_str());
-        let pad = col_width.saturating_sub(name_width);
-        format!("{}{}", session.project_name, " ".repeat(pad))
+        text::pad(&session.project_name, col_width)
     };
 
     if let Some(positions) = match_positions {
@@ -2579,18 +2625,23 @@ fn render_chunks(ui: &mut slt::Context, chunks: Vec<StyledChunk>) {
 }
 
 fn highlight_text(
-    text: &str,
+    source: &str,
     positions: &[u32],
     offset: usize,
     bg: slt::Color,
 ) -> Vec<StyledChunk> {
+    // `fuzzy::filter` hands back sorted, deduplicated positions, so probe them
+    // with a binary search rather than the linear `contains` this used to do
+    // once per character, per row, per frame.
+    let is_match =
+        |i: usize| u32::try_from(i + offset).is_ok_and(|pos| positions.binary_search(&pos).is_ok());
+
     let mut chunks = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
+    let chars: Vec<char> = source.chars().collect();
 
     let mut i = 0;
     while i < chars.len() {
-        let global_pos = (i + offset) as u32;
-        if positions.contains(&global_pos) {
+        if is_match(i) {
             chunks.push((
                 chars[i].to_string(),
                 slt::Style::new().fg(YELLOW).bold().underline().bg(bg),
@@ -2598,7 +2649,7 @@ fn highlight_text(
             i += 1;
         } else {
             let start = i;
-            while i < chars.len() && !positions.contains(&((i + offset) as u32)) {
+            while i < chars.len() && !is_match(i) {
                 i += 1;
             }
             let normal: String = chars[start..i].iter().collect();
@@ -2607,59 +2658,6 @@ fn highlight_text(
     }
 
     chunks
-}
-
-/// Decrement the per-agent session count after a delete. Removes the entry
-/// when the count drops to zero so `agents_with_sessions` stops listing it.
-fn decrement_agent_count(counts: &mut HashMap<Agent, usize>, agent: Agent) {
-    if let Some(n) = counts.get_mut(&agent) {
-        *n = n.saturating_sub(1);
-        if *n == 0 {
-            counts.remove(&agent);
-        }
-    }
-}
-
-fn truncate_str(s: &str, max_width: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-
-    let normalized;
-    let s = if s.contains(['\n', '\r', '\t']) {
-        normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
-        normalized.as_str()
-    } else {
-        s
-    };
-
-    let mut width = 0;
-    let mut end = 0;
-
-    for (i, ch) in s.char_indices() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width > max_width {
-            break;
-        }
-        width += ch_width;
-        end = i + ch.len_utf8();
-    }
-
-    if end >= s.len() {
-        s.to_string()
-    } else if max_width > 3 {
-        let mut w = 0;
-        let mut e = 0;
-        for (i, ch) in s.char_indices() {
-            let ch_width = ch.width().unwrap_or(0);
-            if w + ch_width > max_width - 3 {
-                break;
-            }
-            w += ch_width;
-            e = i + ch.len_utf8();
-        }
-        format!("{}...", &s[..e])
-    } else {
-        s[..end].to_string()
-    }
 }
 
 #[cfg(test)]
@@ -2818,5 +2816,130 @@ mod streaming_selection_tests {
             app.selected_session().unwrap().session_id,
             "chosen-opencode"
         );
+    }
+}
+
+#[cfg(test)]
+mod bulk_selection_tests {
+    use super::*;
+
+    fn session(agent: Agent, id: &str, timestamp: i64) -> Session {
+        Session {
+            agent,
+            session_id: id.into(),
+            project_name: "p".into(),
+            project_path: "/tmp/p".into(),
+            summaries: Vec::new(),
+            timestamp,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+        }
+    }
+
+    fn app_with(sessions: Vec<Session>, settings: crate::settings::Settings) -> App {
+        App::new(
+            sessions,
+            None,
+            5,
+            false,
+            None,
+            Vec::new(),
+            settings,
+            None,
+            HashSet::new(),
+        )
+    }
+
+    #[test]
+    fn toggling_checks_and_unchecks_by_identity() {
+        let mut app = app_with(
+            vec![
+                session(Agent::ClaudeCode, "shared-id", 30),
+                session(Agent::Codex, "shared-id", 20),
+            ],
+            crate::settings::Settings::default(),
+        );
+
+        app.toggle_checked(Agent::Codex, "shared-id");
+
+        // Same session_id, different agent: only the Codex row is checked.
+        assert!(!app.is_checked(&app.sessions[0]));
+        assert!(app.is_checked(&app.sessions[1]));
+        assert_eq!(app.selection_count(), 1);
+
+        app.toggle_checked(Agent::Codex, "shared-id");
+        assert!(!app.is_checked(&app.sessions[1]));
+        assert_eq!(app.selection_count(), 0);
+        // The now-empty per-agent bucket is dropped, so `is_empty()` (which
+        // drives "am I in bulk mode") stays truthful.
+        assert!(app.selected_set.is_empty());
+    }
+
+    #[test]
+    fn selection_count_sums_across_agents() {
+        let mut app = app_with(
+            vec![
+                session(Agent::ClaudeCode, "a", 30),
+                session(Agent::ClaudeCode, "b", 20),
+                session(Agent::Codex, "c", 10),
+            ],
+            crate::settings::Settings::default(),
+        );
+
+        app.toggle_checked(Agent::ClaudeCode, "a");
+        app.toggle_checked(Agent::ClaudeCode, "b");
+        app.toggle_checked(Agent::Codex, "c");
+
+        assert_eq!(app.selection_count(), 3);
+    }
+
+    /// Regression: the incoming batch's length was recorded as the agent count
+    /// *before* `max_sessions` truncation, so the agent badge advertised
+    /// sessions that had just been dropped off the end of the list.
+    #[test]
+    fn merge_recounts_agents_after_max_sessions_truncation() {
+        let settings = crate::settings::Settings {
+            max_sessions: Some(2),
+            ..crate::settings::Settings::default()
+        };
+        let mut app = app_with(vec![session(Agent::Codex, "codex-new", 100)], settings);
+
+        app.merge_agent_sessions(
+            Agent::ClaudeCode,
+            vec![
+                session(Agent::ClaudeCode, "claude-1", 90),
+                session(Agent::ClaudeCode, "claude-2", 80),
+                session(Agent::ClaudeCode, "claude-3", 70),
+            ],
+        );
+
+        // Truncated to 2: codex-new (100) + claude-1 (90).
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.agent_counts.get(&Agent::ClaudeCode), Some(&1));
+        assert_eq!(app.agent_counts.get(&Agent::Codex), Some(&1));
+        assert_eq!(
+            app.agent_counts.values().sum::<usize>(),
+            app.sessions.len(),
+            "counts must always sum to the list they label"
+        );
+    }
+
+    #[test]
+    fn recount_drops_agents_with_no_remaining_sessions() {
+        let mut app = app_with(
+            vec![
+                session(Agent::ClaudeCode, "a", 30),
+                session(Agent::Codex, "b", 20),
+            ],
+            crate::settings::Settings::default(),
+        );
+        app.sessions.retain(|s| s.agent != Agent::Codex);
+        app.recount_agents();
+
+        // `agents_with_sessions` filters on presence, so a zero-count entry
+        // would leave Codex selectable in the Tab filter cycle.
+        assert_eq!(app.agent_counts.get(&Agent::Codex), None);
+        assert_eq!(app.agents_with_sessions(), vec![Agent::ClaudeCode]);
     }
 }

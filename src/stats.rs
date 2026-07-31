@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 
 use crate::model::{Agent, Session};
+use crate::text;
 
 pub fn print_stats(sessions: &[Session], json: bool) {
     if json {
@@ -98,13 +99,10 @@ fn print_text(sessions: &[Session]) {
         let filled = filled.max(if *count > 0 { 1 } else { 0 });
         let empty = bar_width.saturating_sub(filled);
         let pct = (*count as f64 / total as f64 * 100.0) as u32;
-        let name = agent.to_string();
-        let pad = col_width.saturating_sub(name.len());
         let _ = writeln!(
             out,
-            "   {}{} {} {:>3} {:>3}%",
-            a.rgb(r, g, b, &name),
-            " ".repeat(pad),
+            "   {} {} {:>3} {:>3}%",
+            a.rgb(r, g, b, &text::fit(&agent.to_string(), col_width)),
             a.bar_rgb(r, g, b, filled, empty),
             a.bold(&count.to_string()),
             pct,
@@ -135,25 +133,26 @@ fn print_text(sessions: &[Session]) {
     project_list.truncate(10);
     let max_proj_count = project_list.first().map(|(_, c, _)| *c).unwrap_or(1);
 
-    let max_name_len = project_list
+    // Terminal columns, not bytes: `"프로젝트".len()` is 12 while the name
+    // occupies 8 columns, which used to over-measure the column and then
+    // saturate the per-row padding to zero, so every bar started at a
+    // different offset.
+    let max_name_width = project_list
         .iter()
-        .map(|(n, _, _)| n.len())
+        .map(|(n, _, _)| text::width(n))
         .max()
         .unwrap_or(10)
         .min(22);
 
     for (name, count, agent) in &project_list {
         let (r, g, b) = agent.color();
-        let display = truncate(name, max_name_len);
         let filled = (count * bar_width) / max_proj_count;
         let filled = filled.max(if *count > 0 { 1 } else { 0 });
         let empty = bar_width.saturating_sub(filled);
-        let pad = max_name_len.saturating_sub(display.len());
         let _ = writeln!(
             out,
-            "   {}{} {} {:>3}",
-            a.bold(&display),
-            " ".repeat(pad),
+            "   {} {} {:>3}",
+            a.bold(&text::fit(name, max_name_width)),
             a.bar_rgb(r, g, b, filled, empty),
             count,
         );
@@ -202,12 +201,10 @@ fn print_text(sessions: &[Session]) {
         let filled = (count * bar_width).checked_div(max_time).unwrap_or(0);
         let filled = filled.max(if *count > 0 { 1 } else { 0 });
         let empty = bar_width.saturating_sub(filled);
-        let pad = 12usize.saturating_sub(label.len());
         let _ = writeln!(
             out,
-            "   {}{} {} {:>3}",
-            a.dim(label),
-            " ".repeat(pad),
+            "   {} {} {:>3}",
+            a.dim(&text::fit(label, 12)),
             a.bar_rgb(*r, *g, *b, filled, empty),
             count,
         );
@@ -262,15 +259,5 @@ fn print_json(sessions: &[Session]) {
     });
     if let Ok(s) = serde_json::to_string_pretty(&json) {
         println!("{s}");
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max {
-        s.to_string()
-    } else {
-        let prefix: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{prefix}…")
     }
 }

@@ -44,7 +44,7 @@ pub fn hermes_dir() -> Result<PathBuf, AgfError> {
 pub fn yolop_sessions_dir() -> Result<PathBuf, AgfError> {
     dirs::data_dir()
         .map(|d| d.join("yolop").join("sessions"))
-        .ok_or(AgfError::NoHomeDir)
+        .ok_or(AgfError::NoDataDir)
 }
 
 pub fn kiro_data_dir() -> Result<PathBuf, AgfError> {
@@ -53,7 +53,47 @@ pub fn kiro_data_dir() -> Result<PathBuf, AgfError> {
     // Linux: ~/.local/share/kiro-cli/
     dirs::data_local_dir()
         .map(|d| d.join("kiro-cli"))
-        .ok_or(AgfError::NoHomeDir)
+        .ok_or(AgfError::NoDataDir)
+}
+
+/// Paths whose newest mtime decides whether `agent`'s cache entry is still
+/// fresh (see `cache::load_cache`).
+///
+/// These must cover **every** file the agent's scanner reads, not just its
+/// primary index: a source the scanner consults but this list omits can change
+/// without invalidating the cache, so the TUI serves a stale payload until some
+/// unrelated file happens to move. Keep each entry as narrow as the scanner
+/// allows — every path here is walked (stat-only) on each launch.
+pub fn data_sources(agent: Agent) -> Vec<PathBuf> {
+    match agent {
+        // `projects/` is load-bearing, not decorative: the scanner reads
+        // `projects/*/<id>.jsonl` for the worktree label, the `aiTitle`, the
+        // `away_summary` recap and the orphan filter. Recaps in particular are
+        // appended to the transcript *after* the last prompt, so history.jsonl
+        // alone would keep serving a one-cycle-stale recap forever.
+        Agent::ClaudeCode => claude_dir()
+            .map(|d| vec![d.join("history.jsonl"), d.join("projects")])
+            .unwrap_or_default(),
+        Agent::Codex => codex_dir().map(|d| vec![d]).unwrap_or_default(),
+        Agent::OpenCode => opencode_data_dir()
+            .map(|d| vec![d.join("opencode.db")])
+            .unwrap_or_default(),
+        Agent::Pi => pi_sessions_dir().map(|d| vec![d]).unwrap_or_default(),
+        Agent::OhMyPi => oh_my_pi_sessions_dir().map(|d| vec![d]).unwrap_or_default(),
+        Agent::Kiro => kiro_data_dir()
+            .map(|d| vec![d.join("data.sqlite3")])
+            .unwrap_or_default(),
+        Agent::CursorAgent => cursor_dir()
+            .map(|d| vec![d.join("chats"), d.join("projects")])
+            .unwrap_or_default(),
+        Agent::Gemini => gemini_dir()
+            .map(|d| vec![d.join("tmp")])
+            .unwrap_or_default(),
+        Agent::Hermes => hermes_dir()
+            .map(|d| vec![d.join("state.db")])
+            .unwrap_or_default(),
+        Agent::Yolop => yolop_sessions_dir().map(|d| vec![d]).unwrap_or_default(),
+    }
 }
 
 /// Cached set of executable names found in `$PATH`, built once per process.

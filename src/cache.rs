@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config;
 use crate::model::{Agent, Session};
-use crate::plugin;
 
 // Since v0.12.0 the cache also stores `agf_version` (the writing binary's
 // version); any mismatch on read forces a full rescan (issue #37). That makes
@@ -47,7 +47,16 @@ use crate::plugin;
 //   canonical roots, timestamps, and short worktree slugs replace inferred
 //   summaries, generated paths, and log-only times. Local dev builds can share a
 //   package version, so agf_version alone cannot invalidate their old entries.
-const CACHE_VERSION: u32 = 7;
+//
+// Bumped to 8 in v0.13.1:
+// - Claude's `data_sources` now includes `~/.claude/projects`, so entries
+//   written by 0.13.0 carry an mtime taken from history.jsonl alone. That
+//   mtime is older than the tree's, which would make every 0.13.0 entry look
+//   stale-but-present in a confusing half state; a clean rescan is simpler.
+// - Yolop timestamps are now clamped to a plausible window, so persisted
+//   far-future values must not survive the upgrade and keep pinning sessions
+//   to the top of the time sort.
+const CACHE_VERSION: u32 = 8;
 
 /// The binary version stamped into every cache write; any mismatch on read
 /// invalidates the whole cache (see `parse_cache`).
@@ -194,25 +203,19 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
         }
     };
 
-    let installed: std::collections::HashSet<Agent> =
-        crate::config::installed_agents().into_iter().collect();
-    let plugins = plugin::all_plugins();
     let mut sessions = Vec::new();
     let mut stale = Vec::new();
 
-    for p in &plugins {
-        if !installed.contains(&p.agent()) {
-            continue;
-        }
-        let current_mtime = get_max_mtime(&p.data_sources());
+    for agent in config::installed_agents() {
+        let current_mtime = get_max_mtime(&config::data_sources(agent));
 
-        match cache.agents.get(&p.agent()) {
+        match cache.agents.get(&agent) {
             Some(ac) if ac.mtime >= current_mtime && current_mtime > 0 => {
                 // Cache is fresh
                 sessions.extend(ac.sessions.iter().map(from_cached));
             }
             _ => {
-                stale.push(p.agent());
+                stale.push(agent);
             }
         }
     }
@@ -234,9 +237,6 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
         let _ = fs::create_dir_all(parent);
     }
 
-    let installed: std::collections::HashSet<Agent> =
-        crate::config::installed_agents().into_iter().collect();
-    let plugins = plugin::all_plugins();
     let mut agents: HashMap<Agent, AgentCache> = HashMap::new();
 
     // Carry over prior cache entries for in-flight agents. `parse_cache`
@@ -256,21 +256,18 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
         }
     }
 
-    for p in &plugins {
-        if !installed.contains(&p.agent()) {
-            continue;
-        }
-        if skip_agents.contains(&p.agent()) {
+    for agent in config::installed_agents() {
+        if skip_agents.contains(&agent) {
             continue;
         }
         let agent_sessions: Vec<CachedSession> = sessions
             .iter()
-            .filter(|s| s.agent == p.agent())
+            .filter(|s| s.agent == agent)
             .map(to_cached)
             .collect();
-        let mtime = get_max_mtime(&p.data_sources());
+        let mtime = get_max_mtime(&config::data_sources(agent));
         agents.insert(
-            p.agent(),
+            agent,
             AgentCache {
                 mtime,
                 sessions: agent_sessions,
@@ -285,10 +282,9 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
     };
 
     if let Ok(json) = serde_json::to_string(&cache) {
-        let tmp = path.with_extension("json.tmp");
-        if fs::write(&tmp, json).is_ok() {
-            let _ = fs::rename(&tmp, &path);
-        }
+        // Best-effort: a cache we failed to persist just costs the next launch
+        // a rescan, so there is nothing actionable to report here.
+        let _ = crate::fsx::write_atomic(&path, json.as_bytes());
     }
 }
 

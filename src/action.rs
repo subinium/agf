@@ -29,17 +29,32 @@ pub fn generate_command(
 }
 
 pub fn action_preview(session: &Session, action: Action) -> String {
+    let shell = CommandShell::from_env();
     match action {
-        Action::Resume => session
-            .agent
-            .resume_cmd(&session.session_id, &CommandShell::from_env()),
+        Action::Resume => session.agent.resume_cmd(&session.session_id, &shell),
         Action::NewSession => "choose agent CLI...".to_string(),
         Action::Open => format!("{} .", detect_editor()),
-        Action::Cd => CommandShell::from_env().cd_only(&session.display_path()),
+        Action::Cd if session.project_path.is_empty() => "no project directory".to_string(),
+        Action::Cd => shell.cd_only(&shell.quote(&session.display_path())),
         Action::Pin => "toggle pin".to_string(),
         Action::Delete => "remove session data".to_string(),
         Action::Back => "return to session list".to_string(),
     }
+}
+
+/// `cd`-prefixed preview of `cmd`, matching what the generated command will
+/// actually do.
+///
+/// Previews use the `~`-shortened `display_path()` for readability but must
+/// still *quote* it the way the executed command does, and must drop the `cd`
+/// entirely for cwd-independent agents — `display_path()` renders their empty
+/// `project_path` as `—`, which `cd_and`'s empty-path check cannot recognise,
+/// so the preview used to read `cd — && hermes`.
+pub fn preview_cd_and(shell: &CommandShell, session: &Session, cmd: &str) -> String {
+    if session.project_path.is_empty() {
+        return cmd.to_string();
+    }
+    shell.cd_and(&shell.quote(&session.display_path()), cmd)
 }
 
 /// Detect editor from config, then $EDITOR, then $VISUAL, fallback to "vim".
@@ -78,4 +93,53 @@ pub fn new_session_with_flags(session: &Session, agent: Agent, flags: &str) -> S
     let quoted_path = shell.quote(&session.project_path);
     let base = agent.new_session_cmd();
     shell.cd_and(&quoted_path, &format!("{base}{flags}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Agent;
+
+    fn session(project_path: &str) -> Session {
+        Session {
+            agent: Agent::Hermes,
+            session_id: "sid".to_string(),
+            project_name: "p".to_string(),
+            project_path: project_path.to_string(),
+            summaries: Vec::new(),
+            timestamp: 0,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+        }
+    }
+
+    /// Regression: the preview passed the raw `~`-shortened path straight into
+    /// `cd_and`, so a path with a space rendered a command that would not run.
+    #[test]
+    fn preview_cd_and_quotes_the_path_like_the_real_command() {
+        let shell = CommandShell::Posix;
+        let s = session("/tmp/my project");
+        assert_eq!(
+            preview_cd_and(&shell, &s, "hermes"),
+            "cd '/tmp/my project' && hermes"
+        );
+    }
+
+    /// Regression: cwd-independent agents leave `project_path` empty, but
+    /// `display_path()` renders that as `—`, which `cd_and`'s empty check
+    /// cannot recognise — the preview used to read `cd — && hermes`.
+    #[test]
+    fn preview_cd_and_drops_the_cd_for_cwd_independent_agents() {
+        let shell = CommandShell::Posix;
+        assert_eq!(preview_cd_and(&shell, &session(""), "hermes"), "hermes");
+    }
+
+    #[test]
+    fn cd_preview_reports_missing_directory_instead_of_a_broken_command() {
+        assert_eq!(
+            action_preview(&session(""), Action::Cd),
+            "no project directory"
+        );
+    }
 }

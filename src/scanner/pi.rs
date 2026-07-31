@@ -93,7 +93,10 @@ fn parse_session(path: &Path, agent: Agent) -> Option<Session> {
             && let Ok(value) = serde_json::from_str::<Value>(line)
         {
             if header.is_none() && value.get("type").and_then(Value::as_str) == Some("session") {
-                header = serde_json::from_value::<PiSessionHeader>(value.clone()).ok();
+                // Re-parse from the raw line rather than `from_value(clone)`:
+                // the header record carries the whole session preamble, and
+                // cloning it just to reshape it is a pure copy.
+                header = serde_json::from_str::<PiSessionHeader>(line).ok();
             }
 
             if let Some(summary) = extract_user_summary(&value) {
@@ -127,7 +130,9 @@ fn parse_session(path: &Path, agent: Agent) -> Option<Session> {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64);
-    let timestamp = header_ts.into_iter().chain(file_mtime).max().unwrap_or(0);
+    // `Option<i64>` orders `None` below every `Some`, so this is just "the
+    // newer of the two, whichever is present".
+    let timestamp = header_ts.max(file_mtime).unwrap_or(0);
 
     let project_name = project_name_from_path(&cwd);
 
