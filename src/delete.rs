@@ -25,7 +25,25 @@ pub fn delete_session(session: &Session) -> Result<(), io::Error> {
         Agent::CursorAgent => delete_cursor_agent_session(session),
         Agent::Gemini => delete_gemini_session(session),
         Agent::Hermes => delete_hermes_session(session),
+        Agent::Yolop => delete_yolop_session(session),
     }
+}
+
+fn delete_yolop_session(session: &Session) -> Result<(), io::Error> {
+    let sessions_dir = config::yolop_sessions_dir().map_err(io::Error::other)?;
+    delete_yolop_session_from(&sessions_dir, &session.session_id)
+}
+
+fn delete_yolop_session_from(sessions_dir: &Path, session_id: &str) -> Result<(), io::Error> {
+    let session_dir = sessions_dir.join(session_id);
+    if session_dir.is_dir() {
+        fs::remove_dir_all(session_dir)?;
+    }
+    let legacy_log = sessions_dir.join(format!("{session_id}.jsonl"));
+    if legacy_log.is_file() {
+        fs::remove_file(legacy_log)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -612,5 +630,21 @@ mod tests {
             sibling_file.exists(),
             "unrelated sibling legacy .txt must survive",
         );
+    }
+
+    #[test]
+    fn delete_yolop_session_removes_only_target_folder_and_legacy_log() {
+        let base = make_codex_dir("agf-test-yolop-delete");
+        let target = "session_019e3db018a17450aba5407af5777237";
+        let sibling = "session_019f4fec10e370b2be16cca7debb6ab1";
+        fs::create_dir(base.join(target)).unwrap();
+        fs::create_dir(base.join(sibling)).unwrap();
+        fs::write(base.join(format!("{target}.jsonl")), b"{}").unwrap();
+
+        delete_yolop_session_from(&base, target).unwrap();
+
+        assert!(!base.join(target).exists());
+        assert!(!base.join(format!("{target}.jsonl")).exists());
+        assert!(base.join(sibling).exists());
     }
 }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Yolop session support** — discover, preview, resume, and delete sessions from Yolop's platform-native session store. Current metadata supplies session titles, canonical repository names, timestamps, and concise worktree labels; older sessions fall back to first prompts and repository-name recovery.
+
 ### Fixed
 
 - **Streaming startup keeps the initial cursor at the top** — when a fast scanner (commonly OpenCode) returned before a slower one (commonly Claude Code), the later merge preserved the fast scanner's initially selected session and pushed the cursor down the newly sorted list. The top row now follows incoming results until the user moves away from it, while explicit selections remain anchored.
