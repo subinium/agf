@@ -330,6 +330,7 @@ pub fn start_stale_scan(stale: &[Agent]) -> std::sync::mpsc::Receiver<ScanResult
                 Agent::Codex => crate::scanner::codex::scan().unwrap_or_default(),
                 Agent::OpenCode => crate::scanner::opencode::scan().unwrap_or_default(),
                 Agent::Pi => crate::scanner::pi::scan().unwrap_or_default(),
+                Agent::OhMyPi => crate::scanner::oh_my_pi::scan().unwrap_or_default(),
                 Agent::Kiro => crate::scanner::kiro::scan().unwrap_or_default(),
                 Agent::CursorAgent => crate::scanner::cursor_agent::scan().unwrap_or_default(),
                 Agent::Gemini => crate::scanner::gemini::scan().unwrap_or_default(),

@@ -29,6 +29,7 @@ pub fn all_plugins() -> Vec<Box<dyn AgentPlugin>> {
         Box::new(PluginAdapter(Agent::Codex)),
         Box::new(PluginAdapter(Agent::OpenCode)),
         Box::new(PluginAdapter(Agent::Pi)),
+        Box::new(PluginAdapter(Agent::OhMyPi)),
         Box::new(PluginAdapter(Agent::Kiro)),
         Box::new(PluginAdapter(Agent::CursorAgent)),
         Box::new(PluginAdapter(Agent::Gemini)),
@@ -52,6 +53,7 @@ impl AgentPlugin for PluginAdapter {
             Agent::Codex => "Codex",
             Agent::OpenCode => "OpenCode",
             Agent::Pi => "pi",
+            Agent::OhMyPi => "Oh My Pi",
             Agent::Kiro => "Kiro",
             Agent::CursorAgent => "Cursor CLI",
             Agent::Gemini => "Gemini",
@@ -75,6 +77,7 @@ impl AgentPlugin for PluginAdapter {
             Agent::Codex => scanner::codex::scan().unwrap_or_default(),
             Agent::OpenCode => scanner::opencode::scan().unwrap_or_default(),
             Agent::Pi => scanner::pi::scan().unwrap_or_default(),
+            Agent::OhMyPi => scanner::oh_my_pi::scan().unwrap_or_default(),
             Agent::Kiro => scanner::kiro::scan().unwrap_or_default(),
             Agent::CursorAgent => scanner::cursor_agent::scan().unwrap_or_default(),
             Agent::Gemini => scanner::gemini::scan().unwrap_or_default(),
@@ -111,6 +114,9 @@ impl AgentPlugin for PluginAdapter {
                 .map(|d| vec![d.join("opencode.db")])
                 .unwrap_or_default(),
             Agent::Pi => config::pi_sessions_dir()
+                .map(|d| vec![d])
+                .unwrap_or_default(),
+            Agent::OhMyPi => config::oh_my_pi_sessions_dir()
                 .map(|d| vec![d])
                 .unwrap_or_default(),
             Agent::Kiro => config::kiro_data_dir()

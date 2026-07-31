@@ -8,7 +8,7 @@
 > Find the AI coding session you meant to resume.
 
 `agf` is a local-first fuzzy finder for AI coding-agent sessions.
-Search local sessions across **Claude Code**, **Codex**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, **pi**, **Hermes**, and **Yolop** — then resume the right one in a keystroke.
+Search local sessions across **Claude Code**, **Codex**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, **pi**, and **Hermes** — then resume the right one in a keystroke.
 
 ![agf demo](./assets/demo.gif)
 
@@ -51,6 +51,7 @@ Then you either dig through history files or start over.
 | [Kiro](https://kiro.dev) | `kiro-cli chat --resume` *(no per-session resume — always opens the latest session for the cwd)* | `~/Library/Application Support/kiro-cli/data.sqlite3` |
 | [pi](https://github.com/badlogic/pi-mono) | `pi --session <id>` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
 | [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes --resume <id>` *(cwd-independent — resumes in your current shell directory)* | `~/.hermes/state.db` |
+| [Oh My Pi](https://github.com/can1357/oh-my-pi) | `omp --resume <id>` | `~/.omp/agent/sessions/<cwd>/*.jsonl` |
 | [Yolop](https://github.com/everruns/yolop) | `yolop --session <id>` | Platform data directory under `yolop/sessions/` |
 
 <details>
@@ -62,6 +63,7 @@ Then you either dig through history files or start over.
 | Codex | JSONL | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 | OpenCode | SQLite | `~/.local/share/opencode/opencode.db` |
 | pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |
+| Oh My Pi | JSONL | `~/.omp/agent/sessions/<encoded-cwd>/<ts>_<id>.jsonl` |
 | Kiro | SQLite | macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`<br>Linux: `~/.local/share/kiro-cli/data.sqlite3` |
 | Cursor CLI | SQLite + JSONL/TXT | `~/.cursor/chats/<workspace>/<id>/store.db` (metadata; required for `.jsonl` to be resumable)<br>`~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+ transcript)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy transcript) |
 | Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
@@ -168,7 +170,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 ## Requirements
 
 - macOS, Linux, or Windows (PowerShell 5.1+ / PowerShell 7+)
-- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `yolop`
+- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `omp`, `yolop`
 
 ## Install from source
 
