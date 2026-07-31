@@ -39,17 +39,15 @@ use crate::plugin;
 //   entries written by 0.10.x would surface as stale "cli session (...)"
 //   summaries until the source DB mtime happens to change.
 //   Bumping the version forces a one-time rescan on first 0.11.0 launch.
-// Bumped to 8 after v0.12.0:
-// - Yolop support adds a new per-agent cache key.
+// Bumped to 7 in v0.13.0:
+// - Oh My Pi (#56) and Yolop (#55) each add a new per-agent cache key.
 // - Yolop worktree sessions use repo_root for the project name instead of the
-//   generated session directory. Local builds share the released 0.12.0
+//   generated session directory, and recover the original repository name via
+//   `.git` indirection / parent-session metadata; its persisted titles,
+//   canonical roots, timestamps, and short worktree slugs replace inferred
+//   summaries, generated paths, and log-only times. Local dev builds can share a
 //   package version, so agf_version alone cannot invalidate their old entries.
-// - Older nested Yolop worktree sessions recover the original repository name
-//   through their `.git` indirection.
-// - Deleted nested worktrees recover it from their parent session metadata.
-// - Yolop's persisted titles, canonical roots, timestamps, and short worktree
-//   slugs now replace inferred summaries, generated paths, and log-only times.
-const CACHE_VERSION: u32 = 8;
+const CACHE_VERSION: u32 = 7;
 
 /// The binary version stamped into every cache write; any mismatch on read
 /// invalidates the whole cache (see `parse_cache`).
