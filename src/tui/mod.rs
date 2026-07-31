@@ -68,7 +68,12 @@ pub struct App {
     pub scroll_offset: usize,
     pub viewport_height: usize,
     pub sort_mode: SortMode,
-    pub selected_set: HashSet<usize>,
+    /// Multi-select set for bulk delete, keyed by session identity
+    /// `(agent, session_id)` — NOT by `sessions` Vec index. A background scan
+    /// can reorder/replace `sessions` between selection and delete (every
+    /// render frame drains scan results), so an index-keyed set would resolve
+    /// to the wrong sessions at delete time and destroy the wrong data.
+    pub selected_set: HashSet<(Agent, String)>,
     pub summary_offsets: HashMap<String, usize>,
     pub summary_search_count: usize,
     pub include_summaries: bool,
@@ -373,16 +378,23 @@ impl App {
                 }
             })
             .collect();
-        // Sort groups: most recent session first
+        // Sort groups: most recent session first. Use the MAX timestamp across
+        // each group's sessions, not `.first()` — `.first()` is only the newest
+        // when the list is in Time sort; in Name/Agent sort it is not, which
+        // ordered the groups incorrectly.
         self.groups.sort_by(|a, b| {
             let a_ts = a
                 .sessions
-                .first()
-                .map_or(0, |&i| self.sessions[i].timestamp);
+                .iter()
+                .map(|&i| self.sessions[i].timestamp)
+                .max()
+                .unwrap_or(0);
             let b_ts = b
                 .sessions
-                .first()
-                .map_or(0, |&i| self.sessions[i].timestamp);
+                .iter()
+                .map(|&i| self.sessions[i].timestamp)
+                .max()
+                .unwrap_or(0);
             b_ts.cmp(&a_ts)
         });
     }
@@ -1694,10 +1706,14 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
     }
 
     if ui.key(' ') {
-        if let Some(idx) = app.filtered_indices.get(app.selected).copied()
-            && !app.selected_set.remove(&idx)
+        if let Some(key) = app
+            .filtered_indices
+            .get(app.selected)
+            .and_then(|&i| app.sessions.get(i))
+            .map(|s| (s.agent, s.session_id.clone()))
+            && !app.selected_set.remove(&key)
         {
-            app.selected_set.insert(idx);
+            app.selected_set.insert(key);
         }
         if !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
             app.selected += 1;
@@ -1772,20 +1788,25 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
     if ui.key_code(slt::KeyCode::Enter) {
         if app.delete_index == 0 {
             if is_bulk {
-                let mut indices: Vec<usize> = app.selected_set.drain().collect();
-                indices.sort_unstable_by(|a, b| b.cmp(a));
-                for idx in indices {
-                    // Only drop the row from the UI when the on-disk delete
-                    // actually succeeded; failed deletes stay visible.
-                    if idx < app.sessions.len()
-                        && crate::delete::delete_session(&app.sessions[idx]).is_ok()
-                    {
-                        let agent = app.sessions[idx].agent;
-                        app.sessions.remove(idx);
-                        decrement_agent_count(&mut app.agent_counts, agent);
+                // Resolve the selected (agent, session_id) keys to sessions at
+                // delete time. Keying by identity — not by Vec index captured at
+                // selection time — is what keeps this correct when a background
+                // scan reordered `sessions` in between.
+                let selected: HashSet<(Agent, String)> = app.selected_set.drain().collect();
+                let mut deleted: HashSet<(Agent, String)> = HashSet::new();
+                for s in &app.sessions {
+                    let key = (s.agent, s.session_id.clone());
+                    // Only mark the row deleted when the on-disk delete actually
+                    // succeeded; failed deletes stay visible.
+                    if selected.contains(&key) && crate::delete::delete_session(s).is_ok() {
+                        deleted.insert(key);
                     }
                 }
-                app.selected_set.clear();
+                for key in &deleted {
+                    decrement_agent_count(&mut app.agent_counts, key.0);
+                }
+                app.sessions
+                    .retain(|s| !deleted.contains(&(s.agent, s.session_id.clone())));
                 app.update_filter();
             } else if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
                 // Only drop the row from the UI when the on-disk delete
@@ -1880,7 +1901,11 @@ fn render_bulk_delete_confirm(ui: &mut slt::Context, app: &App) {
     let mut names: Vec<String> = app
         .selected_set
         .iter()
-        .filter_map(|idx| app.sessions.get(*idx))
+        .filter_map(|(agent, id)| {
+            app.sessions
+                .iter()
+                .find(|s| s.agent == *agent && &s.session_id == id)
+        })
         .map(|s| s.project_name.clone())
         .collect();
     names.sort();
@@ -2300,7 +2325,9 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
         };
 
         if bulk_mode {
-            let is_checked = app.selected_set.contains(&session_idx);
+            let is_checked = app
+                .selected_set
+                .contains(&(session.agent, session.session_id.clone()));
             let indicator = match (is_selected, is_checked) {
                 (true, true) => ">[x] ",
                 (true, false) => ">[ ] ",

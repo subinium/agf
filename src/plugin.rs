@@ -85,7 +85,8 @@ impl AgentPlugin for PluginAdapter {
     }
 
     fn resume_cmd(&self, session_id: &str) -> String {
-        self.0.resume_cmd(session_id)
+        self.0
+            .resume_cmd(session_id, &crate::shell::CommandShell::from_env())
     }
 
     fn new_session_cmd(&self) -> &str {

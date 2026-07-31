@@ -33,4 +33,6 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
+# No `panic = "abort"`: scanner::scan_all relies on unwinding to isolate a
+# panicking scanner thread (join -> Err) so one malformed session file can't
+# take down the whole listing.

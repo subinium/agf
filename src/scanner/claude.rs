@@ -18,10 +18,17 @@ use crate::scanner::{collapse_whitespace, read_head_tail};
 ///     in the head slice;
 ///   * `aiTitle` (emitted while the agent is forming project context, within
 ///     the first few hundred lines) fits in the head slice;
-///   * `away_summary` recaps (appended on every idle, latest one wins) are
-///     reliably in the tail slice — 256 KB ≈ thousands of recap lines.
+///   * the latest `away_summary` recap — appended last, so it sits at the very
+///     end of the file — is captured by the tail slice.
+///
+/// `TAIL_BYTES` is deliberately small. `away_summary` lines are appended
+/// chronologically and only the most recent one is displayed, so a few dozen KB
+/// of tail reliably contains it. A larger tail mainly forces mid-size
+/// transcripts (which fall under `head + tail` and are therefore read in FULL)
+/// to be slurped end-to-end — the dominant cold-start scan cost on large
+/// `~/.claude/projects` trees (tens of MB read for an off-by-default recap).
 const HEAD_BYTES: u64 = 16 * 1024;
-const TAIL_BYTES: u64 = 256 * 1024;
+const TAIL_BYTES: u64 = 32 * 1024;
 
 #[derive(Deserialize)]
 struct ClaudeEntry {
@@ -388,5 +395,54 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         assert!(list_session_files(&dir).is_empty());
+    }
+
+    #[test]
+    fn scan_session_metadata_finds_worktree_in_head_and_latest_recap_in_tail() {
+        // A transcript larger than HEAD_BYTES + TAIL_BYTES: `worktree` must come
+        // from the head (cwd on line 1) and the latest `away_summary` recap from
+        // the tail (recaps are appended last). This locks TAIL_BYTES — shrinking
+        // it must never drop the recap, which always sits at the file's end.
+        let claude_dir = make_claude_dir("agf-test-recap-tail");
+        let proj = claude_dir.join("projects").join("-home-proj");
+        fs::create_dir_all(&proj).unwrap();
+        let sid = "recap-big-1";
+        let path = proj.join(format!("{sid}.jsonl"));
+        let mut f = fs::File::create(&path).unwrap();
+
+        // Head: cwd inside a worktree.
+        writeln!(
+            f,
+            r#"{{"type":"user","cwd":"/home/proj/.claude/worktrees/feature-x"}}"#
+        )
+        .unwrap();
+        // Padding to push the file well past HEAD_BYTES + TAIL_BYTES.
+        let filler = format!(r#"{{"type":"assistant","pad":"{}"}}"#, "x".repeat(2000));
+        let target = (HEAD_BYTES + TAIL_BYTES) as usize + 100 * 1024;
+        let mut written = 0usize;
+        while written < target {
+            writeln!(f, "{filler}").unwrap();
+            written += filler.len() + 1;
+        }
+        // Tail: an older then a newer away_summary — the latest one must win.
+        writeln!(
+            f,
+            r#"{{"type":"system","subtype":"away_summary","timestamp":"2026-05-01T00:00:00.000Z","content":"old recap"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"system","subtype":"away_summary","timestamp":"2026-05-02T00:00:00.000Z","content":"latest recap"}}"#
+        )
+        .unwrap();
+
+        let meta = scan_session_metadata(vec![(sid.to_string(), path)]);
+        let m = meta
+            .get(sid)
+            .expect("metadata should be present for large file");
+        assert_eq!(m.worktree.as_deref(), Some("feature-x"));
+        assert_eq!(m.recap.as_deref(), Some("recap: latest recap"));
+
+        let _ = fs::remove_dir_all(&claude_dir);
     }
 }

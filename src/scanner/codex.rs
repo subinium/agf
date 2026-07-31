@@ -196,8 +196,10 @@ fn scan_sqlite(
 
         let project_name = project_name_from_path(&cwd);
 
-        // updated_at is Unix seconds — convert to millis
-        let timestamp = updated_at * 1000;
+        // updated_at is Unix seconds — convert to millis. Saturate so a
+        // corrupt/tampered value can't overflow i64 and wrap to a garbage
+        // (often negative) timestamp that jumps the session to a list extreme.
+        let timestamp = updated_at.saturating_mul(1000);
 
         // Build summaries: prefer history.jsonl, fall back to title/first_msg
         let session_summaries = if let Some(s) = summaries.get(&session_id) {
