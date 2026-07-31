@@ -193,7 +193,7 @@ agf setup
 
 ## Contributing
 
-Issues and PRs are welcome.
+Issues and PRs are welcome. Adding support for another agent/harness is a self-contained change — see [docs/adding-an-agent.md](docs/adding-an-agent.md) for the wiring checklist.
 
 [![Contributors](https://contrib.rocks/image?repo=subinium/agf)](https://github.com/subinium/agf/graphs/contributors)
 
