@@ -332,11 +332,7 @@ mod tests {
 
     #[test]
     fn prime_project_settings_override_global_and_resolve_from_cwd() {
-        let root = std::env::temp_dir().join(format!(
-            "agf-prime-settings-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
+        let root = std::env::temp_dir().join(format!("agf-prime-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let agent_dir = root.join("global-agent");
         let cwd = root.join("project");
@@ -360,11 +356,8 @@ mod tests {
 
     #[test]
     fn prime_global_relative_session_dir_resolves_from_process_cwd() {
-        let root = std::env::temp_dir().join(format!(
-            "agf-prime-global-settings-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
+        let root =
+            std::env::temp_dir().join(format!("agf-prime-global-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let agent_dir = root.join("global-agent");
         let cwd = root.join("project");
@@ -400,11 +393,7 @@ mod tests {
     fn executable_detection_rejects_plain_files_and_accepts_exec_bits() {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "agf-executable-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
+        let dir = std::env::temp_dir().join(format!("agf-executable-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("agent");

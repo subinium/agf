@@ -482,11 +482,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     fn temp_source(label: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "agf-cache-{label}-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
+        let path = std::env::temp_dir().join(format!("agf-cache-{label}-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
     }
