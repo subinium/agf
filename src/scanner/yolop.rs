@@ -11,16 +11,6 @@ const SUMMARY_MAX_CHARS: usize = 120;
 const EVENT_HEAD_BYTES: u64 = 512 * 1024;
 const EVENT_TAIL_BYTES: u64 = 64 * 1024;
 
-/// How far ahead of "now" a session timestamp may claim to be before we stop
-/// believing it.
-///
-/// Every candidate is self-reported (`updated_at`, event `ts`) or comes from a
-/// filesystem whose clock we don't control, so a corrupt file or a skewed clock
-/// can name an arbitrary future instant — which would pin that session to the
-/// top of the time sort permanently. One day absorbs ordinary timezone/NTP
-/// skew while still rejecting the "year 2087" case.
-const MAX_FUTURE_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
-
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     scan_from(&crate::config::yolop_sessions_dir()?)
 }
@@ -31,7 +21,8 @@ fn scan_from(sessions_dir: &Path) -> Result<Vec<Session>, AgfError> {
     }
 
     let mut sessions = Vec::new();
-    for entry in std::fs::read_dir(sessions_dir)?.flatten() {
+    for entry in std::fs::read_dir(sessions_dir)? {
+        let entry = entry?;
         let dir = entry.path();
         if !dir.is_dir() {
             continue;
@@ -42,7 +33,7 @@ fn scan_from(sessions_dir: &Path) -> Result<Vec<Session>, AgfError> {
         if !valid_session_id(&session_id) {
             continue;
         }
-        if let Some(session) = parse_session(&dir, session_id) {
+        if let Some(session) = parse_session(&dir, session_id)? {
             sessions.push(session);
         }
     }
@@ -61,18 +52,20 @@ pub(crate) fn valid_session_id(id: &str) -> bool {
         .is_some_and(|suffix| suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-fn parse_session(dir: &Path, session_id: String) -> Option<Session> {
+fn parse_session(dir: &Path, session_id: String) -> Result<Option<Session>, AgfError> {
     let log_path = dir.join("events.jsonl");
     if !log_path.is_file() {
-        return None;
+        return Ok(None);
     }
-    let workspace: Value =
-        serde_json::from_slice(&std::fs::read(dir.join("workspace.json")).ok()?).ok()?;
+    let workspace: Value = serde_json::from_slice(&std::fs::read(dir.join("workspace.json"))?)?;
     let project_path = workspace
         .get("active_root")
         .and_then(Value::as_str)
-        .or_else(|| workspace.get("workspace_root").and_then(Value::as_str))?
-        .to_string();
+        .or_else(|| workspace.get("workspace_root").and_then(Value::as_str));
+    let Some(project_path) = project_path else {
+        return Ok(None);
+    };
+    let project_path = project_path.to_string();
     let mut project_name = workspace
         .get("canonical_repo_root")
         .and_then(Value::as_str)
@@ -156,16 +149,20 @@ fn parse_session(dir: &Path, session_id: String) -> Option<Session> {
 
     // Explicit metadata is useful for idle sessions, while the log mtime and
     // event timestamps keep active sessions fresh between metadata writes.
-    let timestamp = newest_plausible(
-        [
-            metadata_timestamp,
-            modified_ms(&log_path),
-            latest_ts.unwrap_or(0),
-        ],
-        chrono::Utc::now().timestamp_millis(),
-    );
+    // Preserve the raw durable maximum until the common scan boundary. That
+    // layer both clamps implausible future values and prevents their fallback
+    // from being cached as fresh, allowing a small clock skew to become valid
+    // later even when the source file itself does not change.
+    let timestamp = [
+        metadata_timestamp,
+        modified_ms(&log_path),
+        latest_ts.unwrap_or(0),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
 
-    Some(Session {
+    Ok(Some(Session {
         agent: Agent::Yolop,
         session_id,
         project_name,
@@ -175,20 +172,8 @@ fn parse_session(dir: &Path, session_id: String) -> Option<Session> {
         git_branch,
         worktree,
         recap: None,
-    })
-}
-
-/// Newest candidate that isn't implausibly far in the future (see
-/// [`MAX_FUTURE_SKEW_MS`]). Falls back to `now` when every candidate is
-/// rejected, so such a session sorts as "just used" and then ages normally
-/// instead of staying pinned above everything forever.
-fn newest_plausible(candidates: [i64; 3], now: i64) -> i64 {
-    let ceiling = now.saturating_add(MAX_FUTURE_SKEW_MS);
-    candidates
-        .into_iter()
-        .filter(|&ts| ts <= ceiling)
-        .max()
-        .unwrap_or(now)
+        interactive: true,
+    }))
 }
 
 fn parse_timestamp(timestamp: &str) -> Option<i64> {
@@ -324,7 +309,9 @@ mod tests {
         let root = temp_root("parse");
         let dir = write_session(&root);
 
-        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+        let session = parse_session(&dir, SESSION_ID.to_string())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(session.agent, Agent::Yolop);
         assert_eq!(session.project_name, "example");
@@ -382,7 +369,9 @@ mod tests {
         .unwrap();
         backdate(&dir.join("events.jsonl"), 1_700_000_000);
 
-        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+        let session = parse_session(&dir, SESSION_ID.to_string())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(session.project_name, "yolop");
         assert_eq!(
@@ -409,7 +398,7 @@ mod tests {
     /// Regression: an `updated_at` far in the future used to win the `max()`
     /// outright and pin the session above every real session forever.
     #[test]
-    fn implausible_future_metadata_does_not_pin_the_session_to_the_top() {
+    fn implausible_future_metadata_is_preserved_for_common_normalization() {
         let root = temp_root("future-metadata");
         let dir = root.join(SESSION_ID);
         fs::create_dir_all(&dir).unwrap();
@@ -421,24 +410,14 @@ mod tests {
         fs::write(dir.join("events.jsonl"), b"").unwrap();
         backdate(&dir.join("events.jsonl"), 1_700_000_000);
 
-        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+        let session = parse_session(&dir, SESSION_ID.to_string())
+            .unwrap()
+            .unwrap();
 
-        // The bogus value is discarded; the real log mtime is used instead.
-        assert_eq!(session.timestamp, 1_700_000_000_000);
+        // The scanner boundary owns plausibility and cacheability. Keeping the
+        // raw value here lets it detect that normalization occurred.
+        assert_eq!(session.timestamp, rfc3339_ms("2087-01-01T00:00:00Z"));
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn newest_plausible_falls_back_to_now_when_every_candidate_is_bogus() {
-        let now = 1_800_000_000_000;
-        let future = now + MAX_FUTURE_SKEW_MS * 10;
-        assert_eq!(newest_plausible([future, future, future], now), now);
-        // Inside the skew window the value is still trusted.
-        assert_eq!(
-            newest_plausible([now + 1000, 0, 0], now),
-            now + 1000,
-            "small skew must not be discarded"
-        );
     }
 
     /// An unreadable event log must degrade the entry, not remove it: the
@@ -462,7 +441,9 @@ mod tests {
         )
         .unwrap();
 
-        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+        let session = parse_session(&dir, SESSION_ID.to_string())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(session.project_name, "example");
         assert_eq!(session.summaries, ["Still here"]);
@@ -491,7 +472,9 @@ mod tests {
         )
         .unwrap();
 
-        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+        let session = parse_session(&dir, SESSION_ID.to_string())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             session.summaries,
@@ -552,7 +535,9 @@ mod tests {
         )
         .unwrap();
 
-        let session = parse_session(&dir, SESSION_ID.to_string()).unwrap();
+        let session = parse_session(&dir, SESSION_ID.to_string())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(session.summaries, ["valid prompt"]);
         fs::remove_dir_all(root).unwrap();

@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -14,33 +15,87 @@ struct WatchState {
     scroll_offset: usize,
 }
 
-pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
-    let sessions = scanner::scan_all();
-    let running_agents = detect_running_agents();
+type ScanBatch = Vec<(Agent, Result<crate::scanner::CompletedScan, String>)>;
+
+/// Replace only agents whose scanner completed successfully. A transient
+/// permission/SQLite error must not erase stale-but-useful rows in watch mode.
+fn merge_scan_batch(sessions: &mut Vec<Session>, batch: ScanBatch, include_non_interactive: bool) {
+    for (agent, result) in batch {
+        match result {
+            Ok(scan) => {
+                let mut new_sessions = scan.sessions;
+                if !include_non_interactive {
+                    new_sessions.retain(|session| session.interactive);
+                }
+                sessions.retain(|session| session.agent != agent);
+                sessions.extend(new_sessions);
+            }
+            Err(error) => {
+                if std::env::var("AGF_DEBUG").is_ok() {
+                    eprintln!("[agf] {agent} watch refresh failed: {error}");
+                }
+            }
+        }
+    }
+    sessions.sort_by(|a, b| crate::model::compare_sessions(a, b, crate::model::SortMode::Time));
+}
+
+pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::Result<()> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(anyhow::anyhow!(
+            "watch requires terminal stdin and stdout; use `agf list` for pipelines"
+        ));
+    }
+    // Paint stale cache immediately; filesystem/SQLite scans and process
+    // probes run off the render thread even on the first frame.
+    let include_non_interactive =
+        include_non_interactive || crate::settings::Settings::load().include_non_interactive;
+    let (mut sessions, _) = crate::cache::load_cache();
+    if !include_non_interactive {
+        sessions.retain(|session| session.interactive);
+    }
 
     let mut state = WatchState {
         sessions,
-        running_agents,
+        running_agents: Vec::new(),
         last_refresh: Instant::now(),
         selected: 0,
         scroll_offset: 0,
     };
 
-    let (tx, rx) = mpsc::channel::<(Vec<Session>, Vec<Agent>)>();
-    let refreshing = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<(ScanBatch, Vec<Agent>)>();
+    let refreshing = Arc::new(AtomicBool::new(true));
+    {
+        let tx = tx.clone();
+        let refreshing = Arc::clone(&refreshing);
+        std::thread::spawn(move || {
+            let sessions = scanner::scan_agents_detailed(&crate::config::installed_agents());
+            let running = detect_running_agents();
+            let _ = tx.send((sessions, running));
+            refreshing.store(false, Ordering::SeqCst);
+        });
+    }
 
     slt::run_with(
         slt::RunConfig::default().title("agf watch").mouse(true),
         |ui: &mut slt::Context| {
             // Check for background refresh results
             if let Ok((new_sessions, new_running)) = rx.try_recv() {
-                state.sessions = new_sessions;
+                let selected_identity = state.sessions.get(state.selected).map(Session::identity);
+                merge_scan_batch(&mut state.sessions, new_sessions, include_non_interactive);
                 state.running_agents = new_running;
                 // Clamp the cursor: a refresh can shrink the list (sessions
                 // deleted elsewhere), and a stale `selected` past the end
                 // would push the scroll offset past the list and blank the
                 // viewport until the user pressed Up repeatedly.
-                state.selected = state.selected.min(state.sessions.len().saturating_sub(1));
+                state.selected = selected_identity
+                    .and_then(|identity| {
+                        state
+                            .sessions
+                            .iter()
+                            .position(|session| session.identity() == identity)
+                    })
+                    .unwrap_or_else(|| state.selected.min(state.sessions.len().saturating_sub(1)));
                 state.last_refresh = Instant::now();
             }
 
@@ -52,7 +107,8 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
                 let tx = tx.clone();
                 let r = Arc::clone(&refreshing);
                 std::thread::spawn(move || {
-                    let sessions = scanner::scan_all();
+                    let sessions =
+                        scanner::scan_agents_detailed(&crate::config::installed_agents());
                     let running = detect_running_agents();
                     let _ = tx.send((sessions, running));
                     r.store(false, Ordering::SeqCst);
@@ -112,7 +168,7 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
                     ui.text(format!("  {elapsed}s ago"))
                         .fg(slt::Color::Rgb(107, 114, 128));
                 });
-                ui.separator_colored(slt::Color::Rgb(64, 64, 64));
+                let _ = ui.separator_colored(slt::Color::Rgb(64, 64, 64));
 
                 let _ = ui.container().grow(1).pr(1).col(|ui| {
                     if state.sessions.is_empty() {
@@ -149,12 +205,12 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
                                 slt::Style::new().fg(agent_color).bold().bg(bg),
                             );
                             ui.styled(
-                                text::fit(&s.project_name, 20),
+                                text::fit(&text::sanitize_terminal(&s.project_name), 20),
                                 slt::Style::new().fg(slt::Color::Rgb(229, 229, 229)).bg(bg),
                             );
                             if let Some(branch) = &s.git_branch {
                                 ui.styled(
-                                    format!("  {branch}"),
+                                    format!("  {}", text::sanitize_terminal(branch)),
                                     slt::Style::new().fg(slt::Color::Rgb(52, 211, 153)).bg(bg),
                                 );
                             }
@@ -166,7 +222,7 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
                     }
                 });
 
-                ui.separator_colored(slt::Color::Rgb(64, 64, 64));
+                let _ = ui.separator_colored(slt::Color::Rgb(64, 64, 64));
                 let _ = ui.container().pr(1).row(|ui| {
                     ui.spacer();
                     let _ = ui.help_colored(
@@ -189,19 +245,80 @@ pub fn run_watch(interval_secs: u64) -> anyhow::Result<()> {
 /// required: the child's stdout must be captured, or it would paint over the
 /// TUI. Note this runs on the refresh worker thread, not the render path.
 fn detect_running_agents() -> Vec<Agent> {
-    let mut running = Vec::new();
-    for agent in crate::config::installed_agents() {
-        match std::process::Command::new("pgrep")
-            .args(["-x", agent.cli_name()])
-            .output()
-        {
-            Ok(output) if output.status.success() => running.push(agent),
-            // Ran, found nothing.
-            Ok(_) => {}
-            // `pgrep` itself is missing (Windows, minimal containers). Retrying
-            // it once per agent, every refresh tick, only burns process spawns.
-            Err(_) => break,
+    #[cfg(windows)]
+    return Vec::new();
+
+    #[cfg(not(windows))]
+    {
+        static PGREP_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*PGREP_AVAILABLE.get_or_init(|| {
+            std::process::Command::new("pgrep")
+                .arg("--version")
+                .output()
+                .is_ok()
+        }) {
+            return Vec::new();
+        }
+        let mut running = Vec::new();
+        for agent in crate::config::installed_agents() {
+            match std::process::Command::new("pgrep")
+                .args(["-x", agent.cli_name()])
+                .output()
+            {
+                Ok(output) if output.status.success() => running.push(agent),
+                // Ran, found nothing.
+                Ok(_) => {}
+                // `pgrep` itself is missing (Windows, minimal containers). Retrying
+                // it once per agent, every refresh tick, only burns process spawns.
+                Err(_) => break,
+            }
+        }
+        running
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(agent: Agent, id: &str, timestamp: i64) -> Session {
+        Session {
+            agent,
+            session_id: id.to_string(),
+            project_name: "project".to_string(),
+            project_path: "/tmp/project".to_string(),
+            summaries: Vec::new(),
+            timestamp,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+            interactive: true,
         }
     }
-    running
+
+    #[test]
+    fn failed_watch_scan_preserves_stale_agent_rows() {
+        let mut sessions = vec![
+            session(Agent::ClaudeCode, "stale", 1),
+            session(Agent::Codex, "old", 2),
+        ];
+        merge_scan_batch(
+            &mut sessions,
+            vec![
+                (Agent::ClaudeCode, Err("locked".to_string())),
+                (
+                    Agent::Codex,
+                    Ok(crate::scanner::CompletedScan {
+                        sessions: vec![session(Agent::Codex, "fresh", 3)],
+                        fingerprint: Some(crate::cache::SourceFingerprint::default()),
+                    }),
+                ),
+            ],
+            false,
+        );
+
+        assert!(sessions.iter().any(|session| session.session_id == "stale"));
+        assert!(!sessions.iter().any(|session| session.session_id == "old"));
+        assert!(sessions.iter().any(|session| session.session_id == "fresh"));
+    }
 }

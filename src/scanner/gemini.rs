@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -24,18 +24,17 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         return Ok(Vec::new());
     }
 
-    let path_map = build_path_map(&gemini_dir);
+    let path_map = build_path_map(&gemini_dir)?;
 
     // Dedup by sessionId: keep the entry with the latest `lastUpdated`.
     // The same session can appear in both a hash dir (old) and a named dir
     // (new) when Gemini CLI migrates a project to projects.json.
     let mut by_id: HashMap<String, Session> = HashMap::new();
 
-    let Ok(entries) = fs::read_dir(&tmp_dir) else {
-        return Ok(Vec::new());
-    };
+    let entries = fs::read_dir(&tmp_dir)?;
 
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries {
+        let entry = entry?;
         let dir_name = entry.file_name().to_string_lossy().to_string();
         let chats_dir = entry.path().join("chats");
 
@@ -49,17 +48,17 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             continue;
         }
 
-        let Ok(chat_entries) = fs::read_dir(&chats_dir) else {
-            continue;
-        };
+        let chat_entries = fs::read_dir(&chats_dir)?;
 
-        for chat_entry in chat_entries.filter_map(|e| e.ok()) {
+        for chat_entry in chat_entries {
+            let chat_entry = chat_entry?;
             let fname = chat_entry.file_name().to_string_lossy().to_string();
             if !fname.starts_with("session-") || !fname.ends_with(".json") {
                 continue;
             }
 
-            if let Some(session) = parse_session(&chat_entry.path(), &project_path, &project_name) {
+            if let Some(session) = parse_session(&chat_entry.path(), &project_path, &project_name)?
+            {
                 let existing = by_id.get(&session.session_id);
                 if existing.is_none_or(|e| session.timestamp > e.timestamp) {
                     by_id.insert(session.session_id.clone(), session);
@@ -75,18 +74,17 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
 ///
 /// Named dirs (e.g. "github") come directly from `projects.json` values.
 /// Hash dirs (e.g. "e0dc5a91...") are matched by computing SHA256 of each known path.
-fn build_path_map(gemini_dir: &Path) -> HashMap<String, String> {
+fn build_path_map(gemini_dir: &Path) -> Result<HashMap<String, String>, AgfError> {
     let mut map = HashMap::new();
 
     let projects_file = gemini_dir.join("projects.json");
-    let Ok(content) = fs::read_to_string(projects_file) else {
-        return map;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return map;
-    };
+    if !projects_file.exists() {
+        return Ok(map);
+    }
+    let content = fs::read_to_string(projects_file)?;
+    let json = serde_json::from_str::<serde_json::Value>(&content)?;
     let Some(projects) = json.get("projects").and_then(|v| v.as_object()) else {
-        return map;
+        return Ok(map);
     };
 
     for (path, name) in projects {
@@ -98,7 +96,7 @@ fn build_path_map(gemini_dir: &Path) -> HashMap<String, String> {
         }
     }
 
-    map
+    Ok(map)
 }
 
 /// Resolve a project dir name to (project_path, project_name).
@@ -121,20 +119,35 @@ fn resolve_project(dir_name: &str, path_map: &HashMap<String, String>) -> (Strin
 ///
 /// For large files (> 64 KB) we read a capped slice and fall back to
 /// field extraction if the JSON is truncated.
-fn parse_session(path: &Path, project_path: &str, project_name: &str) -> Option<Session> {
+fn parse_session(
+    path: &Path,
+    project_path: &str,
+    project_name: &str,
+) -> Result<Option<Session>, AgfError> {
     let content = read_capped(path)?;
 
     // Try full JSON parse first (works for files ≤ 64 KB)
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-        let session_id = json.get("sessionId")?.as_str()?.to_string();
-        let timestamp_str = json
+        let Some(session_id) = json
+            .get("sessionId")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+        else {
+            return Ok(None);
+        };
+        let Some(timestamp_str) = json
             .get("lastUpdated")
             .or_else(|| json.get("startTime"))
-            .and_then(|v| v.as_str())?;
-        let timestamp = parse_iso8601_ms(timestamp_str)?;
+            .and_then(|v| v.as_str())
+        else {
+            return Ok(None);
+        };
+        let Some(timestamp) = parse_iso8601_ms(timestamp_str) else {
+            return Ok(None);
+        };
         let summary = extract_summary(&json);
 
-        return Some(Session {
+        return Ok(Some(Session {
             agent: Agent::Gemini,
             session_id,
             project_name: project_name.to_string(),
@@ -144,19 +157,27 @@ fn parse_session(path: &Path, project_path: &str, project_name: &str) -> Option<
             git_branch: None,
             worktree: None,
             recap: None,
-        });
+            interactive: true,
+        }));
     }
 
     // Truncated file — extract key fields with string search.
     // sessionId and timestamps always appear in the first ~300 bytes.
     // The first user message is typically in the first few KB.
-    let session_id = extract_str_field(&content, "sessionId")?;
-    let timestamp_str = extract_str_field(&content, "lastUpdated")
-        .or_else(|| extract_str_field(&content, "startTime"))?;
-    let timestamp = parse_iso8601_ms(&timestamp_str)?;
+    let Some(session_id) = extract_str_field(&content, "sessionId") else {
+        return Ok(None);
+    };
+    let Some(timestamp_str) = extract_str_field(&content, "lastUpdated")
+        .or_else(|| extract_str_field(&content, "startTime"))
+    else {
+        return Ok(None);
+    };
+    let Some(timestamp) = parse_iso8601_ms(&timestamp_str) else {
+        return Ok(None);
+    };
     let summary = extract_summary_partial(&content);
 
-    Some(Session {
+    Ok(Some(Session {
         agent: Agent::Gemini,
         session_id,
         project_name: project_name.to_string(),
@@ -166,27 +187,28 @@ fn parse_session(path: &Path, project_path: &str, project_name: &str) -> Option<
         git_branch: None,
         worktree: None,
         recap: None,
-    })
+        interactive: true,
+    }))
 }
 
 /// Read up to MAX_FILE_BYTES from a file.
-fn read_capped(path: &Path) -> Option<String> {
-    let mut file = fs::File::open(path).ok()?;
-    let size = file.metadata().ok()?.len() as usize;
+fn read_capped(path: &Path) -> Result<String, io::Error> {
+    let mut file = fs::File::open(path)?;
+    let size = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
 
     if size <= MAX_FILE_BYTES {
-        return fs::read_to_string(path).ok();
+        return fs::read_to_string(path);
     }
 
     let mut buf = vec![0u8; MAX_FILE_BYTES];
-    let n = file.read(&mut buf).ok()?;
+    let n = file.read(&mut buf)?;
     // Trim `n` to the last complete UTF-8 boundary so a mid-codepoint cut
     // doesn't produce replacement characters in the tail.
     let valid_len = std::str::from_utf8(&buf[..n])
         .map(|_| n)
         .unwrap_or_else(|e| e.valid_up_to());
     let text = String::from_utf8_lossy(&buf[..valid_len]);
-    Some(text.into_owned())
+    Ok(text.into_owned())
 }
 
 /// Extract the first user message text from a fully-parsed JSON value.

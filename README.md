@@ -8,7 +8,7 @@
 > Find the AI coding session you meant to resume.
 
 `agf` is a local-first fuzzy finder for AI coding-agent sessions.
-Search local sessions across **Claude Code**, **Codex**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, **pi**, and **Hermes** — then resume the right one in a keystroke.
+Search local sessions across **Claude Code**, **Codex**, **Prime Agent**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, **pi**, and **Hermes** — then resume the right one in a keystroke.
 
 ![agf demo](./assets/demo.gif)
 
@@ -45,10 +45,11 @@ Then you either dig through history files or start over.
 |:---|:---|:---|
 | [Claude Code](https://github.com/anthropics/claude-code) | `claude --resume <id>` | `~/.claude/history.jsonl` + `~/.claude/projects/` |
 | [Codex](https://github.com/openai/codex) | `codex resume <id>` | `~/.codex/sessions/**/*.jsonl` |
+| [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `prime-agent --resume <id>` | `~/.prime/agent/sessions/<id>.jsonl` |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` |
 | [Cursor CLI](https://cursor.com/docs/cli/overview) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy) |
 | [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
-| [Kiro](https://kiro.dev) | `kiro-cli chat --resume` *(no per-session resume — always opens the latest session for the cwd)* | `~/Library/Application Support/kiro-cli/data.sqlite3` |
+| [Kiro](https://kiro.dev) | `kiro-cli chat --resume-id <id>` | Kiro v2 SQLite + Kiro v3 `~/.kiro/sessions/cli/` |
 | [pi](https://github.com/badlogic/pi-mono) | `pi --session <id>` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
 | [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes --resume <id>` *(cwd-independent — resumes in your current shell directory)* | `~/.hermes/state.db` |
 | [Oh My Pi](https://github.com/can1357/oh-my-pi) | `omp --resume <id>` | `~/.omp/agent/sessions/<cwd>/*.jsonl` |
@@ -61,10 +62,11 @@ Then you either dig through history files or start over.
 |:---|:---|:---|
 | Claude Code | JSONL | `~/.claude/history.jsonl` (sessions)<br>`~/.claude/projects/*/` (worktree detection) |
 | Codex | JSONL | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| Prime Agent | JSONL | `~/.prime/agent/sessions/<id>.jsonl` (also honors Prime Agent environment/global settings overrides) |
 | OpenCode | SQLite | `~/.local/share/opencode/opencode.db` |
 | pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |
 | Oh My Pi | JSONL | `~/.omp/agent/sessions/<encoded-cwd>/<ts>_<id>.jsonl` |
-| Kiro | SQLite | macOS: `~/Library/Application Support/kiro-cli/data.sqlite3`<br>Linux: `~/.local/share/kiro-cli/data.sqlite3` |
+| Kiro | SQLite + JSON/JSONL | v2: macOS `~/Library/Application Support/kiro-cli/data.sqlite3`, Linux `~/.local/share/kiro-cli/data.sqlite3`<br>v3: `$KIRO_HOME/sessions/cli/` or `~/.kiro/sessions/cli/` |
 | Cursor CLI | SQLite + JSONL/TXT | `~/.cursor/chats/<workspace>/<id>/store.db` (metadata; required for `.jsonl` to be resumable)<br>`~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+ transcript)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy transcript) |
 | Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
 | Hermes | SQLite | `~/.hermes/state.db` (sessions + messages)<br>JSON dumps in `~/.hermes/sessions/session_<id>.json`<br>Hermes is cwd-independent — resume runs in your current shell directory |
@@ -143,13 +145,14 @@ sort_by = "time"            # "time" | "name" | "agent"
 max_sessions = 200
 search_scope = "name_path"  # "name_path" (default) | "all" (include summaries)
 summary_search_count = 5    # number of summaries included when search_scope = "all"
+include_non_interactive = false # show Codex subagent/exec threads
 ```
 
 You can also edit `search_scope` and `summary_search_count` interactively by pressing `?` in the TUI.
 
 ## Shell integration
 
-`agf setup` auto-detects your shell and installs the wrapper. Supported shells:
+`agf setup` auto-detects your shell and installs the wrapper. Use `agf setup --shell powershell` (or another supported shell) when auto-detection is ambiguous.
 
 - **zsh / bash** — appends to `~/.zshrc` or `~/.bashrc`
 - **fish** — writes to `~/.config/fish/config.fish`
@@ -170,7 +173,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 ## Requirements
 
 - macOS, Linux, or Windows (PowerShell 5.1+ / PowerShell 7+)
-- One or more of: `claude`, `codex`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `omp`, `yolop`
+- One or more of: `claude`, `codex`, `prime-agent`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `omp`, `yolop`
 
 ## Install from source
 
@@ -184,6 +187,8 @@ agf setup
 ## Limitations
 
 `agf` works best with agents that store resumable sessions locally.
+
+Prime Agent session discovery and resume are supported, but deletion is intentionally disabled: Prime Agent has no public session-delete command and direct file deletion would bypass its active-daemon guard.
 
 **Amp** is not supported yet because its sessions are stored remotely, which makes it hard to reliably resolve local project paths from session metadata. We are monitoring upstream changes and will add support when feasible.
 

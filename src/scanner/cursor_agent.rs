@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -6,7 +7,7 @@ use walkdir::WalkDir;
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
-use super::{project_name_from_path, truncate};
+use super::{for_each_bounded_line, project_name_from_path, truncate};
 
 /// Max chars stored per session summary.
 const SUMMARY_MAX_CHARS: usize = 100;
@@ -22,6 +23,7 @@ const MAX_PARSE_BYTES: usize = 512 * 1024;
 /// almost always lands within the first few lines; the cap bounds work on
 /// pathological transcripts that pad with non-`role=user` rows.
 const MAX_PARSE_LINES: usize = 50;
+const MAX_LINE_BYTES: usize = 256 * 1024;
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     scan_from(&crate::config::cursor_dir()?)
@@ -35,18 +37,18 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
     }
 
     let chats_dir = cursor_dir.join("chats");
+    // Build once. The previous per-transcript read_dir(chats) lookup was
+    // O(session_count × workspace_count) and dominated cold scans for users
+    // with many Cursor workspaces.
+    let store_dbs = index_store_dbs(&chats_dir)?;
     let mut sessions = Vec::new();
 
     // Single walk covers both storage formats:
     //
     //   Legacy  (Cursor ≤ 2.4.7):  projects/<slug>/agent-transcripts/<uuid>.txt      (depth 3)
     //   Current (Composer 2 / 3+): projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl (depth 4)
-    for entry in WalkDir::new(&projects_dir)
-        .min_depth(3)
-        .max_depth(4)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&projects_dir).min_depth(3).max_depth(4) {
+        let entry = entry.map_err(std::io::Error::other)?;
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -124,17 +126,16 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
         // (Composer 2+) format we treat the absence of store.db as "orphaned"
         // and skip the session — otherwise agf would show sessions that
         // cursor-agent itself refuses to resume.
-        let store_db_path = if chats_dir.exists() {
-            find_store_db_path(&chats_dir, &session_id)
-        } else {
-            None
-        };
+        let store_db_path = store_dbs.get(&session_id);
 
         if ext == Some("jsonl") && store_db_path.is_none() {
             continue;
         }
 
-        let meta = store_db_path.as_deref().and_then(read_store_db);
+        let meta = match store_db_path {
+            Some(path) => read_store_db(path)?,
+            None => None,
+        };
 
         // Last-activity time: the transcript file is appended on every turn,
         // so its mtime tracks when the session was last used. Prefer it over
@@ -172,6 +173,7 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
             git_branch: None,
             worktree: None,
             recap: None,
+            interactive: true,
         });
     }
 
@@ -187,34 +189,56 @@ struct StoreMeta {
 ///
 /// Presence of this file means cursor-agent considers the session resumable;
 /// the file is the source of truth for `/resume`.
-fn find_store_db_path(chats_dir: &Path, session_id: &str) -> Option<PathBuf> {
-    let read_dir = std::fs::read_dir(chats_dir).ok()?;
-    for workspace_entry in read_dir.filter_map(|e| e.ok()) {
-        let store_path = workspace_entry.path().join(session_id).join("store.db");
-        if store_path.exists() {
-            return Some(store_path);
+fn index_store_dbs(chats_dir: &Path) -> Result<HashMap<String, PathBuf>, AgfError> {
+    if !chats_dir.exists() {
+        return Ok(HashMap::new());
+    }
+    let mut stores = HashMap::new();
+    for entry in WalkDir::new(chats_dir).min_depth(3).max_depth(3) {
+        let entry = entry.map_err(std::io::Error::other)?;
+        if !entry.file_type().is_file() || entry.file_name() != "store.db" {
+            continue;
+        }
+        if let Some(id) = entry
+            .path()
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+        {
+            stores.insert(id.to_string(), entry.into_path());
         }
     }
-    None
+    Ok(stores)
 }
 
 /// Read the `meta` table from store.db, hex-decode the value, and parse as JSON.
-fn read_store_db(store_path: &Path) -> Option<StoreMeta> {
+fn read_store_db(store_path: &Path) -> Result<Option<StoreMeta>, AgfError> {
     let conn = Connection::open_with_flags(
         store_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
+    )?;
 
     // Cursor CLI stores session metadata as hex-encoded JSON in meta WHERE key='0'
-    let mut stmt = conn
-        .prepare("SELECT value FROM meta WHERE key = '0'")
-        .ok()?;
-    let hex_value: String = stmt.query_row([], |row| row.get(0)).ok()?;
+    let mut stmt = match conn.prepare("SELECT value FROM meta WHERE key = '0'") {
+        Ok(stmt) => stmt,
+        Err(error) if error.to_string().contains("no such table") => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let hex_value: String = match stmt.query_row([], |row| row.get(0)) {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
 
-    let json_bytes = hex_decode(&hex_value)?;
-    let json_str = std::str::from_utf8(&json_bytes).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let Some(json_bytes) = hex_decode(&hex_value) else {
+        return Ok(None);
+    };
+    let Ok(json_str) = std::str::from_utf8(&json_bytes) else {
+        return Ok(None);
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) else {
+        return Ok(None);
+    };
 
     let name = parsed
         .get("name")
@@ -227,7 +251,7 @@ fn read_store_db(store_path: &Path) -> Option<StoreMeta> {
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    Some(StoreMeta { name, created_at })
+    Ok(Some(StoreMeta { name, created_at }))
 }
 
 /// Decode a hex-encoded string to bytes.
@@ -251,75 +275,58 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 /// User turns may contain a `<user_info>` system injection (always first) followed by
 /// the actual `<user_query>` prompt. We skip info blocks and strip the query tags.
 fn extract_first_prompt(jsonl_path: &Path) -> Option<String> {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-
-    let file = File::open(jsonl_path).ok()?;
-    let reader = BufReader::new(file);
-
-    let mut bytes_read = 0usize;
-    for (lines_seen, line_result) in reader.lines().enumerate() {
-        if lines_seen >= MAX_PARSE_LINES || bytes_read >= MAX_PARSE_BYTES {
-            break;
+    let mut found = None;
+    let mut lines_seen = 0usize;
+    for_each_bounded_line(jsonl_path, MAX_PARSE_BYTES, MAX_LINE_BYTES, |line| {
+        if found.is_some() || lines_seen >= MAX_PARSE_LINES {
+            return;
         }
-
-        // A single bad line (invalid UTF-8, transient IO error, malformed
-        // JSON, partial flush from a crashed session) must skip just that
-        // line — never disable extraction for the rest of the file. The
-        // previous `.ok()?` pattern silently defeated this fallback for any
-        // transcript whose first 50 lines had even one unparseable row.
-        let Ok(line) = line_result else {
-            continue;
-        };
-        bytes_read += line.len() + 1; // +1 approximates the stripped newline
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+        lines_seen += 1;
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) {
+            found = prompt_from_cursor_value(&value);
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if value.get("role").and_then(|v| v.as_str()) != Some("user") {
+    });
+    found
+}
+
+fn prompt_from_cursor_value(value: &serde_json::Value) -> Option<String> {
+    if value.get("role").and_then(|v| v.as_str()) != Some("user") {
+        return None;
+    }
+    let parts = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())?;
+
+    for part in parts {
+        if part.get("type").and_then(|t| t.as_str()) != Some("text") {
             continue;
         }
-        let Some(parts) = value
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        else {
+        let Some(text) = part.get("text").and_then(|t| t.as_str()) else {
             continue;
         };
-
-        for part in parts {
-            if part.get("type").and_then(|t| t.as_str()) != Some("text") {
-                continue;
-            }
-            let Some(text) = part.get("text").and_then(|t| t.as_str()) else {
-                continue;
-            };
-            if text.trim_start().starts_with("<user_info>") {
-                continue;
-            }
-            // Strip the `<user_query>...</user_query>` wrapper if present.
-            // `str::find` returns the FIRST occurrence of each substring
-            // independently, so we must search for the closing tag AFTER
-            // the opening one — otherwise a text like
-            // `"</user_query>foo<user_query>...</user_query>"` (which can
-            // occur in a pasted log or AI-generated code sample) gives
-            // s > e and `text[s+12..e]` panics with `begin > end`.
-            let prompt = match text.find("<user_query>") {
-                Some(s) => {
-                    let after = s + "<user_query>".len();
-                    match text[after..].find("</user_query>") {
-                        Some(rel) => text[after..after + rel].trim(),
-                        None => text.trim(),
-                    }
+        if text.trim_start().starts_with("<user_info>") {
+            continue;
+        }
+        // Strip the `<user_query>...</user_query>` wrapper if present.
+        // `str::find` returns the FIRST occurrence of each substring
+        // independently, so we must search for the closing tag AFTER
+        // the opening one — otherwise a text like
+        // `"</user_query>foo<user_query>...</user_query>"` (which can
+        // occur in a pasted log or AI-generated code sample) gives
+        // s > e and `text[s+12..e]` panics with `begin > end`.
+        let prompt = match text.find("<user_query>") {
+            Some(s) => {
+                let after = s + "<user_query>".len();
+                match text[after..].find("</user_query>") {
+                    Some(rel) => text[after..after + rel].trim(),
+                    None => text.trim(),
                 }
-                None => text.trim(),
-            };
-            if !prompt.is_empty() {
-                return Some(truncate(prompt, SUMMARY_MAX_CHARS));
             }
+            None => text.trim(),
+        };
+        if !prompt.is_empty() {
+            return Some(truncate(prompt, SUMMARY_MAX_CHARS));
         }
     }
     None
@@ -329,6 +336,16 @@ fn extract_first_prompt(jsonl_path: &Path) -> Option<String> {
 /// e.g. "Users-subinium-Desktop-my-project" -> /Users/subinium/Desktop/my-project
 fn decode_dash_path(encoded: &str) -> Option<PathBuf> {
     let parts: Vec<&str> = encoded.split('-').collect();
+    #[cfg(windows)]
+    if let Some(drive) = parts.first()
+        && drive.len() == 1
+        && drive.as_bytes()[0].is_ascii_alphabetic()
+    {
+        let root = PathBuf::from(format!("{}:\\", drive.to_ascii_uppercase()));
+        if let Some(path) = solve(&parts, 1, &root) {
+            return Some(path);
+        }
+    }
     solve(&parts, 0, Path::new("/"))
 }
 

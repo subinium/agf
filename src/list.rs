@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 
 use crate::model::Session;
 use crate::text;
@@ -34,7 +34,7 @@ struct Ansi {
 impl Ansi {
     fn new() -> Self {
         Self {
-            enabled: io::stdout().is_terminal(),
+            enabled: text::color_enabled(),
         }
     }
     fn rgb(&self, r: u8, g: u8, b: u8, text: &str) -> String {
@@ -77,7 +77,7 @@ fn print_table(sessions: &[Session]) {
 
     let max_project = sessions
         .iter()
-        .map(|s| text::width(&s.project_name))
+        .map(|s| text::width(&text::sanitize_terminal(&s.project_name)))
         .max()
         .unwrap_or(7)
         .clamp(7, 25);
@@ -117,15 +117,18 @@ fn print_table(sessions: &[Session]) {
     );
 
     for (i, s) in sessions.iter().enumerate() {
-        let path = s.display_path();
+        let path = text::sanitize_terminal(&s.display_path());
         let (r, g, b_val) = s.agent.color();
         // `text::fit`, not `format!("{:<n$}", …)`: the column budget is in
         // terminal columns but `{:<n$}` pads by char count, so a CJK project
         // name would push every column after it out of alignment.
-        let project = text::fit(&s.project_name, max_project);
+        let project = text::fit(&text::sanitize_terminal(&s.project_name), max_project);
         let agent = text::fit(&s.agent.to_string(), max_agent);
         let time = text::fit(&s.time_display(), 14);
-        let branch = text::fit(s.git_branch.as_deref().unwrap_or("—"), 10);
+        let branch = text::fit(
+            &text::sanitize_terminal(s.git_branch.as_deref().unwrap_or("—")),
+            10,
+        );
         let num = format!("{:>3}", i + 1);
 
         let _ = writeln!(
@@ -156,21 +159,25 @@ fn print_json(sessions: &[Session]) {
                 "git_branch": s.git_branch,
                 "worktree": s.worktree,
                 "summaries": s.summaries,
+                "interactive": s.interactive,
             })
         })
         .collect();
     if let Ok(json) = serde_json::to_string_pretty(&items) {
-        println!("{json}");
+        let mut out = io::stdout().lock();
+        let _ = writeln!(out, "{json}");
     }
 }
 
 fn print_csv(sessions: &[Session]) {
-    println!("project,agent,time,path,session_id,branch");
+    let mut out = io::stdout().lock();
+    let _ = writeln!(out, "project,agent,time,path,session_id,branch");
     for s in sessions {
         // Every field goes through `csv_escape`. Branch names in particular
         // may legally contain commas, which would silently shift every later
         // column in the consuming spreadsheet/script.
-        println!(
+        let _ = writeln!(
+            out,
             "{},{},{},{},{},{}",
             csv_escape(&s.project_name),
             csv_escape(&s.agent.to_string()),
@@ -188,22 +195,6 @@ fn csv_escape(s: &str) -> String {
     } else {
         s.to_string()
     }
-}
-
-pub fn filter_by_agent(sessions: Vec<Session>, agent_name: &str) -> Vec<Session> {
-    let agent_lower = agent_name.to_lowercase();
-    sessions
-        .into_iter()
-        .filter(|s| {
-            s.agent.cli_name().to_lowercase() == agent_lower
-                || s.agent.to_string().to_lowercase() == agent_lower
-                || s.agent
-                    .to_string()
-                    .to_lowercase()
-                    .replace(' ', "")
-                    .contains(&agent_lower)
-        })
-        .collect()
 }
 
 #[cfg(test)]

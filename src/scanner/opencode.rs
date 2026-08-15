@@ -30,41 +30,41 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
          ORDER BY s.time_updated DESC",
     )?;
 
-    let sessions = stmt
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let title: String = row.get(1)?;
-            let directory: String = row.get(2)?;
-            let time_updated: i64 = row.get(3)?;
-            let sub_titles: Option<String> = row.get(4)?;
-            Ok((id, title, directory, time_updated, sub_titles))
-        })?
-        .filter_map(|r| r.ok())
-        .map(|(id, title, directory, time_updated, sub_titles)| {
-            let project_name = project_name_from_path(&directory);
+    let rows = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let title: String = row.get(1)?;
+        let directory: String = row.get(2)?;
+        let time_updated: i64 = row.get(3)?;
+        let sub_titles: Option<String> = row.get(4)?;
+        Ok((id, title, directory, time_updated, sub_titles))
+    })?;
+    let mut sessions = Vec::new();
+    for row in rows {
+        let (id, title, directory, time_updated, sub_titles) = row?;
+        let project_name = project_name_from_path(&directory);
 
-            // Parent title first, then deduplicated subagent titles.
-            let mut summaries: Vec<String> = Vec::new();
-            if !title.is_empty() {
-                summaries.push(title);
-            }
-            if let Some(ref blob) = sub_titles {
-                push_concat_titles(&mut summaries, blob);
-            }
+        // Parent title first, then deduplicated subagent titles.
+        let mut summaries: Vec<String> = Vec::new();
+        if !title.is_empty() {
+            summaries.push(title);
+        }
+        if let Some(ref blob) = sub_titles {
+            push_concat_titles(&mut summaries, blob);
+        }
 
-            Session {
-                agent: Agent::OpenCode,
-                session_id: id,
-                project_name,
-                project_path: directory,
-                summaries,
-                timestamp: time_updated,
-                git_branch: None,
-                worktree: None,
-                recap: None,
-            }
-        })
-        .collect();
+        sessions.push(Session {
+            agent: Agent::OpenCode,
+            session_id: id,
+            project_name,
+            project_path: directory,
+            summaries,
+            timestamp: time_updated,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+            interactive: true,
+        });
+    }
 
     Ok(sessions)
 }

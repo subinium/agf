@@ -18,6 +18,8 @@ pub struct Settings {
     pub pinned_sessions: Vec<String>, // session IDs pinned to top of list
     #[serde(default)]
     pub show_recap: bool, // show Claude Code recap (away_summary) instead of last prompt
+    #[serde(default)]
+    pub include_non_interactive: bool, // include Codex subagents/exec sessions
 }
 
 fn default_summary_search_count() -> usize {
@@ -38,6 +40,7 @@ impl Default for Settings {
             editor: None,
             pinned_sessions: Vec::new(),
             show_recap: false,
+            include_non_interactive: false,
         }
     }
 }

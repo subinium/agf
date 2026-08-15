@@ -40,12 +40,12 @@ Say the new agent is `Foo`, CLI `foo`, sessions under `~/.foo/sessions/`.
    - Bound reads on large transcripts with the shared `read_head_tail` / bounded-read
      helpers in `scanner/mod.rs`; never slurp multi-MB logs whole.
    - Skip malformed lines, don't panic on bad input.
-   - Register the module in **`src/scanner/mod.rs`**: add `pub mod foo;` **and** a
-     `thread::spawn(|| foo::scan().unwrap_or_default())` line in `scan_all()`
-     *(plain `Vec` — the compiler won't remind you)*.
+   - Register the module in **`src/scanner/mod.rs`**: add `pub mod foo;` and an
+     `Agent::Foo => foo::scan()` arm in `scan_agent()`. Do not erase errors into
+     empty success; stale cache rows are retained when a scanner fails.
 
-4. **`src/cache.rs`** — add the `Agent::Foo => scanner::foo::scan().unwrap_or_default()`
-   arm in `start_stale_scan()`. Bump `CACHE_VERSION` only if the cached payload
+4. **`src/cache.rs`** — no agent-specific dispatch is required; workers call the
+   common `scanner::scan_agent()`. Ensure `Session` cache fields round-trip. Bump `CACHE_VERSION` only if the cached payload
    *shape* can change within a single released package version (a new agent key
    alone doesn't require it — the `agf_version` stamp forces a rescan on upgrade).
 
@@ -69,14 +69,14 @@ Say the new agent is `Foo`, CLI `foo`, sessions under `~/.foo/sessions/`.
 
 ```bash
 cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 # Real-data smoke test (scans all agents regardless of install):
 AGF_DEBUG=1 cargo run -- list --agent foo --format json
 ```
 
-`agf list` runs every scanner unconditionally, so you can verify `foo` against a
-fixture `$HOME` without installing the CLI:
+An explicit `--agent foo` scans only Foo when its cache entry is stale, so you
+can verify it against a fixture `$HOME` without installing the other CLIs:
 
 ```bash
 HOME=/tmp/agf-fixture cargo run -- list --agent foo --format json

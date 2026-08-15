@@ -92,7 +92,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 GROUP_CONCAT(child.title, '|||'), \
                 ( \
                     SELECT GROUP_CONCAT(content, '|||') FROM ( \
-                        SELECT content FROM messages \
+                        SELECT substr(content, 1, 4096) AS content FROM messages \
                         WHERE session_id = s.id AND role = 'user' AND content IS NOT NULL \
                         ORDER BY timestamp ASC LIMIT 4 \
                     ) \
@@ -108,96 +108,93 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
          ORDER BY ts_ms DESC",
     )?;
 
-    let sessions = stmt
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let title: Option<String> = row.get(1)?;
-            let source: String = row.get(2)?;
-            let model: Option<String> = row.get(3)?;
-            let message_count: i64 = row.get(4)?;
-            let timestamp: i64 = row.get(5)?;
-            let child_titles: Option<String> = row.get(6)?;
-            let user_msgs: Option<String> = row.get(7)?;
-            Ok((
-                id,
-                title,
-                source,
-                model,
-                message_count,
-                timestamp,
-                child_titles,
-                user_msgs,
-            ))
-        })?
-        .filter_map(|r| r.ok())
-        .map(
-            |(id, title, source, model, message_count, timestamp, child_titles, user_msgs)| {
-                // Build summaries: title first, then child session titles,
-                // then up to 4 user-message previews so the TUI detail pane
-                // shows how the conversation actually went, not just one
-                // line.
-                let mut summaries: Vec<String> = Vec::new();
-                if let Some(ref t) = title
-                    && !t.is_empty()
+    let rows = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let title: Option<String> = row.get(1)?;
+        let source: String = row.get(2)?;
+        let model: Option<String> = row.get(3)?;
+        let message_count: i64 = row.get(4)?;
+        let timestamp: i64 = row.get(5)?;
+        let child_titles: Option<String> = row.get(6)?;
+        let user_msgs: Option<String> = row.get(7)?;
+        Ok((
+            id,
+            title,
+            source,
+            model,
+            message_count,
+            timestamp,
+            child_titles,
+            user_msgs,
+        ))
+    })?;
+    let mut sessions = Vec::new();
+    for row in rows {
+        let (id, title, source, model, message_count, timestamp, child_titles, user_msgs) = row?;
+        // Build summaries: title first, then child session titles,
+        // then up to 4 user-message previews so the TUI detail pane
+        // shows how the conversation actually went, not just one
+        // line.
+        let mut summaries: Vec<String> = Vec::new();
+        if let Some(ref t) = title
+            && !t.is_empty()
+        {
+            summaries.push(t.clone());
+        }
+        if let Some(ref children) = child_titles {
+            push_concat_titles(&mut summaries, children);
+        }
+        // Only surface user-message previews for ids that look like
+        // CLI/TUI sessions. dashboard:*/api-*/named ids get messages
+        // from external integrations (Notion webhooks, scheduled
+        // crons, dashboard callers), so their `role='user'` rows
+        // are not the user's own prompts and would mislead the
+        // TUI summary.
+        if is_user_cli_session(&id)
+            && let Some(ref blob) = user_msgs
+        {
+            let mut seen: std::collections::HashSet<String> = summaries.iter().cloned().collect();
+            for raw in blob.split("|||") {
+                if let Some(preview) = message_preview(raw)
+                    && seen.insert(preview.clone())
                 {
-                    summaries.push(t.clone());
+                    summaries.push(preview);
                 }
-                if let Some(ref children) = child_titles {
-                    push_concat_titles(&mut summaries, children);
-                }
-                // Only surface user-message previews for ids that look like
-                // CLI/TUI sessions. dashboard:*/api-*/named ids get messages
-                // from external integrations (Notion webhooks, scheduled
-                // crons, dashboard callers), so their `role='user'` rows
-                // are not the user's own prompts and would mislead the
-                // TUI summary.
-                if is_user_cli_session(&id)
-                    && let Some(ref blob) = user_msgs
-                {
-                    let mut seen: std::collections::HashSet<String> =
-                        summaries.iter().cloned().collect();
-                    for raw in blob.split("|||") {
-                        if let Some(preview) = message_preview(raw)
-                            && seen.insert(preview.clone())
-                        {
-                            summaries.push(preview);
-                        }
-                    }
-                }
+            }
+        }
 
-                // If we still have nothing, fall back to source + model info
-                // so the row is never blank.
-                if summaries.is_empty() {
-                    let mut fallback = format!("{source} session");
-                    if let Some(ref m) = model
-                        && !m.is_empty()
-                    {
-                        // Extract short model name (e.g. "claude-opus-4-6" from "anthropic/claude-opus-4-6")
-                        let short = m.rsplit('/').next().unwrap_or(m);
-                        fallback = format!("{fallback} ({short})");
-                    }
-                    if message_count > 0 {
-                        fallback = format!("{fallback} — {message_count} msgs");
-                    }
-                    summaries.push(fallback);
-                }
+        // If we still have nothing, fall back to source + model info
+        // so the row is never blank.
+        if summaries.is_empty() {
+            let mut fallback = format!("{source} session");
+            if let Some(ref m) = model
+                && !m.is_empty()
+            {
+                // Extract short model name (e.g. "claude-opus-4-6" from "anthropic/claude-opus-4-6")
+                let short = m.rsplit('/').next().unwrap_or(m);
+                fallback = format!("{fallback} ({short})");
+            }
+            if message_count > 0 {
+                fallback = format!("{fallback} — {message_count} msgs");
+            }
+            summaries.push(fallback);
+        }
 
-                Session {
-                    agent: Agent::Hermes,
-                    session_id: id,
-                    project_name: "hermes".to_string(),
-                    // Empty path → resume runs in the user's current cwd
-                    // (Hermes is cwd-independent). See shell::cd_and.
-                    project_path: String::new(),
-                    summaries,
-                    timestamp,
-                    git_branch: None,
-                    worktree: None,
-                    recap: None,
-                }
-            },
-        )
-        .collect();
+        sessions.push(Session {
+            agent: Agent::Hermes,
+            session_id: id,
+            project_name: "hermes".to_string(),
+            // Empty path → resume runs in the user's current cwd
+            // (Hermes is cwd-independent). See shell::cd_and.
+            project_path: String::new(),
+            summaries,
+            timestamp,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+            interactive: true,
+        });
+    }
 
     Ok(sessions)
 }

@@ -16,6 +16,7 @@ mod tui;
 mod watch;
 
 use std::io::IsTerminal;
+use std::io::Write;
 
 use clap::{Parser, Subcommand};
 
@@ -38,10 +39,15 @@ enum Commands {
     /// Output shell wrapper function for the given shell
     Init {
         /// Shell type: zsh, bash, fish, or powershell (alias: pwsh)
+        #[arg(value_parser = ["zsh", "bash", "fish", "powershell", "pwsh"])]
         shell: String,
     },
-    /// Auto-detect shell and add agf to your shell config
-    Setup,
+    /// Add agf to a shell config (auto-detected unless --shell is supplied)
+    Setup {
+        /// Shell type: zsh, bash, fish, or powershell
+        #[arg(long)]
+        shell: Option<String>,
+    },
     /// Fuzzy-match a session and resume it directly (no TUI)
     Resume {
         /// Fuzzy query to match a session (project name, path, summary)
@@ -55,6 +61,9 @@ enum Commands {
         /// Permission/approval mode (e.g. acceptEdits, yolo, full-auto)
         #[arg(long)]
         mode: Option<String>,
+        /// Include Codex subagents and non-interactive exec sessions
+        #[arg(long)]
+        include_non_interactive: bool,
     },
     /// List sessions as plain text (for scripting)
     List {
@@ -67,18 +76,27 @@ enum Commands {
         /// Output format: table, json, csv
         #[arg(long, default_value = "table")]
         format: String,
+        /// Include Codex subagents and non-interactive exec sessions
+        #[arg(long)]
+        include_non_interactive: bool,
     },
     /// Show session statistics
     Stats {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Include Codex subagents and non-interactive exec sessions
+        #[arg(long)]
+        include_non_interactive: bool,
     },
     /// Live dashboard showing agent sessions with auto-refresh
     Watch {
         /// Refresh interval in seconds
-        #[arg(long, default_value = "5")]
+        #[arg(long, default_value = "5", value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
+        /// Include Codex subagents and non-interactive exec sessions
+        #[arg(long)]
+        include_non_interactive: bool,
     },
 }
 
@@ -87,7 +105,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn main() -> anyhow::Result<()> {
     // Handle --version / -V manually (clap hides it due to args_conflicts_with_subcommands)
     if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("agf {VERSION}");
+        write_stdout(format!("agf {VERSION}\n").as_bytes())?;
         return Ok(());
     }
 
@@ -95,11 +113,11 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Init { shell }) => {
-            print!("{}", shell::shell_init(&shell));
+            write_stdout(shell::shell_init(&shell).as_bytes())?;
             return Ok(());
         }
-        Some(Commands::Setup) => {
-            shell::setup()?;
+        Some(Commands::Setup { shell }) => {
+            shell::setup(shell.as_deref())?;
             return Ok(());
         }
         Some(Commands::Resume {
@@ -107,15 +125,13 @@ fn main() -> anyhow::Result<()> {
             agent,
             list: list_count,
             mode,
+            include_non_interactive,
         }) => {
             let query = query.join(" ");
-            let mut sessions = scanner::scan_all();
-            if let Some(ref agent_name) = agent {
-                sessions = list::filter_by_agent(sessions, agent_name);
-            }
+            let sessions = scan_for_cli(agent.as_deref(), include_non_interactive)?;
             let mut fuzzy = fuzzy::FuzzyMatcher::new();
             let all_indices: Vec<usize> = (0..sessions.len()).collect();
-            let results = fuzzy.filter(&sessions, &all_indices, &query, 5, false);
+            let results = fuzzy.filter(&sessions, &all_indices, &query, 5, true);
 
             if results.is_empty() {
                 eprintln!("No session matching '{query}'");
@@ -123,6 +139,9 @@ fn main() -> anyhow::Result<()> {
             }
 
             let chosen = if let Some(n) = list_count {
+                if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                    anyhow::bail!("resume --list requires an interactive terminal");
+                }
                 // Interactive: show top N and let user pick. `n.max(1)` guards
                 // `--list 0`: an empty top_n would underflow `top_n.len() - 1`
                 // below (results is already non-empty here).
@@ -133,14 +152,20 @@ fn main() -> anyhow::Result<()> {
                         "  {}) {} | {} | {}",
                         i + 1,
                         s.agent,
-                        s.project_name,
+                        text::sanitize_terminal(&s.project_name),
                         s.time_display()
                     );
                 }
                 eprint!("Select [1-{}]: ", top_n.len());
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input)?;
-                let pick: usize = input.trim().parse().unwrap_or(1);
+                let pick: usize = input
+                    .trim()
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid selection"))?;
+                if !(1..=top_n.len()).contains(&pick) {
+                    anyhow::bail!("selection must be between 1 and {}", top_n.len());
+                }
                 let idx = pick.saturating_sub(1).min(top_n.len() - 1);
                 &sessions[all_indices[top_n[idx].index]]
             } else {
@@ -148,17 +173,28 @@ fn main() -> anyhow::Result<()> {
             };
 
             // Build resume command with optional mode flags
-            let flags = mode
-                .as_deref()
-                .and_then(|m| {
-                    chosen
-                        .agent
-                        .resume_mode_options()
-                        .iter()
-                        .find(|(label, _)| label.to_lowercase().contains(&m.to_lowercase()))
-                        .map(|(_, f)| *f)
-                })
-                .unwrap_or("");
+            let flags = match mode.as_deref() {
+                None => "",
+                Some(requested) => chosen
+                    .agent
+                    .resume_mode_options()
+                    .iter()
+                    .find(|(label, _)| label.eq_ignore_ascii_case(requested))
+                    .map(|(_, flags)| *flags)
+                    .ok_or_else(|| {
+                        let available = chosen
+                            .agent
+                            .resume_mode_options()
+                            .iter()
+                            .map(|(label, _)| *label)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        anyhow::anyhow!(
+                            "unsupported mode {requested:?} for {}; expected one of: {available}",
+                            chosen.agent
+                        )
+                    })?,
+            };
 
             let cmd = action::resume_with_flags(chosen, flags);
             return deliver_command(&cmd);
@@ -167,11 +203,9 @@ fn main() -> anyhow::Result<()> {
             agent,
             limit,
             format,
+            include_non_interactive,
         }) => {
-            let mut sessions = scanner::scan_all();
-            if let Some(ref agent_name) = agent {
-                sessions = list::filter_by_agent(sessions, agent_name);
-            }
+            let mut sessions = scan_for_cli(agent.as_deref(), include_non_interactive)?;
             sessions.truncate(limit);
             if sessions.is_empty() {
                 eprintln!("No sessions found.");
@@ -180,35 +214,40 @@ fn main() -> anyhow::Result<()> {
             list::list_sessions(&sessions, list::OutputFormat::parse(&format));
             return Ok(());
         }
-        Some(Commands::Stats { json }) => {
-            let sessions = scanner::scan_all();
+        Some(Commands::Stats {
+            json,
+            include_non_interactive,
+        }) => {
+            let sessions = scan_for_cli(None, include_non_interactive)?;
             stats::print_stats(&sessions, json);
             return Ok(());
         }
-        Some(Commands::Watch { interval }) => {
-            watch::run_watch(interval)?;
+        Some(Commands::Watch {
+            interval,
+            include_non_interactive,
+        }) => {
+            watch::run_watch(interval, include_non_interactive)?;
             return Ok(());
         }
         None => {}
     }
 
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(anyhow::anyhow!(
+            "interactive TUI requires terminal stdin and stdout; use `agf list` for pipelines"
+        ));
+    }
+
     let config = settings::Settings::load();
 
-    // Enter alt-screen BEFORE scanning so the user doesn't see their shell prompt
-    // during the first-run scan (which can take 200ms-3s). The guard is scoped so
-    // it drops before `deliver_command()` runs — that path may `exec sh -c` and
-    // inherits terminal state.
     let cmd_opt = {
-        let guard = AltScreenGuard::new();
-
         // Load whatever the cache has — even if stale, we open the TUI on it
         // immediately so cold starts feel instant. Stale agents refresh in
         // the background and stream their results into the running TUI.
-        let (mut sessions, stale_agents) = cache::load_cache();
+        let (sessions, stale_agents) = cache::load_cache();
 
         // Cold cache + no installed agents: nothing we can ever scan.
         if sessions.is_empty() && stale_agents.is_empty() {
-            drop(guard);
             eprintln!("No agent sessions found.");
             return Ok(());
         }
@@ -220,15 +259,6 @@ fn main() -> anyhow::Result<()> {
         };
         let scanning_agents: std::collections::HashSet<model::Agent> =
             stale_agents.iter().copied().collect();
-
-        // Apply max_sessions limit from config (the streamed-in agents will
-        // also re-truncate after each ingest in App::ingest_scan_result).
-        if let Some(max) = config.max_sessions {
-            sessions.truncate(max);
-        }
-
-        // Keep the guard alive for the full TUI session.
-        let _guard = guard;
 
         let cwd = std::env::current_dir()
             .ok()
@@ -263,7 +293,14 @@ fn main() -> anyhow::Result<()> {
         // the next launch reflects all scans that completed before exit.
         // Agents still scanning at exit keep their prior cache entry so we
         // don't accidentally persist "empty + fresh-mtime" for them.
-        cache::write_cache(&app.sessions, &app.scanning_agents);
+        let cache_skip_agents = app.cache_skip_agents();
+        let cache_invalidate_agents = app.cache_invalidate_agents();
+        cache::write_cache(
+            &app.sessions,
+            &cache_skip_agents,
+            &cache_invalidate_agents,
+            &app.scan_fingerprints,
+        );
         result
     };
 
@@ -274,35 +311,76 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// RAII guard that enters the alternate screen and hides the cursor on
-/// construction, and restores both on drop. Uses raw ANSI escape codes to
-/// avoid taking a direct dependency on crossterm.
-///
-/// Safe to nest: SLT's `run_with` also enters the alt-screen via the same
-/// VT control sequence; entering twice is idempotent at the terminal level.
-struct AltScreenGuard;
-
-impl AltScreenGuard {
-    fn new() -> Self {
-        use std::io::Write;
-        let mut out = std::io::stdout();
-        // ESC[?1049h  enter alt-screen buffer
-        // ESC[?25l    hide cursor
-        let _ = out.write_all(b"\x1b[?1049h\x1b[?25l");
-        let _ = out.flush();
-        Self
+fn write_stdout(content: &[u8]) -> anyhow::Result<()> {
+    match std::io::stdout().lock().write_all(content) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
-impl Drop for AltScreenGuard {
-    fn drop(&mut self) {
-        use std::io::Write;
-        let mut out = std::io::stdout();
-        // ESC[?1049l  leave alt-screen buffer
-        // ESC[?25h    show cursor
-        let _ = out.write_all(b"\x1b[?1049l\x1b[?25h");
-        let _ = out.flush();
+fn scan_for_cli(
+    agent_name: Option<&str>,
+    include_non_interactive: bool,
+) -> anyhow::Result<Vec<model::Session>> {
+    let include_non_interactive =
+        include_non_interactive || settings::Settings::load().include_non_interactive;
+    let requested = agent_name
+        .map(|name| {
+            model::Agent::parse(name).ok_or_else(|| anyhow::anyhow!("unknown agent {name:?}"))
+        })
+        .transpose()?;
+    let (mut sessions, stale) = cache::load_cache();
+    let agents_to_scan = match requested {
+        Some(agent) if stale.contains(&agent) || !config::is_agent_installed(agent) => vec![agent],
+        Some(_) => Vec::new(),
+        None => stale,
+    };
+    if !agents_to_scan.is_empty() {
+        let mut succeeded = std::collections::HashSet::new();
+        let mut observed_fingerprints = std::collections::HashMap::new();
+        let mut failures = Vec::new();
+        for (agent, result) in scanner::scan_agents_detailed(&agents_to_scan) {
+            match result {
+                Ok(scan) => {
+                    sessions.retain(|session| session.agent != agent);
+                    sessions.extend(scan.sessions);
+                    if let Some(fingerprint) = scan.fingerprint {
+                        observed_fingerprints.insert(agent, fingerprint);
+                    }
+                    succeeded.insert(agent);
+                }
+                Err(error) => failures.push((agent, error)),
+            }
+        }
+        if let Some(agent) = requested
+            && let Some((_, error)) = failures.iter().find(|(failed, _)| *failed == agent)
+        {
+            return Err(anyhow::anyhow!("{agent} scanner failed: {error}"));
+        }
+        for (agent, error) in &failures {
+            eprintln!("[agf] {agent} scanner failed; keeping cached rows: {error}");
+        }
+        sessions.sort_by(|a, b| model::compare_sessions(a, b, model::SortMode::Time));
+
+        let skip_agents: std::collections::HashSet<_> = config::installed_agents()
+            .into_iter()
+            .filter(|agent| !succeeded.contains(agent))
+            .collect();
+        cache::write_cache(
+            &sessions,
+            &skip_agents,
+            &std::collections::HashSet::new(),
+            &observed_fingerprints,
+        );
     }
+    if let Some(agent) = requested {
+        sessions.retain(|session| session.agent == agent);
+    }
+    if !include_non_interactive {
+        sessions.retain(|session| session.interactive);
+    }
+    Ok(sessions)
 }
 
 /// Deliver a generated shell command to the parent context.
@@ -331,7 +409,7 @@ fn deliver_command(cmd: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if std::io::stdout().is_terminal() {
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         return exec_via_shell(cmd, shell);
     }
 

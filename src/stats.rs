@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 
 use crate::model::{Agent, Session};
 use crate::text;
@@ -19,7 +19,7 @@ struct Ansi {
 impl Ansi {
     fn new() -> Self {
         Self {
-            enabled: io::stdout().is_terminal(),
+            enabled: text::color_enabled(),
         }
     }
     fn rgb(&self, r: u8, g: u8, b: u8, text: &str) -> String {
@@ -117,7 +117,7 @@ fn print_text(sessions: &[Session]) {
     let mut by_project: HashMap<String, (usize, Option<Agent>)> = HashMap::new();
     for s in sessions {
         let entry = by_project
-            .entry(s.project_name.clone())
+            .entry(text::sanitize_terminal(&s.project_name))
             .or_insert((0, None));
         entry.0 += 1;
         // Keep first-seen agent (project color)
@@ -160,42 +160,29 @@ fn print_text(sessions: &[Session]) {
 
     // Activity timeline
     let now = chrono::Utc::now().timestamp_millis();
-    let day_ms: i64 = 86_400_000;
-    let week_ms: i64 = 7 * day_ms;
-    let month_ms: i64 = 30 * day_ms;
-
-    let mut today = 0usize;
-    let mut this_week = 0usize;
-    let mut this_month = 0usize;
-    let mut older = 0usize;
-
-    for s in sessions {
-        let age = now - s.timestamp;
-        if age < day_ms {
-            today += 1;
-        } else if age < week_ms {
-            this_week += 1;
-        } else if age < month_ms {
-            this_month += 1;
-        } else {
-            older += 1;
-        }
-    }
+    let activity = activity_counts(sessions, now);
 
     let _ = writeln!(out);
     let _ = writeln!(out, "  {}", a.bold("Activity"));
     let _ = writeln!(out);
 
-    let max_time = [today, this_week, this_month, older]
-        .into_iter()
-        .max()
-        .unwrap_or(1);
+    let max_time = [
+        activity.today,
+        activity.week,
+        activity.month,
+        activity.older,
+        activity.future,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(1);
 
     let time_items = [
-        ("Last 24h", today, (52, 211, 153)),      // green
-        ("Last 7d", this_week, (139, 92, 246)),   // violet
-        ("Last 30d", this_month, (59, 130, 246)), // blue
-        ("Older", older, (107, 114, 128)),        // gray
+        ("Last 24h", activity.today, (52, 211, 153)),
+        ("Last 7d", activity.week, (139, 92, 246)),
+        ("Last 30d", activity.month, (59, 130, 246)),
+        ("Older", activity.older, (107, 114, 128)),
+        ("Future/invalid", activity.future, (239, 68, 68)),
     ];
     for (label, count, (r, g, b)) in &time_items {
         let filled = (count * bar_width).checked_div(max_time).unwrap_or(0);
@@ -224,40 +211,94 @@ fn print_json(sessions: &[Session]) {
     }
 
     let now = chrono::Utc::now().timestamp_millis();
-    let day_ms: i64 = 86_400_000;
-    let week_ms: i64 = 7 * day_ms;
-    let month_ms: i64 = 30 * day_ms;
-
-    let mut today = 0usize;
-    let mut this_week = 0usize;
-    let mut this_month = 0usize;
-    let mut older = 0usize;
-
-    for s in sessions {
-        let age = now - s.timestamp;
-        if age < day_ms {
-            today += 1;
-        } else if age < week_ms {
-            this_week += 1;
-        } else if age < month_ms {
-            this_month += 1;
-        } else {
-            older += 1;
-        }
-    }
+    let activity = activity_counts(sessions, now);
 
     let json = serde_json::json!({
         "total": sessions.len(),
         "by_agent": by_agent,
         "by_project": by_project,
         "activity": {
-            "today": today,
-            "this_week": this_week,
-            "this_month": this_month,
-            "older": older,
+            "today": activity.today,
+            "this_week": activity.week,
+            "this_month": activity.month,
+            "older": activity.older,
+            "future_or_invalid": activity.future,
         }
     });
     if let Ok(s) = serde_json::to_string_pretty(&json) {
-        println!("{s}");
+        let mut out = io::stdout().lock();
+        let _ = writeln!(out, "{s}");
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ActivityCounts {
+    today: usize,
+    week: usize,
+    month: usize,
+    older: usize,
+    future: usize,
+}
+
+fn activity_counts(sessions: &[Session], now: i64) -> ActivityCounts {
+    const DAY: i64 = 86_400_000;
+    const MIN_VALID: i64 = 946_684_800_000;
+    let mut counts = ActivityCounts::default();
+    for session in sessions {
+        if session.timestamp < MIN_VALID || session.timestamp > now.saturating_add(5 * 60_000) {
+            counts.future += 1;
+            continue;
+        }
+        let age = now.saturating_sub(session.timestamp);
+        if age <= DAY {
+            counts.today += 1;
+        }
+        if age <= 7 * DAY {
+            counts.week += 1;
+        }
+        if age <= 30 * DAY {
+            counts.month += 1;
+        } else {
+            counts.older += 1;
+        }
+    }
+    counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_windows_are_cumulative_and_future_is_separate() {
+        let now = 1_800_000_000_000i64;
+        let make = |timestamp: i64| Session {
+            agent: Agent::Codex,
+            session_id: timestamp.to_string(),
+            project_name: "project".into(),
+            project_path: "/tmp/project".into(),
+            summaries: Vec::new(),
+            timestamp,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+            interactive: true,
+        };
+        let sessions = [
+            make(now),
+            make(now - 2 * 86_400_000),
+            make(now - 10 * 86_400_000),
+            make(now + 10 * 60_000),
+        ];
+        assert_eq!(
+            activity_counts(&sessions, now),
+            ActivityCounts {
+                today: 1,
+                week: 2,
+                month: 3,
+                older: 0,
+                future: 1
+            }
+        );
     }
 }

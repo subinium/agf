@@ -12,7 +12,8 @@ pub fn generate_command(
     match action {
         Action::Resume => {
             let cmd = session.agent.resume_cmd(&session.session_id, &shell);
-            Some(shell.cd_and(&quoted_path, &cmd))
+            let resume_path = resume_launch_path(session);
+            Some(shell.cd_and(&shell.quote(resume_path), &cmd))
         }
         Action::NewSession => {
             let agent = new_agent.unwrap_or(session.agent);
@@ -83,9 +84,22 @@ pub fn detect_editor() -> String {
 
 pub fn resume_with_flags(session: &Session, flags: &str) -> String {
     let shell = CommandShell::from_env();
-    let quoted_path = shell.quote(&session.project_path);
+    let quoted_path = shell.quote(resume_launch_path(session));
     let base_cmd = session.agent.resume_cmd(&session.session_id, &shell);
     shell.cd_and(&quoted_path, &format!("{base_cmd}{flags}"))
+}
+
+fn resume_launch_path(session: &Session) -> &str {
+    if session.agent == Agent::PrimeAgent
+        && !session.project_path.is_empty()
+        && !std::path::Path::new(&session.project_path).is_dir()
+    {
+        // Prime Agent can resolve/fork an ID from another cwd. A guaranteed
+        // failing `cd` prevents its own recovery prompt from running at all.
+        ""
+    } else {
+        &session.project_path
+    }
 }
 
 pub fn new_session_with_flags(session: &Session, agent: Agent, flags: &str) -> String {
@@ -111,6 +125,7 @@ mod tests {
             git_branch: None,
             worktree: None,
             recap: None,
+            interactive: true,
         }
     }
 
@@ -140,6 +155,16 @@ mod tests {
         assert_eq!(
             action_preview(&session(""), Action::Cd),
             "no project directory"
+        );
+    }
+
+    #[test]
+    fn prime_resume_skips_a_deleted_stored_cwd() {
+        let mut s = session("/definitely/missing/agf-prime-project");
+        s.agent = Agent::PrimeAgent;
+        assert_eq!(
+            generate_command(&s, Action::Resume, None).unwrap(),
+            "prime-agent --resume 'sid'"
         );
     }
 }

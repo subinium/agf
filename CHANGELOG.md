@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-15
+
+### Added
+
+- **Prime Agent support** — discovers flat Prime Agent v3 JSONL sessions, resumes exact IDs with `prime-agent --resume`, honors environment/global session-root settings, and sorts by durable user/assistant activity. Named sessions, git state, and current recap metadata are surfaced. Deletion is fail-closed because upstream exposes no public safe delete command for active daemon sessions.
+- **Kiro v3 support** — discovers metadata/event pairs under `$KIRO_HOME/sessions/cli` in addition to the v2 SQLite store. Kiro resume now uses the selected conversation ID via `--resume-id`.
+- **Codex non-interactive filtering** — subagent and exec threads are hidden by default and can be included with `--include-non-interactive` or the matching setting.
+- Linux ARM64 release artifacts, an MSRV 1.88 CI lane, and a RustSec audit gate.
+
+### Fixed
+
+- Codex scans are now strictly read-only. Partial rollout walks can no longer delete valid rows from Codex-owned SQLite databases.
+- Cache invalidation uses nanosecond/size/path fingerprints, follows deeper Codex stores, and watches SQLite WAL files plus every secondary scanner input. Stale rows remain visible when a refresh fails and failed scans are never cached as successful emptiness.
+- Project View stores stable `(agent, session ID)` identities and rebuilds groups after streamed results, preventing wrong-session actions and out-of-bounds panics. `max_sessions` is now display-only and never truncates persistent cache data.
+- Time, name, and agent sorts use deterministic total ordering; timestamps are normalized globally and legacy Codex activity uses rollout mtime.
+- Exact quick-resume behavior: summary queries work, agent filters push down to one scanner, invalid permission modes fail clearly, and current Codex approval/sandbox flags replace removed aliases.
+- Terminal behavior: non-TTY TUI/watch calls fail cleanly, the session-row mouse offset is correct, shell wrappers preserve agent exit status, cwd-independent Hermes resumes execute, `NO_COLOR`/`TERM=dumb` are honored, and untrusted display metadata cannot emit terminal controls.
+- Deletes use collision-safe atomic writes and exact session matching; Claude append-only history is never rewritten while an agent may be writing it, Gemini duplicates are removed across stores, and Hermes prefix siblings survive.
+- Stats windows are cumulative and future/invalid timestamps are separate. Watch opens from cache immediately, preserves selection by identity, rejects zero intervals, and avoids repeated missing-`pgrep` probes.
+
+### Performance
+
+- Cursor store databases are indexed once instead of scanned once per transcript.
+- Pi, Cursor, Kiro, and Prime Agent JSONL parsing has total and per-line allocation bounds; Kiro v2 previews no longer materialize unlimited conversation blobs.
+- CLI commands reuse fresh per-agent cache entries and scan only stale/requested agents.
+- Text truncation is grapheme-aware, preserving emoji/ZWJ clusters while maintaining terminal-column alignment.
+
+### Changed
+
+- SuperLightTUI 0.20.1 → 0.22.3, including upstream terminal lifecycle, suspend/resume, bidi, and Unicode fixes.
+- Rusqlite is pinned to 0.39.0 so the declared Rust 1.88 MSRV remains buildable; the 0.40 transitive build script currently requires Rust 1.95 without declaring it.
+- Cache schema 8 → 9. Pin and summary state now use composite agent/session identities while legacy bare-ID pins remain readable.
+
 ## [0.13.1] - 2026-07-31
 
 Post-release audit of 0.13.0. No new features and no CLI changes; everything below is a correctness, durability, or performance fix found by reading the 0.13.0 diff and then the rest of the tree.

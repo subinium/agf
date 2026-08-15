@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::BufRead;
 
 use rayon::prelude::*;
 
@@ -9,7 +8,7 @@ use serde_json::Value;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
-use crate::scanner::{collapse_whitespace, read_head_tail};
+use crate::scanner::{collapse_whitespace, for_each_bounded_line_with_overflow, read_head_tail};
 
 /// Per-file I/O cap for `scan_session_metadata`. Files larger than the sum
 /// fall back to head + tail reads; smaller files are read in full. Sized so
@@ -29,6 +28,8 @@ use crate::scanner::{collapse_whitespace, read_head_tail};
 /// `~/.claude/projects` trees (tens of MB read for an off-by-default recap).
 const HEAD_BYTES: u64 = 16 * 1024;
 const TAIL_BYTES: u64 = 32 * 1024;
+const HISTORY_LINE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SUMMARIES: usize = 10;
 
 #[derive(Deserialize)]
 struct ClaudeEntry {
@@ -56,23 +57,26 @@ struct SessionMeta {
 ///
 /// Callers (orphan filtering + `scan_session_metadata`) share this so the
 /// directory tree is only read once per scan.
-fn list_session_files(claude_dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+fn list_session_files(
+    claude_dir: &std::path::Path,
+) -> Result<Vec<(String, std::path::PathBuf)>, AgfError> {
     let projects_dir = claude_dir.join("projects");
 
-    let Ok(proj_entries) = fs::read_dir(&projects_dir) else {
-        return Vec::new();
-    };
+    if !projects_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let proj_entries = fs::read_dir(&projects_dir)?;
 
     let mut file_paths: Vec<(String, std::path::PathBuf)> = Vec::new();
-    for proj_entry in proj_entries.flatten() {
+    for proj_entry in proj_entries {
+        let proj_entry = proj_entry?;
         let proj_path = proj_entry.path();
         if !proj_path.is_dir() {
             continue;
         }
-        let Ok(session_files) = fs::read_dir(&proj_path) else {
-            continue;
-        };
-        for session_file in session_files.flatten() {
+        let session_files = fs::read_dir(&proj_path)?;
+        for session_file in session_files {
+            let session_file = session_file?;
             let file_path = session_file.path();
             if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
@@ -87,7 +91,7 @@ fn list_session_files(claude_dir: &std::path::Path) -> Vec<(String, std::path::P
         }
     }
 
-    file_paths
+    Ok(file_paths)
 }
 
 /// Scan ~/.claude/projects/*/<sessionId>.jsonl to detect worktree sessions
@@ -97,11 +101,13 @@ fn list_session_files(claude_dir: &std::path::Path) -> Vec<(String, std::path::P
 /// worktree sessions looks like `<project>/.claude/worktrees/<name>`.
 fn scan_session_metadata(
     file_paths: Vec<(String, std::path::PathBuf)>,
-) -> HashMap<String, SessionMeta> {
-    file_paths
+) -> Result<HashMap<String, SessionMeta>, AgfError> {
+    let entries: Result<Vec<Option<(String, SessionMeta)>>, std::io::Error> = file_paths
         .into_par_iter()
-        .filter_map(|(session_id, file_path)| {
-            let ht = read_head_tail(&file_path, HEAD_BYTES, TAIL_BYTES)?;
+        .map(|(session_id, file_path)| {
+            let ht = read_head_tail(&file_path, HEAD_BYTES, TAIL_BYTES).ok_or_else(|| {
+                std::io::Error::other(format!("could not read {}", file_path.display()))
+            })?;
 
             let mut worktree: Option<String> = None;
             let mut ai_title: Option<String> = None;
@@ -144,12 +150,13 @@ fn scan_session_metadata(
             };
 
             if worktree.is_some() || recap.is_some() {
-                Some((session_id, SessionMeta { worktree, recap }))
+                Ok(Some((session_id, SessionMeta { worktree, recap })))
             } else {
-                None
+                Ok(None)
             }
         })
-        .collect()
+        .collect();
+    Ok(entries?.into_iter().flatten().collect())
 }
 
 fn extract_worktree(val: &Value, worktree: &mut Option<String>) {
@@ -227,63 +234,83 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         return Ok(Vec::new());
     }
 
-    let session_files = list_session_files(&claude_dir);
+    let session_files = list_session_files(&claude_dir)?;
     let existing_ids: HashSet<String> = session_files.iter().map(|(id, _)| id.clone()).collect();
-    let session_meta = scan_session_metadata(session_files);
+    let session_meta = scan_session_metadata(session_files)?;
     let mut branch_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut sessions_map: HashMap<String, SessionData> = HashMap::new();
 
-    let file = fs::File::open(&path)?;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let entry: ClaudeEntry = match serde_json::from_str(line) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let session_id = match &entry.session_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => continue,
-        };
-        if !existing_ids.contains(&session_id) {
-            // Orphans (no per-session JSONL under ~/.claude/projects/) are
-            // dropped by the final filter anyway; skip early so unbounded
-            // history.jsonl growth (#27) doesn't accumulate dead SessionData
-            // and summary tuples for the whole scan. Mirrors the
-            // codex::read_history_summaries pre-filter from v0.11.4.
-            continue;
-        }
-        let ts = entry.timestamp.unwrap_or(0.0);
-
-        let data = sessions_map
-            .entry(session_id)
-            .or_insert_with(|| SessionData {
-                project: entry.project.clone().unwrap_or_default(),
-                timestamp: ts,
-                summaries: Vec::new(),
-            });
-
-        // Keep the latest timestamp and project
-        if ts >= data.timestamp {
-            data.timestamp = ts;
-            if let Some(ref proj) = entry.project {
-                data.project = proj.clone();
+    let completed = for_each_bounded_line_with_overflow(
+        &path,
+        usize::MAX,
+        HISTORY_LINE_BYTES,
+        |line, tail, oversized| {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                return;
             }
-        }
-
-        if let Some(display) = entry.display {
-            // Collapse multi-line content (e.g. pasted text) into a single line.
-            let display = collapse_whitespace(&display);
-            if !display.is_empty() {
-                data.summaries.push((ts, display));
+            let entry: ClaudeEntry = if oversized {
+                ClaudeEntry {
+                    display: Some("(large prompt)".to_string()),
+                    timestamp: json_number_from_fragment(tail, "timestamp"),
+                    project: json_string_from_fragment(tail, "project"),
+                    session_id: json_string_from_fragment(tail, "sessionId"),
+                }
+            } else {
+                match serde_json::from_slice(line) {
+                    Ok(entry) => entry,
+                    Err(_) => return,
+                }
+            };
+            let session_id = match &entry.session_id {
+                Some(id) if !id.is_empty() => id.clone(),
+                _ => return,
+            };
+            if !existing_ids.contains(&session_id) {
+                // Orphans (no per-session JSONL under ~/.claude/projects/) are
+                // dropped by the final filter anyway; skip early so unbounded
+                // history.jsonl growth (#27) doesn't accumulate dead SessionData
+                // and summary tuples for the whole scan. Mirrors the
+                // codex::read_history_summaries pre-filter from v0.11.4.
+                return;
             }
-        }
+            let ts = entry.timestamp.unwrap_or(0.0);
+
+            let data = sessions_map
+                .entry(session_id)
+                .or_insert_with(|| SessionData {
+                    project: entry.project.clone().unwrap_or_default(),
+                    timestamp: ts,
+                    summaries: Vec::new(),
+                });
+
+            // Keep the latest timestamp and project
+            if ts >= data.timestamp {
+                data.timestamp = ts;
+                if let Some(ref proj) = entry.project {
+                    data.project = proj.clone();
+                }
+            }
+
+            if let Some(display) = entry.display {
+                // Collapse multi-line content (e.g. pasted text) into a single line.
+                let display = collapse_whitespace(&display);
+                if !display.is_empty() {
+                    if data.summaries.len() < MAX_SUMMARIES {
+                        data.summaries.push((ts, display));
+                    } else if let Some((oldest_index, _)) =
+                        data.summaries.iter().enumerate().min_by(|(_, a), (_, b)| {
+                            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        && ts > data.summaries[oldest_index].0
+                    {
+                        data.summaries[oldest_index] = (ts, display);
+                    }
+                }
+            }
+        },
+    );
+    if !completed {
+        return Err(std::io::Error::other(format!("could not read {}", path.display())).into());
     }
 
     let mut sessions: Vec<Session> = sessions_map
@@ -338,12 +365,57 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
                 git_branch,
                 worktree,
                 recap,
+                interactive: true,
             })
         })
         .collect();
 
     sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
     Ok(sessions)
+}
+
+fn json_string_from_fragment(fragment: &[u8], field: &str) -> Option<String> {
+    let text = std::str::from_utf8(fragment).ok()?;
+    let key = format!("\"{field}\"");
+    // The authoritative envelope follows display/pasted payload fields. A
+    // pasted string can itself contain key-looking text, so the last
+    // occurrence is the one Claude wrote at the top level.
+    let after_key = text.rfind(&key)? + key.len();
+    let rest = text
+        .get(after_key..)?
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    let encoded = rest.strip_prefix('"')?;
+    let mut escaped = false;
+    for (index, ch) in encoded.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return serde_json::from_str::<String>(&rest[..index + 2]).ok();
+        }
+    }
+    None
+}
+
+fn json_number_from_fragment(fragment: &[u8], field: &str) -> Option<f64> {
+    let text = std::str::from_utf8(fragment).ok()?;
+    let key = format!("\"{field}\"");
+    let after_key = text.rfind(&key)? + key.len();
+    let rest = text
+        .get(after_key..)?
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    let len = rest
+        .bytes()
+        .take_while(|byte| {
+            byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.' | b'e' | b'E')
+        })
+        .count();
+    rest.get(..len)?.parse().ok()
 }
 
 #[cfg(test)]
@@ -376,6 +448,7 @@ mod tests {
         fs::write(claude_dir.join("projects/-home-foo/notes.txt"), "x").unwrap();
 
         let ids: HashSet<String> = list_session_files(&claude_dir)
+            .unwrap()
             .into_iter()
             .map(|(id, _)| id)
             .collect();
@@ -394,7 +467,7 @@ mod tests {
         let dir = std::env::temp_dir().join("agf-test-no-projects");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        assert!(list_session_files(&dir).is_empty());
+        assert!(list_session_files(&dir).unwrap().is_empty());
     }
 
     #[test]
@@ -436,7 +509,7 @@ mod tests {
         )
         .unwrap();
 
-        let meta = scan_session_metadata(vec![(sid.to_string(), path)]);
+        let meta = scan_session_metadata(vec![(sid.to_string(), path)]).unwrap();
         let m = meta
             .get(sid)
             .expect("metadata should be present for large file");
@@ -444,5 +517,22 @@ mod tests {
         assert_eq!(m.recap.as_deref(), Some("recap: latest recap"));
 
         let _ = fs::remove_dir_all(&claude_dir);
+    }
+
+    #[test]
+    fn oversized_history_tail_recovers_session_activity_envelope() {
+        let tail = br#"\"project\":\"fake\",\"sessionId\":\"fake\",\"timestamp\":1","project":"/tmp/project","sessionId":"large-id","timestamp":1785542405000}"#;
+        assert_eq!(
+            json_string_from_fragment(tail, "project").as_deref(),
+            Some("/tmp/project")
+        );
+        assert_eq!(
+            json_string_from_fragment(tail, "sessionId").as_deref(),
+            Some("large-id")
+        );
+        assert_eq!(
+            json_number_from_fragment(tail, "timestamp"),
+            Some(1_785_542_405_000.0)
+        );
     }
 }
