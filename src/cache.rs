@@ -56,7 +56,7 @@ use crate::model::{Agent, Session};
 // - Yolop timestamps are now clamped to a plausible window, so persisted
 //   far-future values must not survive the upgrade and keep pinning sessions
 //   to the top of the time sort.
-const CACHE_VERSION: u32 = 8;
+const CACHE_VERSION: u32 = 9;
 
 /// The binary version stamped into every cache write; any mismatch on read
 /// invalidates the whole cache (see `parse_cache`).
@@ -75,8 +75,22 @@ struct CacheFile {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AgentCache {
-    mtime: u64, // Unix seconds of data source last modification
+    fingerprint: SourceFingerprint,
     sessions: Vec<CachedSession>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SourceFingerprint {
+    /// Lexical source identity catches configurable-root changes even when two
+    /// directories happen to have identical metadata.
+    sources: Vec<String>,
+    newest_mtime_ns: u64,
+    total_size: u64,
+    entries: u64,
+    /// Stable digest of every entry's path, type, mtime, and size. Aggregate
+    /// maxima/totals alone miss a same-size edit to an older file whenever a
+    /// different file still owns the newest mtime.
+    digest: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,6 +104,12 @@ struct CachedSession {
     git_branch: Option<String>,
     worktree: Option<String>,
     recap: Option<String>,
+    #[serde(default = "default_true")]
+    interactive: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 fn cache_path() -> PathBuf {
@@ -97,6 +117,40 @@ fn cache_path() -> PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".cache"))
         .join("agf")
         .join("sessions.json")
+}
+
+struct CacheWriteLock(PathBuf);
+
+impl CacheWriteLock {
+    fn acquire(path: PathBuf) -> std::io::Result<Self> {
+        for _ in 0..200 {
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+                        .is_ok_and(|age| age > std::time::Duration::from_secs(300));
+                    if stale {
+                        let _ = fs::remove_dir(&path);
+                        continue;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "timed out waiting for cache write lock",
+        ))
+    }
+}
+
+impl Drop for CacheWriteLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.0);
+    }
 }
 
 /// True when the `AGF_DEBUG` env var is set (any value), probed once per process.
@@ -116,6 +170,7 @@ fn to_cached(s: &Session) -> CachedSession {
         git_branch: s.git_branch.clone(),
         worktree: s.worktree.clone(),
         recap: s.recap.clone(),
+        interactive: s.interactive,
     }
 }
 
@@ -126,35 +181,79 @@ fn from_cached(c: &CachedSession) -> Session {
         project_name: c.project_name.clone(),
         project_path: c.project_path.clone(),
         summaries: c.summaries.clone(),
-        timestamp: c.timestamp,
+        timestamp: crate::model::normalize_timestamp(c.timestamp, 0),
         git_branch: c.git_branch.clone(),
         worktree: c.worktree.clone(),
         recap: c.recap.clone(),
+        interactive: c.interactive,
     }
 }
 
-fn get_max_mtime(paths: &[PathBuf]) -> u64 {
+fn source_fingerprint(paths: &[PathBuf]) -> SourceFingerprint {
+    use sha2::{Digest, Sha256};
     use walkdir::WalkDir;
-    let mut max = 0u64;
+    let mut fingerprint = SourceFingerprint {
+        sources: paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        ..SourceFingerprint::default()
+    };
+    fingerprint.sources.sort();
+    let mut entry_fingerprints = Vec::new();
     for p in paths {
         if !p.exists() {
             continue;
         }
         for entry in WalkDir::new(p)
-            .max_depth(4)
+            .max_depth(8)
             .follow_links(false)
             .into_iter()
             .filter_map(|e| e.ok())
         {
-            if let Ok(m) = entry.metadata()
-                && let Ok(t) = m.modified()
-                && let Ok(d) = t.duration_since(std::time::SystemTime::UNIX_EPOCH)
-            {
-                max = max.max(d.as_secs());
+            if let Ok(m) = entry.metadata() {
+                let mtime_ns = m
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                    .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
+                    .unwrap_or(0);
+                fingerprint.newest_mtime_ns = fingerprint.newest_mtime_ns.max(mtime_ns);
+                fingerprint.total_size = fingerprint.total_size.saturating_add(m.len());
+                fingerprint.entries = fingerprint.entries.saturating_add(1);
+                let file_type = if m.is_dir() {
+                    1
+                } else if m.is_file() {
+                    2
+                } else if m.file_type().is_symlink() {
+                    3
+                } else {
+                    4
+                };
+                entry_fingerprints.push((
+                    entry.path().to_string_lossy().into_owned(),
+                    file_type,
+                    mtime_ns,
+                    m.len(),
+                ));
             }
         }
     }
-    max
+    entry_fingerprints.sort_unstable();
+    let mut hasher = Sha256::new();
+    for (path, file_type, mtime_ns, size) in entry_fingerprints {
+        hasher.update((path.len() as u64).to_le_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update([file_type]);
+        hasher.update(mtime_ns.to_le_bytes());
+        hasher.update(size.to_le_bytes());
+    }
+    fingerprint.digest = format!("{:x}", hasher.finalize());
+    fingerprint
+}
+
+pub(crate) fn agent_fingerprint(agent: Agent) -> SourceFingerprint {
+    source_fingerprint(&config::data_sources(agent))
 }
 
 /// Validate raw cache-file content. The cache is usable only when (a) it
@@ -190,7 +289,7 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
     let path = cache_path();
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return (Vec::new(), Agent::all().to_vec()),
+        Err(_) => return (Vec::new(), config::installed_agents()),
     };
 
     let cache = match parse_cache(&content, AGF_VERSION) {
@@ -199,7 +298,7 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
             if debug_enabled() {
                 eprintln!("[agf] {why} → rescanning");
             }
-            return (Vec::new(), Agent::all().to_vec());
+            return (Vec::new(), config::installed_agents());
         }
     };
 
@@ -207,20 +306,22 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
     let mut stale = Vec::new();
 
     for agent in config::installed_agents() {
-        let current_mtime = get_max_mtime(&config::data_sources(agent));
+        let current_fingerprint = source_fingerprint(&config::data_sources(agent));
 
         match cache.agents.get(&agent) {
-            Some(ac) if ac.mtime >= current_mtime && current_mtime > 0 => {
-                // Cache is fresh
+            Some(ac) => {
+                // Stale-while-revalidate: cached payload remains visible until
+                // a successful worker result replaces it.
                 sessions.extend(ac.sessions.iter().map(from_cached));
+                if ac.fingerprint != current_fingerprint {
+                    stale.push(agent);
+                }
             }
-            _ => {
-                stale.push(agent);
-            }
+            None => stale.push(agent),
         }
     }
 
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
+    sessions.sort_by(|a, b| crate::model::compare_sessions(a, b, crate::model::SortMode::Time));
     (sessions, stale)
 }
 
@@ -231,33 +332,55 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
 /// we preserve the prior cache entry verbatim so we don't accidentally
 /// persist an empty session list with a fresh `mtime`, which would mark the
 /// agent "fresh" on the next launch and hide its sessions.
-pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet<Agent>) {
+pub fn write_cache(
+    sessions: &[Session],
+    skip_agents: &std::collections::HashSet<Agent>,
+    invalidate_agents: &std::collections::HashSet<Agent>,
+    observed_fingerprints: &HashMap<Agent, SourceFingerprint>,
+) {
     let path = cache_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        }
     }
+    let lock_path = path.with_file_name(".sessions-write.lock");
+    let Ok(_write_lock) = CacheWriteLock::acquire(lock_path) else {
+        return;
+    };
 
     let mut agents: HashMap<Agent, AgentCache> = HashMap::new();
 
-    // Carry over prior cache entries for in-flight agents. `parse_cache`
+    // Start from prior entries. Agents not scanned by this process must remain
+    // byte-for-byte associated with the fingerprint they were loaded under;
+    // recomputing a newer fingerprint beside old payload would make stale data
+    // appear fresh after an append-vs-exit race.
     // gates this on schema AND binary version: entries written by another
     // binary are exactly the stale data issue #37 is about, so on upgrade we
     // drop them and let the next launch rescan those agents instead.
-    if !skip_agents.is_empty()
-        && let Ok(content) = fs::read_to_string(&path)
+    if let Ok(content) = fs::read_to_string(&path)
         && let Ok(mut prior) = parse_cache(&content, AGF_VERSION)
     {
-        for skip in skip_agents {
-            // `prior` is owned and dropped right after this block, so move
-            // the carried-over entries out instead of cloning them.
-            if let Some(entry) = prior.agents.remove(skip) {
-                agents.insert(*skip, entry);
-            }
-        }
+        agents.extend(prior.agents.drain());
+    }
+    for agent in invalidate_agents {
+        agents.remove(agent);
     }
 
     for agent in config::installed_agents() {
-        if skip_agents.contains(&agent) {
+        if skip_agents.contains(&agent) || invalidate_agents.contains(&agent) {
+            continue;
+        }
+        let Some(observed) = observed_fingerprints.get(&agent) else {
+            continue;
+        };
+        // A source changed after the worker's final fingerprint and before
+        // cache persistence. Preserve the prior stale entry; the next launch
+        // will rescan instead of blessing pre-change payload as current.
+        if &agent_fingerprint(agent) != observed {
             continue;
         }
         let agent_sessions: Vec<CachedSession> = sessions
@@ -265,11 +388,10 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
             .filter(|s| s.agent == agent)
             .map(to_cached)
             .collect();
-        let mtime = get_max_mtime(&config::data_sources(agent));
         agents.insert(
             agent,
             AgentCache {
-                mtime,
+                fingerprint: observed.clone(),
                 sessions: agent_sessions,
             },
         );
@@ -284,14 +406,20 @@ pub fn write_cache(sessions: &[Session], skip_agents: &std::collections::HashSet
     if let Ok(json) = serde_json::to_string(&cache) {
         // Best-effort: a cache we failed to persist just costs the next launch
         // a rescan, so there is nothing actionable to report here.
-        let _ = crate::fsx::write_atomic(&path, json.as_bytes());
+        if crate::fsx::write_atomic(&path, json.as_bytes()).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+            }
+        }
     }
 }
 
 /// One agent's scan result, streamed back from a worker thread.
 pub struct ScanResult {
     pub agent: Agent,
-    pub sessions: Vec<Session>,
+    pub sessions: Result<crate::scanner::CompletedScan, String>,
 }
 
 /// Spawn one worker thread per stale agent. Each worker sends its result on
@@ -319,25 +447,24 @@ pub fn start_stale_scan(stale: &[Agent]) -> std::sync::mpsc::Receiver<ScanResult
         let tx = tx.clone();
         thread::spawn(move || {
             let start = Instant::now();
-            let sessions = match agent {
-                Agent::ClaudeCode => crate::scanner::claude::scan().unwrap_or_default(),
-                Agent::Codex => crate::scanner::codex::scan().unwrap_or_default(),
-                Agent::OpenCode => crate::scanner::opencode::scan().unwrap_or_default(),
-                Agent::Pi => crate::scanner::pi::scan().unwrap_or_default(),
-                Agent::OhMyPi => crate::scanner::oh_my_pi::scan().unwrap_or_default(),
-                Agent::Kiro => crate::scanner::kiro::scan().unwrap_or_default(),
-                Agent::CursorAgent => crate::scanner::cursor_agent::scan().unwrap_or_default(),
-                Agent::Gemini => crate::scanner::gemini::scan().unwrap_or_default(),
-                Agent::Hermes => crate::scanner::hermes::scan().unwrap_or_default(),
-                Agent::Yolop => crate::scanner::yolop::scan().unwrap_or_default(),
-            };
+            let sessions =
+                std::panic::catch_unwind(|| crate::scanner::scan_agent_consistent(agent))
+                    .map_err(|_| "scanner panicked".to_string())
+                    .and_then(|result| result);
             if debug {
-                eprintln!(
-                    "[agf] {:?} scan: {} sessions in {:?}",
-                    agent,
-                    sessions.len(),
-                    start.elapsed()
-                );
+                match &sessions {
+                    Ok(scan) => eprintln!(
+                        "[agf] {:?} scan: {} sessions in {:?}",
+                        agent,
+                        scan.sessions.len(),
+                        start.elapsed()
+                    ),
+                    Err(error) => eprintln!(
+                        "[agf] {:?} scan failed in {:?}: {error}",
+                        agent,
+                        start.elapsed()
+                    ),
+                }
             }
             // Receiver dropped (TUI exited): silently ignore.
             let _ = tx.send(ScanResult { agent, sessions });
@@ -351,6 +478,14 @@ pub fn start_stale_scan(stale: &[Agent]) -> std::sync::mpsc::Receiver<ScanResult
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::time::{Duration, SystemTime};
+
+    fn temp_source(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("agf-cache-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
 
     fn cache_json(version: u32, agf_version: Option<&str>) -> String {
         let mut v = serde_json::json!({
@@ -412,7 +547,13 @@ mod tests {
         agents.insert(
             Agent::ClaudeCode,
             AgentCache {
-                mtime: 42,
+                fingerprint: SourceFingerprint {
+                    sources: vec!["/source".to_string()],
+                    newest_mtime_ns: 42,
+                    total_size: 7,
+                    entries: 1,
+                    digest: "fixture".to_string(),
+                },
                 sessions: vec![CachedSession {
                     agent: Agent::ClaudeCode,
                     session_id: "sid".to_string(),
@@ -423,6 +564,7 @@ mod tests {
                     git_branch: Some("main".to_string()),
                     worktree: None,
                     recap: None,
+                    interactive: true,
                 }],
             },
         );
@@ -437,10 +579,90 @@ mod tests {
 
         let parsed = parse_cache(&json, AGF_VERSION).expect("round-trip parse");
         let entry = &parsed.agents[&Agent::ClaudeCode];
-        assert_eq!(entry.mtime, 42);
+        assert_eq!(entry.fingerprint.newest_mtime_ns, 42);
+        assert_eq!(entry.fingerprint.digest, "fixture");
         assert_eq!(entry.sessions.len(), 1);
         assert_eq!(entry.sessions[0].agent, Agent::ClaudeCode);
         assert_eq!(entry.sessions[0].session_id, "sid");
         assert_eq!(entry.sessions[0].git_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_changes_within_one_second() {
+        let path = temp_source("nanoseconds");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"a").unwrap();
+        file.set_modified(
+            SystemTime::UNIX_EPOCH
+                + Duration::from_secs(1_700_000_000)
+                + Duration::from_millis(100),
+        )
+        .unwrap();
+        let first = source_fingerprint(std::slice::from_ref(&path));
+        file.set_modified(
+            SystemTime::UNIX_EPOCH
+                + Duration::from_secs(1_700_000_000)
+                + Duration::from_millis(200),
+        )
+        .unwrap();
+        let second = source_fingerprint(std::slice::from_ref(&path));
+        assert_ne!(first, second);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fingerprint_includes_source_identity_and_wal_size() {
+        let db = temp_source("db");
+        let wal = temp_source("db-wal");
+        std::fs::write(&db, b"db").unwrap();
+        let before = source_fingerprint(&[db.clone(), wal.clone()]);
+        std::fs::write(&wal, b"new wal contents").unwrap();
+        let after = source_fingerprint(&[db.clone(), wal.clone()]);
+        assert_ne!(before, after);
+        let other = source_fingerprint(std::slice::from_ref(&db));
+        assert_ne!(after.sources, other.sources);
+        let _ = std::fs::remove_file(db);
+        let _ = std::fs::remove_file(wal);
+    }
+
+    #[test]
+    fn fingerprint_detects_same_size_edit_to_non_newest_entry() {
+        let dir = temp_source("non-newest");
+        std::fs::create_dir_all(&dir).unwrap();
+        let older = dir.join("older");
+        let newest = dir.join("newest");
+        std::fs::write(&older, b"old").unwrap();
+        std::fs::write(&newest, b"top").unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&older)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(1))
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&newest)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(3))
+            .unwrap();
+        let first = source_fingerprint(std::slice::from_ref(&dir));
+
+        // Same total size and still older than `newest`: aggregate
+        // newest-mtime/size/count fingerprints cannot see this change.
+        std::fs::write(&older, b"new").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&older)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(2))
+            .unwrap();
+        let second = source_fingerprint(std::slice::from_ref(&dir));
+
+        assert_eq!(first.newest_mtime_ns, second.newest_mtime_ns);
+        assert_eq!(first.total_size, second.total_size);
+        assert_eq!(first.entries, second.entries);
+        assert_ne!(first.digest, second.digest);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

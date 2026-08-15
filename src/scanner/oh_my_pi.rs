@@ -6,7 +6,7 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     // OMP stores task/subagent transcripts below each top-level session.
     // Its own global resume lookup only scans `*/*.jsonl`, so match that
     // boundary and don't surface nested files that `omp --resume` can't find.
-    Ok(super::pi::scan_from(&sessions_dir, Agent::OhMyPi, Some(2)))
+    super::pi::scan_from(&sessions_dir, Agent::OhMyPi, Some(2))
 }
 
 #[cfg(test)]
@@ -50,7 +50,7 @@ mod tests {
         )
         .unwrap();
 
-        let sessions = super::super::pi::scan_from(&root, Agent::OhMyPi, Some(2));
+        let sessions = super::super::pi::scan_from(&root, Agent::OhMyPi, Some(2)).unwrap();
         let _ = fs::remove_dir_all(&root);
 
         assert_eq!(sessions.len(), 1);

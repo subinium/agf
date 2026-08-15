@@ -7,7 +7,7 @@ use crate::action;
 use crate::cache::ScanResult;
 use crate::config::installed_agents;
 use crate::fuzzy::FuzzyMatcher;
-use crate::model::{Action, Agent, Session, SortMode};
+use crate::model::{Action, Agent, Session, SessionIdentity, SortMode, compare_sessions};
 use crate::text::{self, truncate_flat as truncate_str};
 
 /// Width of the agent-name column, shared by the row builder and the layout
@@ -25,6 +25,7 @@ const SEPARATOR: slt::Color = slt::Color::Rgb(64, 64, 64);
 const RED: slt::Color = slt::Color::Rgb(239, 68, 68);
 const GREEN_400: slt::Color = slt::Color::Rgb(52, 211, 153);
 const CYAN: slt::Color = slt::Color::Rgb(34, 211, 238);
+const BROWSE_FIRST_SESSION_ROW: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -44,7 +45,13 @@ pub enum Mode {
 pub struct ProjectGroup {
     pub project_path: String,
     pub project_name: String,
-    pub sessions: Vec<usize>, // indices into App.sessions
+    pub sessions: Vec<SessionIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GroupSelection {
+    Header(String),
+    Session(SessionIdentity),
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +63,7 @@ pub struct NewSessionOption {
 
 pub struct App {
     pub sessions: Vec<Session>,
+    session_index: HashMap<SessionIdentity, usize>,
     pub filtered_indices: Vec<usize>,
     pub match_positions: Vec<Vec<u32>>,
     pub selected: usize,
@@ -65,6 +73,14 @@ pub struct App {
     pub action_index: usize,
     pub agent_index: usize,
     pub delete_index: usize,
+    /// Identity captured when a single-session confirmation opens. Background
+    /// refreshes can replace/reorder the session Vec while the dialog is
+    /// visible, so a numeric cursor is not a safe deletion target.
+    pending_delete: Option<SessionIdentity>,
+    /// Session whose action/preview flow is open. Unlike the browse cursor,
+    /// this identity cannot drift to a neighbor when a streaming scan removes
+    /// or reorders rows.
+    active_session: Option<SessionIdentity>,
     pub new_session_options: Vec<NewSessionOption>,
     pub mode_index: usize,
     pub mode_options: Vec<(&'static str, &'static str)>,
@@ -83,7 +99,7 @@ pub struct App {
     /// accepts `&str`) instead of allocating a key per row per frame, and so
     /// the delete pass gets its per-agent batches for free.
     pub selected_set: HashMap<Agent, HashSet<String>>,
-    pub summary_offsets: HashMap<String, usize>,
+    pub summary_offsets: HashMap<Agent, HashMap<String, usize>>,
     pub summary_search_count: usize,
     pub include_summaries: bool,
     pub show_recap: bool,
@@ -112,6 +128,15 @@ pub struct App {
     /// Agents whose background scan is still running. Drives the
     /// "Refreshing N agents…" footer indicator.
     pub scanning_agents: HashSet<Agent>,
+    /// Failed/panicked workers are no longer shown as scanning, but their
+    /// previous cache entries must be preserved on exit.
+    pub failed_agents: HashSet<Agent>,
+    /// Source snapshot paired with each successfully ingested worker result.
+    /// Cache writes must use this snapshot, never a later unrelated mtime.
+    pub scan_fingerprints: HashMap<Agent, crate::cache::SourceFingerprint>,
+    /// Successful deletes made after workers started. Late results from those
+    /// workers are filtered so they cannot resurrect a deleted row.
+    deleted_tombstones: HashMap<Agent, HashSet<String>>,
     fuzzy: FuzzyMatcher,
 }
 
@@ -148,6 +173,11 @@ impl App {
             });
         }
 
+        let session_index = sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| (session.identity(), index))
+            .collect();
         let filtered_indices: Vec<usize> = (0..sessions.len()).collect();
         let match_positions: Vec<Vec<u32>> = vec![Vec::new(); sessions.len()];
         let query = initial_query.unwrap_or_default();
@@ -162,6 +192,7 @@ impl App {
         let show_recap = settings.show_recap;
         let mut app = Self {
             sessions,
+            session_index,
             filtered_indices,
             match_positions,
             selected: 0,
@@ -171,6 +202,8 @@ impl App {
             action_index: 0,
             agent_index: 0,
             delete_index: 1,
+            pending_delete: None,
+            active_session: None,
             new_session_options,
             mode_index: 0,
             mode_options: Vec::new(),
@@ -197,6 +230,9 @@ impl App {
             name_col_width_cache: None,
             scan_rx,
             scanning_agents,
+            failed_agents: HashSet::new(),
+            scan_fingerprints: HashMap::new(),
+            deleted_tombstones: HashMap::new(),
             fuzzy: FuzzyMatcher::new(),
         };
         if !app.query.is_empty() {
@@ -215,22 +251,8 @@ impl App {
     }
 
     fn apply_sort_preserving(&mut self, pivot: Option<(Agent, String)>) {
-        match self.sort_mode {
-            SortMode::Time => self
-                .sessions
-                .sort_by_key(|s| std::cmp::Reverse(s.timestamp)),
-            SortMode::Name => self.sessions.sort_by(|a, b| {
-                a.project_name
-                    .to_lowercase()
-                    .cmp(&b.project_name.to_lowercase())
-            }),
-            SortMode::Agent => self.sessions.sort_by(|a, b| {
-                a.agent
-                    .to_string()
-                    .cmp(&b.agent.to_string())
-                    .then(b.timestamp.cmp(&a.timestamp))
-            }),
-        }
+        self.sessions
+            .sort_by(|a, b| compare_sessions(a, b, self.sort_mode));
 
         // Boost: pinned first; everything else keeps the primary sort order
         // (stable sort preserves it within rank). The previous cwd-match
@@ -241,7 +263,8 @@ impl App {
         // Pinning is still honored because it's an explicit user action.
         let pinned = &self.pinned_sessions;
         self.sessions
-            .sort_by_key(|s| !pinned.contains(&s.session_id));
+            .sort_by_key(|session| !is_pinned_in(pinned, session));
+        self.rebuild_session_index();
 
         // Sessions reordered → cached column width no longer valid.
         self.name_col_width_cache = None;
@@ -265,7 +288,10 @@ impl App {
             .sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| self.agent_filter.is_none_or(|agent| s.agent == agent))
+            .filter(|(_, session)| {
+                (self.settings.include_non_interactive || session.interactive)
+                    && self.agent_filter.is_none_or(|agent| session.agent == agent)
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -287,6 +313,11 @@ impl App {
             self.match_positions = results.into_iter().map(|r| r.positions).collect();
         }
 
+        if let Some(max) = self.settings.max_sessions {
+            self.filtered_indices.truncate(max);
+            self.match_positions.truncate(max);
+        }
+
         if self.filtered_indices.is_empty() {
             self.selected = 0;
         } else if self.selected >= self.filtered_indices.len() {
@@ -297,7 +328,7 @@ impl App {
         let name_col_width = self
             .filtered_indices
             .iter()
-            .map(|&i| UnicodeWidthStr::width(self.sessions[i].project_name.as_str()))
+            .map(|&i| text::width(&text::sanitize_terminal(&self.sessions[i].project_name)))
             .max()
             .unwrap_or(0)
             .min(30); // cap at 30 chars to leave room for summary
@@ -310,6 +341,21 @@ impl App {
         self.filtered_indices
             .get(self.selected)
             .and_then(|&i| self.sessions.get(i))
+    }
+
+    fn capture_active_session(&mut self) -> bool {
+        self.active_session = self.selected_session().map(Session::identity);
+        self.active_session.is_some()
+    }
+
+    fn action_session(&self) -> Option<&Session> {
+        self.active_session
+            .as_ref()
+            .and_then(|identity| self.session_by_identity(identity))
+    }
+
+    fn is_pinned(&self, session: &Session) -> bool {
+        is_pinned_in(&self.pinned_sessions, session)
     }
 
     /// Total number of sessions checked for bulk delete.
@@ -355,8 +401,14 @@ impl App {
         if count <= 1 {
             return;
         }
-        let id = session.session_id.clone();
-        let offset = self.summary_offsets.entry(id).or_insert(0);
+        let agent = session.agent;
+        let session_id = session.session_id.clone();
+        let offset = self
+            .summary_offsets
+            .entry(agent)
+            .or_default()
+            .entry(session_id)
+            .or_insert(0);
         *offset = if forward {
             (*offset + 1) % count
         } else if *offset == 0 {
@@ -401,11 +453,13 @@ impl App {
     }
 
     pub fn build_groups(&mut self) {
-        let mut map: std::collections::BTreeMap<String, Vec<usize>> =
+        let mut map: std::collections::BTreeMap<String, Vec<SessionIdentity>> =
             std::collections::BTreeMap::new();
         for &idx in &self.filtered_indices {
             let s = &self.sessions[idx];
-            map.entry(s.project_path.clone()).or_default().push(idx);
+            map.entry(s.project_path.clone())
+                .or_default()
+                .push(s.identity());
         }
         self.groups = map
             .into_iter()
@@ -417,7 +471,7 @@ impl App {
                     .to_string();
                 ProjectGroup {
                     project_path: path,
-                    project_name: name,
+                    project_name: text::sanitize_terminal(&name),
                     sessions,
                 }
             })
@@ -426,21 +480,87 @@ impl App {
         // each group's sessions, not `.first()` — `.first()` is only the newest
         // when the list is in Time sort; in Name/Agent sort it is not, which
         // ordered the groups incorrectly.
+        let session_index = &self.session_index;
+        let all_sessions = &self.sessions;
         self.groups.sort_by(|a, b| {
             let a_ts = a
                 .sessions
                 .iter()
-                .map(|&i| self.sessions[i].timestamp)
+                .filter_map(|identity| session_index.get(identity))
+                .filter_map(|index| all_sessions.get(*index))
+                .map(|session| session.timestamp)
                 .max()
                 .unwrap_or(0);
             let b_ts = b
                 .sessions
                 .iter()
-                .map(|&i| self.sessions[i].timestamp)
+                .filter_map(|identity| session_index.get(identity))
+                .filter_map(|index| all_sessions.get(*index))
+                .map(|session| session.timestamp)
                 .max()
                 .unwrap_or(0);
             b_ts.cmp(&a_ts)
         });
+    }
+
+    fn rebuild_session_index(&mut self) {
+        self.session_index = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| (session.identity(), index))
+            .collect();
+    }
+
+    fn session_by_identity(&self, identity: &SessionIdentity) -> Option<&Session> {
+        self.session_index
+            .get(identity)
+            .and_then(|index| self.sessions.get(*index))
+    }
+
+    fn filtered_position_for_identity(&self, identity: &SessionIdentity) -> Option<usize> {
+        let index = *self.session_index.get(identity)?;
+        self.filtered_indices
+            .iter()
+            .position(|candidate| *candidate == index)
+    }
+
+    fn grouped_selection_identity(&self) -> Option<GroupSelection> {
+        let (group_index, child) = self.grouped_row_at(self.grouped_selected)?;
+        let group = self.groups.get(group_index)?;
+        Some(match child {
+            None => GroupSelection::Header(group.project_path.clone()),
+            Some(child_index) => GroupSelection::Session(group.sessions.get(child_index)?.clone()),
+        })
+    }
+
+    fn restore_grouped_selection(&mut self, selection: Option<GroupSelection>) {
+        let Some(selection) = selection else {
+            self.grouped_selected = self
+                .grouped_selected
+                .min(self.grouped_row_count().saturating_sub(1));
+            return;
+        };
+        let mut row = 0;
+        for group in &self.groups {
+            if selection == GroupSelection::Header(group.project_path.clone()) {
+                self.grouped_selected = row;
+                return;
+            }
+            row += 1;
+            if self.group_expanded.contains(&group.project_path) {
+                for identity in &group.sessions {
+                    if selection == GroupSelection::Session(identity.clone()) {
+                        self.grouped_selected = row;
+                        return;
+                    }
+                    row += 1;
+                }
+            }
+        }
+        self.grouped_selected = self
+            .grouped_selected
+            .min(self.grouped_row_count().saturating_sub(1));
     }
 
     /// Count total visible rows in grouped view (headers + expanded children)
@@ -537,14 +657,33 @@ impl App {
             self.selected_session()
                 .map(|s| (s.agent, s.session_id.clone()))
         };
-        let mut received_any = false;
+        let grouped_pivot = (self.mode == Mode::GroupedBrowse)
+            .then(|| self.grouped_selection_identity())
+            .flatten();
+        let mut merged_any = false;
         let mut channel_open = true;
         loop {
             match rx.try_recv() {
                 Ok(result) => {
-                    self.merge_agent_sessions(result.agent, result.sessions);
                     self.scanning_agents.remove(&result.agent);
-                    received_any = true;
+                    match result.sessions {
+                        Ok(scan) => {
+                            self.failed_agents.remove(&result.agent);
+                            if let Some(fingerprint) = scan.fingerprint {
+                                self.scan_fingerprints.insert(result.agent, fingerprint);
+                            } else {
+                                self.scan_fingerprints.remove(&result.agent);
+                            }
+                            self.merge_agent_sessions(result.agent, scan.sessions);
+                            merged_any = true;
+                        }
+                        Err(error) => {
+                            self.failed_agents.insert(result.agent);
+                            if std::env::var("AGF_DEBUG").is_ok() {
+                                eprintln!("[agf] {} refresh failed: {error}", result.agent);
+                            }
+                        }
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -556,11 +695,17 @@ impl App {
         if channel_open {
             // More results may arrive — keep polling next frame.
             self.scan_rx = Some(rx);
+        } else if !self.scanning_agents.is_empty() {
+            self.failed_agents.extend(self.scanning_agents.drain());
         }
-        if received_any {
+        if merged_any {
             // Re-apply current sort + filter so new sessions land in the
             // correct order and the cached column width is recomputed.
             self.apply_sort_preserving(pivot);
+            if self.mode == Mode::GroupedBrowse {
+                self.build_groups();
+                self.restore_grouped_selection(grouped_pivot);
+            }
         }
     }
 
@@ -568,17 +713,23 @@ impl App {
     /// responsible for re-sorting / re-filtering.
     fn merge_agent_sessions(&mut self, agent: Agent, new_sessions: Vec<Session>) {
         self.sessions.retain(|s| s.agent != agent);
-        self.sessions.extend(new_sessions);
-        if let Some(max) = self.settings.max_sessions {
-            // Keep most-recent first so truncation drops the tail.
-            self.sessions
-                .sort_by_key(|s| std::cmp::Reverse(s.timestamp));
-            self.sessions.truncate(max);
-        }
-        // Recount *after* truncating. Counting the incoming batch instead left
-        // the agent badge claiming sessions that `max_sessions` had just
-        // dropped off the end of the list.
+        let tombstones = self.deleted_tombstones.get(&agent);
+        self.sessions
+            .extend(new_sessions.into_iter().filter(|session| {
+                !tombstones.is_some_and(|ids| ids.contains(session.session_id.as_str()))
+            }));
         self.recount_agents();
+    }
+
+    pub fn cache_skip_agents(&self) -> HashSet<Agent> {
+        self.scanning_agents
+            .union(&self.failed_agents)
+            .copied()
+            .collect()
+    }
+
+    pub fn cache_invalidate_agents(&self) -> HashSet<Agent> {
+        self.deleted_tombstones.keys().copied().collect()
     }
 
     pub fn run(&mut self) -> anyhow::Result<Option<String>> {
@@ -613,6 +764,16 @@ type StyledChunk = (String, slt::Style);
 fn agent_color(agent: Agent) -> slt::Color {
     let (r, g, b) = agent.color();
     slt::Color::Rgb(r, g, b)
+}
+
+fn is_pinned_in(pins: &[String], session: &Session) -> bool {
+    pins.iter().any(|saved| {
+        saved == &session.session_id
+            || saved
+                .strip_prefix(session.agent.slug())
+                .and_then(|rest| rest.strip_prefix(':'))
+                == Some(session.session_id.as_str())
+    })
 }
 
 fn ui_browse(ui: &mut slt::Context, app: &mut App) {
@@ -694,11 +855,11 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         app.selected += 1;
         app.adjust_scroll();
     }
-    if enter && app.selected_session().is_some() {
+    if enter && app.capture_active_session() {
         app.action_index = 0;
         app.mode = Mode::ActionSelect;
     }
-    if (right || ctrl_right) && app.selected_session().is_some() {
+    if (right || ctrl_right) && app.capture_active_session() {
         app.mode = Mode::Preview;
     }
     if ctrl_sort {
@@ -741,17 +902,16 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         app.adjust_scroll();
     }
 
-    // Mouse: click on session row (search=1 + separator=1, list starts at y=2)
-    if let Some((_x, y)) = ui.mouse_down() {
-        let y = y as usize;
-        if y >= 2 {
-            let clicked_vi = app.scroll_offset + (y - 2);
-            if clicked_vi < app.filtered_indices.len() {
-                app.selected = clicked_vi;
-                app.adjust_scroll();
-                app.action_index = 0;
-                app.mode = Mode::ActionSelect;
-            }
+    // Mouse: the blank top row, search row, and separator occupy y=0..=2.
+    if let Some((_x, y)) = ui.mouse_down()
+        && let Some(clicked_vi) =
+            browse_click_index(y as usize, app.scroll_offset, app.filtered_indices.len())
+    {
+        app.selected = clicked_vi;
+        app.adjust_scroll();
+        app.action_index = 0;
+        if app.capture_active_session() {
+            app.mode = Mode::ActionSelect;
         }
     }
 
@@ -779,7 +939,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
             };
         });
 
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
 
         // Session list (rows have "> " or "  " prefix built-in)
         let _ = ui.container().grow(1).pr(1).col(|ui| {
@@ -817,7 +977,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         });
 
         // Separator between content and statusbar
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
 
         render_footer(
             ui,
@@ -858,6 +1018,12 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     }
 }
 
+fn browse_click_index(y: usize, scroll_offset: usize, session_count: usize) -> Option<usize> {
+    let row = y.checked_sub(BROWSE_FIRST_SESSION_ROW)?;
+    let index = scroll_offset.checked_add(row)?;
+    (index < session_count).then_some(index)
+}
+
 fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     let esc = ui.consume_key_code(slt::KeyCode::Esc);
     let enter = ui.consume_key_code(slt::KeyCode::Enter);
@@ -894,10 +1060,12 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
         return;
     }
     if ctrl_right && let Some((gi, Some(ci))) = app.grouped_row_at(app.grouped_selected) {
-        let session_idx = app.groups[gi].sessions[ci];
-        if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
+        let identity = app.groups[gi].sessions[ci].clone();
+        if let Some(vi) = app.filtered_position_for_identity(&identity) {
             app.selected = vi;
-            app.mode = Mode::Preview;
+            if app.capture_active_session() {
+                app.mode = Mode::Preview;
+            }
             return;
         }
     }
@@ -924,12 +1092,13 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
                 }
             }
             Some(ci) => {
-                let session_idx = app.groups[gi].sessions[ci];
-                // Find this session in filtered_indices to set app.selected
-                if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
+                let identity = app.groups[gi].sessions[ci].clone();
+                if let Some(vi) = app.filtered_position_for_identity(&identity) {
                     app.selected = vi;
                     app.action_index = 0;
-                    app.mode = Mode::ActionSelect;
+                    if app.capture_active_session() {
+                        app.mode = Mode::ActionSelect;
+                    }
                 }
             }
         }
@@ -961,7 +1130,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
             ))
             .fg(GRAY_500);
         });
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
 
         let _ = ui.container().grow(1).pr(1).col(|ui| {
             if app.groups.is_empty() {
@@ -981,15 +1150,18 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
                 // Get most recent timestamp for the group
                 let latest_time = group
                     .sessions
-                    .first()
-                    .map(|&i| app.sessions[i].time_display())
+                    .iter()
+                    .filter_map(|identity| app.session_by_identity(identity))
+                    .max_by_key(|session| session.timestamp)
+                    .map(Session::time_display)
                     .unwrap_or_default();
                 // Agents in this group
                 let mut agent_set: Vec<Agent> = Vec::new();
-                for &idx in &group.sessions {
-                    let a = app.sessions[idx].agent;
-                    if !agent_set.contains(&a) {
-                        agent_set.push(a);
+                for identity in &group.sessions {
+                    if let Some(session) = app.session_by_identity(identity)
+                        && !agent_set.contains(&session.agent)
+                    {
+                        agent_set.push(session.agent);
                     }
                 }
 
@@ -1003,10 +1175,14 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
                     };
                     let arrow = if expanded { "\u{25be}" } else { "\u{25b8}" };
                     let display_path = if let Some(home) = dirs::home_dir() {
-                        if let Some(rest) =
-                            group.project_path.strip_prefix(home.to_str().unwrap_or(""))
+                        if let Ok(rest) =
+                            std::path::Path::new(&group.project_path).strip_prefix(&home)
                         {
-                            format!("~{rest}")
+                            if rest.as_os_str().is_empty() {
+                                "~".to_string()
+                            } else {
+                                format!("~/{}", rest.to_string_lossy())
+                            }
                         } else {
                             group.project_path.clone()
                         }
@@ -1032,7 +1208,10 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
                             );
                         }
                         ui.styled("  ".to_string(), slt::Style::new().bg(bg));
-                        ui.styled(display_path, slt::Style::new().fg(GRAY_500).bg(bg));
+                        ui.styled(
+                            text::sanitize_terminal(&display_path),
+                            slt::Style::new().fg(GRAY_500).bg(bg),
+                        );
                         ui.spacer();
                         ui.styled(
                             format!("  {latest_time} "),
@@ -1044,9 +1223,12 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
 
                 // Child rows (if expanded)
                 if expanded {
-                    for (ci, &session_idx) in group.sessions.iter().enumerate() {
+                    for (ci, identity) in group.sessions.iter().enumerate() {
                         if row_idx >= app.grouped_scroll && row_idx < end {
-                            let s = &app.sessions[session_idx];
+                            let Some(s) = app.session_by_identity(identity) else {
+                                row_idx += 1;
+                                continue;
+                            };
                             let is_selected = row_idx == app.grouped_selected;
                             let bg = if is_selected {
                                 HIGHLIGHT_BG
@@ -1055,12 +1237,15 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
                             };
                             let is_last = ci == group.sessions.len() - 1;
                             let tree_char = if is_last { "  └─ " } else { "  ├─ " };
-                            let is_pinned = app.pinned_sessions.contains(&s.session_id);
+                            let is_pinned = app.is_pinned(s);
                             let pin_str = if is_pinned { "*" } else { " " };
 
                             // Calculate available space for summary
                             let fixed_width = 5 + 1 + 12 + 2 + 16; // tree + pin + agent + gap + time
-                            let git_width = s.git_branch.as_ref().map_or(0, |b| b.len() + 2);
+                            let git_width = s
+                                .git_branch
+                                .as_ref()
+                                .map_or(0, |b| text::width(&text::sanitize_terminal(b)) + 2);
                             let summary_max =
                                 total_width.saturating_sub(fixed_width + git_width + 2);
 
@@ -1112,7 +1297,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
                                 ui.spacer();
                                 if let Some(branch) = &s.git_branch {
                                     ui.styled(
-                                        branch.to_string(),
+                                        text::sanitize_terminal(branch),
                                         slt::Style::new().fg(GREEN_400).bg(bg),
                                     );
                                 }
@@ -1128,7 +1313,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
             }
         });
 
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
             &[
@@ -1146,6 +1331,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
     let action_count = actions.len();
 
     if ui.key_code(slt::KeyCode::Esc) {
+        app.active_session = None;
         app.mode = Mode::Browse;
     }
 
@@ -1174,7 +1360,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
             // picker instead of dispatching Resume directly. Other actions
             // dispatch immediately.
             if actions[app.action_index] == Action::Resume {
-                if let Some(session) = app.selected_session() {
+                if let Some(session) = app.action_session() {
                     app.resume_mode_options = session.agent.resume_mode_options().to_vec();
                     app.resume_mode_index = 0;
                     app.mode = Mode::ResumeSelect;
@@ -1192,7 +1378,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
             let clicked = y - 4;
             app.action_index = clicked;
             if actions[app.action_index] == Action::Resume {
-                if let Some(session) = app.selected_session() {
+                if let Some(session) = app.action_session() {
                     app.resume_mode_options = session.agent.resume_mode_options().to_vec();
                     app.resume_mode_index = 0;
                     app.mode = Mode::ResumeSelect;
@@ -1206,7 +1392,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
     if ui.key_code(slt::KeyCode::Enter) {
         // Resume → go to mode picker; others → dispatch directly
         if actions[app.action_index] == Action::Resume {
-            if let Some(session) = app.selected_session() {
+            if let Some(session) = app.action_session() {
                 app.resume_mode_options = session.agent.resume_mode_options().to_vec();
                 app.resume_mode_index = 0;
                 app.mode = Mode::ResumeSelect;
@@ -1216,29 +1402,32 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         }
     }
 
-    let Some(session) = app.selected_session() else {
+    let Some(session) = app.action_session() else {
+        app.active_session = None;
         app.mode = Mode::Browse;
         return;
     };
 
     let _ = ui.col(|ui| {
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.line(|ui| {
             ui.text(format!(" {} ", session.agent))
                 .fg(agent_color(session.agent))
                 .bold();
             ui.text("| ").fg(SEPARATOR);
-            ui.text(&session.project_name).fg(BRIGHT_WHITE).bold();
+            ui.text(text::sanitize_terminal(&session.project_name))
+                .fg(BRIGHT_WHITE)
+                .bold();
             ui.text(" | ").fg(SEPARATOR);
             ui.text(session.display_path()).fg(GRAY_500);
             if let Some(branch) = &session.git_branch {
                 ui.text(" | ").fg(SEPARATOR);
-                ui.text(branch).fg(GREEN_400);
+                ui.text(text::sanitize_terminal(branch)).fg(GREEN_400);
             }
             ui.text(" | ").fg(SEPARATOR);
             ui.text(session.time_display()).fg(VIOLET);
         });
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text("");
 
         let _ = ui.container().grow(1).col(|ui| {
@@ -1253,8 +1442,8 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
                 let indicator = format!(" {}) ", i + 1);
                 let label = if *act == Action::Pin {
                     let is_pinned = app
-                        .selected_session()
-                        .is_some_and(|s| app.pinned_sessions.contains(&s.session_id));
+                        .action_session()
+                        .is_some_and(|session| app.is_pinned(session));
                     if is_pinned {
                         "Unpin Session".to_string()
                     } else {
@@ -1275,7 +1464,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
                 } else {
                     base_style
                 };
-                let preview = action::action_preview(session, *act);
+                let preview = truncate_str(&action::action_preview(session, *act), total_width);
                 let mut preview_text = format!("    {preview}");
                 let used = UnicodeWidthStr::width(indicator.as_str())
                     + UnicodeWidthStr::width(label.as_str())
@@ -1313,7 +1502,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         });
 
         ui.text("");
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
             &[("Tab/jk", "nav"), ("Enter", "select"), ("Esc", "back")],
@@ -1329,6 +1518,7 @@ fn dispatch_action(
 ) {
     match selected_action {
         Action::Back => {
+            app.active_session = None;
             app.mode = Mode::Browse;
         }
         Action::NewSession => {
@@ -1337,23 +1527,32 @@ fn dispatch_action(
         }
         Action::Delete => {
             app.delete_index = 1;
-            app.mode = Mode::DeleteConfirm;
+            app.pending_delete = app.active_session.clone();
+            if app.pending_delete.is_some() {
+                app.mode = Mode::DeleteConfirm;
+            }
         }
         Action::Pin => {
-            if let Some(session) = app.selected_session() {
-                let id = session.session_id.clone();
-                if let Some(pos) = app.pinned_sessions.iter().position(|s| s == &id) {
+            if let Some(session) = app.action_session() {
+                let key = session.settings_key();
+                let legacy_id = session.session_id.clone();
+                if let Some(pos) = app
+                    .pinned_sessions
+                    .iter()
+                    .position(|saved| saved == &key || saved == &legacy_id)
+                {
                     app.pinned_sessions.remove(pos);
                 } else {
-                    app.pinned_sessions.push(id);
+                    app.pinned_sessions.push(key);
                 }
                 app.save_settings();
                 app.apply_sort();
             }
+            app.active_session = None;
             app.mode = Mode::Browse;
         }
         _ => {
-            if let Some(session) = app.selected_session().cloned()
+            if let Some(session) = app.action_session().cloned()
                 && let Some(cmd) = action::generate_command(&session, selected_action, None)
             {
                 result.replace(cmd);
@@ -1404,19 +1603,20 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         }
     }
 
-    let Some(session) = app.selected_session() else {
+    let Some(session) = app.action_session() else {
+        app.active_session = None;
         app.mode = Mode::Browse;
         return;
     };
 
     let _ = ui.col(|ui| {
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.line(|ui| {
             ui.text(" New session in ").fg(BRIGHT_WHITE);
             ui.text(session.display_path()).fg(GRAY_500);
             ui.text("  (enter -> permission mode)").fg(GRAY_500);
         });
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text("");
 
         let _ = ui.container().grow(1).col(|ui| {
@@ -1429,7 +1629,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
                     slt::Color::Reset
                 };
                 let indicator = format!(" {}) ", i + 1);
-                let preview = if let Some(s) = app.selected_session() {
+                let preview = if let Some(s) = app.action_session() {
                     let shell = crate::shell::CommandShell::from_env();
                     action::preview_cd_and(&shell, s, opt.agent.new_session_cmd())
                 } else {
@@ -1457,7 +1657,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         });
 
         ui.text("");
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
             &[
@@ -1500,7 +1700,7 @@ fn permission_options_for(agent: Agent) -> Vec<(&'static str, &'static str)> {
 
 fn dispatch_agent_option(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     if let Some(opt) = app.new_session_options.get(app.agent_index)
-        && let Some(session) = app.selected_session().cloned()
+        && let Some(session) = app.action_session().cloned()
     {
         let cmd = action::new_session_with_flags(&session, opt.agent, opt.command_suffix);
         result.replace(cmd);
@@ -1544,7 +1744,8 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         dispatch_mode_option(ui, app, result);
     }
 
-    if app.selected_session().is_none() {
+    if app.action_session().is_none() {
+        app.active_session = None;
         app.mode = Mode::Browse;
         return;
     }
@@ -1555,12 +1756,12 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         .map_or("agent", |o| o.label.as_str());
 
     let _ = ui.col(|ui| {
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.line(|ui| {
             ui.text(" Select mode for ").fg(BRIGHT_WHITE);
             ui.text(agent_label).fg(YELLOW).bold();
         });
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text("");
 
         let _ = ui.container().grow(1).col(|ui| {
@@ -1600,7 +1801,7 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         });
 
         ui.text("");
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
             &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
@@ -1611,7 +1812,7 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 fn dispatch_mode_option(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     if let Some((_, flags)) = app.mode_options.get(app.mode_index)
         && let Some(opt) = app.new_session_options.get(app.agent_index)
-        && let Some(session) = app.selected_session().cloned()
+        && let Some(session) = app.action_session().cloned()
     {
         let cmd = action::new_session_with_flags(&session, opt.agent, flags);
         result.replace(cmd);
@@ -1655,20 +1856,21 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         dispatch_resume_mode(ui, app, result);
     }
 
-    let Some(session) = app.selected_session() else {
+    let Some(session) = app.action_session() else {
+        app.active_session = None;
         app.mode = Mode::Browse;
         return;
     };
 
     let _ = ui.col(|ui| {
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.line(|ui| {
             ui.text(" Resume mode for ").fg(BRIGHT_WHITE);
             ui.text(format!("{}", session.agent))
                 .fg(agent_color(session.agent))
                 .bold();
         });
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text("");
 
         let _ = ui.container().grow(1).col(|ui| {
@@ -1708,7 +1910,7 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         });
 
         ui.text("");
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
             &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
@@ -1718,7 +1920,7 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
 fn dispatch_resume_mode(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     if let Some((_, flags)) = app.resume_mode_options.get(app.resume_mode_index)
-        && let Some(session) = app.selected_session().cloned()
+        && let Some(session) = app.action_session().cloned()
     {
         let cmd = action::resume_with_flags(&session, flags);
         result.replace(cmd);
@@ -1768,6 +1970,7 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
 
     if ui.key_code(slt::KeyCode::Enter) && !app.selected_set.is_empty() {
         app.delete_index = 1;
+        app.pending_delete = None;
         app.mode = Mode::DeleteConfirm;
     }
 
@@ -1807,6 +2010,7 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
     let is_bulk = !app.selected_set.is_empty();
 
     if ui.key_code(slt::KeyCode::Esc) {
+        app.pending_delete = None;
         if is_bulk {
             app.mode = Mode::BulkDelete;
         } else {
@@ -1856,26 +2060,43 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
                 // Only agents whose pass succeeded come back, so a failed
                 // delete leaves its rows visible.
                 let deleted = crate::delete::delete_selection(&targets);
+                for (agent, ids) in &deleted {
+                    app.deleted_tombstones
+                        .entry(*agent)
+                        .or_default()
+                        .extend(ids.iter().cloned());
+                }
                 app.sessions.retain(|s| {
                     !deleted
                         .get(&s.agent)
                         .is_some_and(|ids| ids.contains(s.session_id.as_str()))
                 });
                 app.recount_agents();
+                app.rebuild_session_index();
                 app.update_filter();
-            } else if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
+            } else if let Some(identity) = app.pending_delete.take()
+                && let Some(idx) = app.session_index.get(&identity).copied()
+            {
                 // Only drop the row from the UI when the on-disk delete
                 // actually succeeded; a failed delete stays visible.
                 if crate::delete::delete_session(&app.sessions[idx]).is_ok() {
+                    app.deleted_tombstones
+                        .entry(identity.agent)
+                        .or_default()
+                        .insert(identity.session_id.clone());
                     app.sessions.remove(idx);
                     app.recount_agents();
+                    app.rebuild_session_index();
                 }
                 app.update_filter();
             }
+            app.active_session = None;
             app.mode = Mode::Browse;
         } else if is_bulk {
             app.mode = Mode::BulkDelete;
         } else {
+            app.pending_delete = None;
+            app.active_session = None;
             app.mode = Mode::Browse;
         }
     }
@@ -1888,14 +2109,18 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
 }
 
 fn render_single_delete_confirm(ui: &mut slt::Context, app: &App) {
-    let Some(session) = app.selected_session() else {
+    let Some(session) = app
+        .pending_delete
+        .as_ref()
+        .and_then(|identity| app.session_by_identity(identity))
+    else {
         return;
     };
 
     let _ = ui.col(|ui| {
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text(" Delete session?").fg(RED).bold();
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text("");
 
         ui.line(|ui| {
@@ -1903,9 +2128,11 @@ fn render_single_delete_confirm(ui: &mut slt::Context, app: &App) {
                 .fg(agent_color(session.agent))
                 .bold();
             ui.text("| ").fg(SEPARATOR);
-            ui.text(&session.project_name).fg(BRIGHT_WHITE);
+            ui.text(text::sanitize_terminal(&session.project_name))
+                .fg(BRIGHT_WHITE);
             ui.text(" | ").fg(SEPARATOR);
-            ui.text(&session.session_id).fg(GRAY_500);
+            ui.text(text::sanitize_terminal(&session.session_id))
+                .fg(GRAY_500);
         });
         ui.text(format!("  {}", session.display_path()))
             .fg(GRAY_500);
@@ -1946,7 +2173,7 @@ fn render_single_delete_confirm(ui: &mut slt::Context, app: &App) {
             });
         }
 
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
     });
 }
 
@@ -1958,15 +2185,15 @@ fn render_bulk_delete_confirm(ui: &mut slt::Context, app: &App) {
         .sessions
         .iter()
         .filter(|s| app.is_checked(s))
-        .map(|s| s.project_name.clone())
+        .map(|s| text::sanitize_terminal(&s.project_name))
         .collect();
     let count = names.len();
     names.sort();
 
     let _ = ui.col(|ui| {
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text(format!(" Delete {count} sessions?")).fg(RED).bold();
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text("");
 
         for (i, name) in names.iter().enumerate() {
@@ -2009,7 +2236,7 @@ fn render_bulk_delete_confirm(ui: &mut slt::Context, app: &App) {
             });
         }
 
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
     });
 }
 
@@ -2021,6 +2248,7 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         || ui.key_code(slt::KeyCode::Left)
         || ui.key_mod('h', slt::KeyModifiers::CONTROL)
     {
+        app.active_session = None;
         app.mode = Mode::Browse;
         return;
     }
@@ -2041,21 +2269,24 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
     if up && app.selected > 0 {
         app.selected -= 1;
         app.adjust_scroll();
+        app.capture_active_session();
     }
     if down && !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
         app.selected += 1;
         app.adjust_scroll();
+        app.capture_active_session();
     }
 
-    let Some(session) = app.selected_session() else {
+    let Some(session) = app.action_session() else {
+        app.active_session = None;
         app.mode = Mode::Browse;
         return;
     };
 
     let _ = ui.col(|ui| {
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text(" Session Detail").fg(BRIGHT_WHITE).bold();
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         ui.text("");
 
         ui.line(|ui| {
@@ -2066,7 +2297,9 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         });
         ui.line(|ui| {
             ui.text("  Project:  ").fg(GRAY_500);
-            ui.text(&session.project_name).fg(BRIGHT_WHITE).bold();
+            ui.text(text::sanitize_terminal(&session.project_name))
+                .fg(BRIGHT_WHITE)
+                .bold();
         });
         ui.line(|ui| {
             ui.text("  Path:     ").fg(GRAY_500);
@@ -2074,7 +2307,8 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         });
         ui.line(|ui| {
             ui.text("  Session:  ").fg(GRAY_500);
-            ui.text(&session.session_id).fg(GRAY_400);
+            ui.text(text::sanitize_terminal(&session.session_id))
+                .fg(GRAY_400);
         });
         ui.line(|ui| {
             ui.text("  Time:     ").fg(GRAY_500);
@@ -2084,13 +2318,13 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         if let Some(branch) = &session.git_branch {
             ui.line(|ui| {
                 ui.text("  Branch:   ").fg(GRAY_500);
-                ui.text(branch).fg(GREEN_400);
+                ui.text(text::sanitize_terminal(branch)).fg(GREEN_400);
             });
         }
         if let Some(wt) = &session.worktree {
             ui.line(|ui| {
                 ui.text("  Worktree: ").fg(GRAY_500);
-                ui.text(wt).fg(CYAN);
+                ui.text(text::sanitize_terminal(wt)).fg(CYAN);
             });
         }
 
@@ -2121,7 +2355,7 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         }
 
         ui.text("");
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
             &[("↑↓", "cycle"), ("Enter", "actions"), ("Esc/←", "back")],
@@ -2169,11 +2403,13 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
     if app.help_selected == 1 && (ui.key('+') || ui.key('=')) {
         app.summary_search_count = app.summary_search_count.saturating_add(1).min(50);
         app.save_settings();
+        app.update_filter();
     }
 
     if app.help_selected == 1 && ui.key('-') {
         app.summary_search_count = app.summary_search_count.saturating_sub(1).max(1);
         app.save_settings();
+        app.update_filter();
     }
 
     if app.help_selected == 2
@@ -2199,7 +2435,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         let _ = ui.container().pl(2).pr(1).col(|ui| {
             ui.text("Help & Settings").fg(BRIGHT_WHITE).bold();
         });
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
 
         let _ = ui.container().pl(2).pr(1).grow(1).col(|ui| {
             ui.text("").dim();
@@ -2320,7 +2556,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
             ui.text(format!("  {config_path_str}")).fg(GRAY_500);
         });
 
-        ui.separator_colored(SEPARATOR);
+        let _ = ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
             &[
@@ -2414,7 +2650,7 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
                 render_chunks(ui, chunks);
             });
         } else {
-            let is_pinned = app.pinned_sessions.contains(&session.session_id);
+            let is_pinned = app.is_pinned(session);
             let indicator = match (is_selected, is_pinned) {
                 (true, true) => ">*",
                 (true, false) => "> ",
@@ -2424,7 +2660,8 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
             let match_positions = app.match_positions.get(vi).map(Vec::as_slice);
             let summary_offset = app
                 .summary_offsets
-                .get(&session.session_id)
+                .get(&session.agent)
+                .and_then(|offsets| offsets.get(session.session_id.as_str()))
                 .copied()
                 .unwrap_or(0);
             let summary_text = if app.show_recap && summary_offset == 0 {
@@ -2472,7 +2709,12 @@ fn render_session_list_compact(ui: &mut slt::Context, app: &App) {
         } else {
             slt::Color::Reset
         };
-        let indicator = if is_selected { "> " } else { "  " };
+        let indicator = match (is_selected, app.is_pinned(session)) {
+            (true, true) => ">*",
+            (true, false) => "> ",
+            (false, true) => " *",
+            (false, false) => "  ",
+        };
 
         let _ = ui.row(|ui| {
             ui.styled(
@@ -2535,9 +2777,12 @@ fn build_session_row(
     let right_display_width = time_width + right_margin;
 
     let git_info_str = if let Some(wt) = &session.worktree {
-        Some(format!("  {wt}"))
+        Some(format!("  {}", text::sanitize_terminal(wt)))
     } else {
-        session.git_branch.as_ref().map(|b| format!("  {b}"))
+        session
+            .git_branch
+            .as_ref()
+            .map(|b| format!("  {}", text::sanitize_terminal(b)))
     };
     let git_info_width = git_info_str.as_deref().map_or(0, UnicodeWidthStr::width);
 
@@ -2546,12 +2791,13 @@ fn build_session_row(
     let max_proj =
         total_width.saturating_sub(fixed_left + right_display_width + git_info_width + 4);
     let col_width = name_col_width.min(max_proj);
+    let project_name = text::sanitize_terminal(&session.project_name);
     let proj_display = if col_width == 0 {
         String::new()
-    } else if text::width(&session.project_name) > col_width {
-        truncate_str(&session.project_name, col_width)
+    } else if text::width(&project_name) > col_width {
+        truncate_str(&project_name, col_width)
     } else {
-        text::pad(&session.project_name, col_width)
+        text::pad(&project_name, col_width)
     };
 
     if let Some(positions) = match_positions {
@@ -2676,6 +2922,7 @@ mod scroll_margin_tests {
                 git_branch: None,
                 worktree: None,
                 recap: None,
+                interactive: true,
             })
             .collect();
         App::new(
@@ -2742,6 +2989,14 @@ mod streaming_selection_tests {
             git_branch: None,
             worktree: None,
             recap: None,
+            interactive: true,
+        }
+    }
+
+    fn completed(sessions: Vec<Session>) -> crate::scanner::CompletedScan {
+        crate::scanner::CompletedScan {
+            sessions,
+            fingerprint: Some(crate::cache::SourceFingerprint::default()),
         }
     }
 
@@ -2774,7 +3029,7 @@ mod streaming_selection_tests {
 
         tx.send(ScanResult {
             agent: Agent::OpenCode,
-            sessions: vec![session(Agent::OpenCode, "opencode", 10)],
+            sessions: Ok(completed(vec![session(Agent::OpenCode, "opencode", 10)])),
         })
         .unwrap();
         app.ingest_scan_results();
@@ -2782,7 +3037,7 @@ mod streaming_selection_tests {
 
         tx.send(ScanResult {
             agent: Agent::ClaudeCode,
-            sessions: vec![session(Agent::ClaudeCode, "claude", 20)],
+            sessions: Ok(completed(vec![session(Agent::ClaudeCode, "claude", 20)])),
         })
         .unwrap();
         app.ingest_scan_results();
@@ -2807,7 +3062,7 @@ mod streaming_selection_tests {
 
         tx.send(ScanResult {
             agent: Agent::ClaudeCode,
-            sessions: vec![session(Agent::ClaudeCode, "claude", 30)],
+            sessions: Ok(completed(vec![session(Agent::ClaudeCode, "claude", 30)])),
         })
         .unwrap();
         app.ingest_scan_results();
@@ -2816,6 +3071,120 @@ mod streaming_selection_tests {
             app.selected_session().unwrap().session_id,
             "chosen-opencode"
         );
+    }
+
+    #[test]
+    fn failed_stream_preserves_stale_rows_and_marks_agent_failed() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = make_app(
+            vec![session(Agent::Codex, "cached", 10)],
+            rx,
+            HashSet::from([Agent::Codex]),
+        );
+        tx.send(ScanResult {
+            agent: Agent::Codex,
+            sessions: Err("database is locked".into()),
+        })
+        .unwrap();
+        app.ingest_scan_results();
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].session_id, "cached");
+        assert!(app.failed_agents.contains(&Agent::Codex));
+        assert!(!app.scanning_agents.contains(&Agent::Codex));
+    }
+
+    #[test]
+    fn action_target_never_drifts_when_refresh_removes_it() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = make_app(
+            vec![
+                session(Agent::Codex, "chosen", 20),
+                session(Agent::Codex, "neighbor", 10),
+            ],
+            rx,
+            HashSet::from([Agent::Codex]),
+        );
+        app.apply_sort();
+        assert!(app.capture_active_session());
+        app.mode = Mode::ActionSelect;
+
+        tx.send(ScanResult {
+            agent: Agent::Codex,
+            sessions: Ok(completed(vec![session(Agent::Codex, "neighbor", 30)])),
+        })
+        .unwrap();
+        app.ingest_scan_results();
+
+        assert!(app.action_session().is_none());
+        assert_eq!(app.selected_session().unwrap().session_id, "neighbor");
+    }
+
+    #[test]
+    fn late_scan_cannot_resurrect_a_deleted_identity() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = make_app(Vec::new(), rx, HashSet::from([Agent::Codex]));
+        app.deleted_tombstones
+            .entry(Agent::Codex)
+            .or_default()
+            .insert("deleted".to_string());
+        tx.send(ScanResult {
+            agent: Agent::Codex,
+            sessions: Ok(completed(vec![
+                session(Agent::Codex, "deleted", 30),
+                session(Agent::Codex, "keep", 20),
+            ])),
+        })
+        .unwrap();
+
+        app.ingest_scan_results();
+
+        assert!(
+            !app.sessions
+                .iter()
+                .any(|session| session.session_id == "deleted")
+        );
+        assert!(
+            app.sessions
+                .iter()
+                .any(|session| session.session_id == "keep")
+        );
+    }
+
+    #[test]
+    fn grouped_streaming_rebuilds_identity_rows_without_stale_indices() {
+        let (tx, rx) = mpsc::channel();
+        let mut chosen = session(Agent::OpenCode, "chosen", 10);
+        chosen.project_path = "/tmp/chosen".into();
+        chosen.project_name = "chosen".into();
+        let mut app = make_app(vec![chosen], rx, HashSet::from([Agent::ClaudeCode]));
+        app.mode = Mode::GroupedBrowse;
+        app.build_groups();
+        app.group_expanded.insert("/tmp/chosen".into());
+        app.grouped_selected = 1;
+
+        let mut incoming = session(Agent::ClaudeCode, "new", 20);
+        incoming.project_path = "/tmp/new".into();
+        incoming.project_name = "new".into();
+        tx.send(ScanResult {
+            agent: Agent::ClaudeCode,
+            sessions: Ok(completed(vec![incoming])),
+        })
+        .unwrap();
+        app.ingest_scan_results();
+
+        assert_eq!(
+            app.grouped_selection_identity(),
+            Some(GroupSelection::Session(SessionIdentity {
+                agent: Agent::OpenCode,
+                session_id: "chosen".into(),
+            }))
+        );
+        assert!(app.groups.iter().all(|group| {
+            group
+                .sessions
+                .iter()
+                .all(|identity| app.session_by_identity(identity).is_some())
+        }));
     }
 }
 
@@ -2834,6 +3203,7 @@ mod bulk_selection_tests {
             git_branch: None,
             worktree: None,
             recap: None,
+            interactive: true,
         }
     }
 
@@ -2894,11 +3264,10 @@ mod bulk_selection_tests {
         assert_eq!(app.selection_count(), 3);
     }
 
-    /// Regression: the incoming batch's length was recorded as the agent count
-    /// *before* `max_sessions` truncation, so the agent badge advertised
-    /// sessions that had just been dropped off the end of the list.
+    /// `max_sessions` is a presentation limit. It must not truncate the source
+    /// vector that is later persisted to cache.
     #[test]
-    fn merge_recounts_agents_after_max_sessions_truncation() {
+    fn max_sessions_limits_visible_rows_without_dropping_cache_rows() {
         let settings = crate::settings::Settings {
             max_sessions: Some(2),
             ..crate::settings::Settings::default()
@@ -2913,10 +3282,11 @@ mod bulk_selection_tests {
                 session(Agent::ClaudeCode, "claude-3", 70),
             ],
         );
+        app.apply_sort();
 
-        // Truncated to 2: codex-new (100) + claude-1 (90).
-        assert_eq!(app.sessions.len(), 2);
-        assert_eq!(app.agent_counts.get(&Agent::ClaudeCode), Some(&1));
+        assert_eq!(app.sessions.len(), 4);
+        assert_eq!(app.filtered_indices.len(), 2);
+        assert_eq!(app.agent_counts.get(&Agent::ClaudeCode), Some(&3));
         assert_eq!(app.agent_counts.get(&Agent::Codex), Some(&1));
         assert_eq!(
             app.agent_counts.values().sum::<usize>(),

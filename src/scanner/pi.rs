@@ -1,13 +1,11 @@
 use serde::Deserialize;
 use serde_json::Value;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 use walkdir::WalkDir;
 
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
-use crate::scanner::{first_line_truncated, project_name_from_path};
+use crate::scanner::{first_line_truncated, for_each_bounded_line, project_name_from_path};
 
 const SUMMARY_MAX_CHARS: usize = 120;
 
@@ -19,6 +17,7 @@ const SUMMARY_MAX_CHARS: usize = 120;
 /// is always read; this only bounds how many prompt summaries are collected
 /// from pathologically large sessions.
 const MAX_PARSE_BYTES: usize = 512 * 1024;
+const MAX_LINE_BYTES: usize = 256 * 1024;
 
 #[derive(Deserialize)]
 struct PiSessionHeader {
@@ -31,16 +30,16 @@ struct PiSessionHeader {
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let sessions_dir = crate::config::pi_sessions_dir()?;
-    Ok(scan_from(&sessions_dir, Agent::Pi, None))
+    scan_from(&sessions_dir, Agent::Pi, None)
 }
 
 pub(crate) fn scan_from(
     sessions_dir: &Path,
     agent: Agent,
     max_depth: Option<usize>,
-) -> Vec<Session> {
+) -> Result<Vec<Session>, AgfError> {
     if !sessions_dir.exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut sessions = Vec::new();
@@ -49,13 +48,14 @@ pub(crate) fn scan_from(
         walker = walker.max_depth(depth);
     }
 
-    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+    for entry in walker {
+        let entry = entry.map_err(std::io::Error::other)?;
         let path = entry.path();
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
 
-        if let Some(session) = parse_session(path, agent) {
+        if let Some(session) = parse_session(path, agent)? {
             sessions.push(session);
         }
     }
@@ -64,58 +64,39 @@ pub(crate) fn scan_from(
     // so keep older sessions from the same project selectable.
     sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
 
-    sessions
+    Ok(sessions)
 }
 
-fn parse_session(path: &Path, agent: Agent) -> Option<Session> {
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
+fn parse_session(path: &Path, agent: Agent) -> Result<Option<Session>, AgfError> {
     let mut header = None;
     let mut summaries = Vec::new();
-    let mut bytes_read = 0usize;
-
-    for line_result in reader.lines() {
-        // A single bad line (invalid UTF-8, transient IO error) must skip just
-        // that line — never abort the rest of the file. `map_while(Result::ok)`
-        // stops at the first `Err`, which silently truncates summaries (or
-        // drops the entire session if the bad line is line 1, since the header
-        // is not yet captured). Same bug class as the cursor `.ok()?` fix in
-        // v0.11.3 (`extract_first_prompt_skips_invalid_utf8_lines`).
-        let Ok(line) = line_result else {
-            continue;
-        };
-        // +1 approximates the newline stripped by `lines()`; we only need a
-        // rough byte budget, not an exact count.
-        bytes_read += line.len() + 1;
-
-        let line = line.trim();
-        if !line.is_empty()
-            && let Ok(value) = serde_json::from_str::<Value>(line)
-        {
+    let read_ok = for_each_bounded_line(path, MAX_PARSE_BYTES, MAX_LINE_BYTES, |line| {
+        if let Ok(value) = serde_json::from_slice::<Value>(line) {
             if header.is_none() && value.get("type").and_then(Value::as_str) == Some("session") {
-                // Re-parse from the raw line rather than `from_value(clone)`:
-                // the header record carries the whole session preamble, and
-                // cloning it just to reshape it is a pure copy.
-                header = serde_json::from_str::<PiSessionHeader>(line).ok();
+                header = serde_json::from_slice::<PiSessionHeader>(line).ok();
             }
 
             if let Some(summary) = extract_user_summary(&value) {
                 summaries.push(summary);
             }
         }
-
-        if bytes_read >= MAX_PARSE_BYTES {
-            break;
-        }
+    });
+    if !read_ok {
+        return Err(
+            std::io::Error::other(format!("failed to read pi session {}", path.display())).into(),
+        );
     }
 
-    let header = header?;
+    let Some(header) = header else {
+        return Ok(None);
+    };
     if header.entry_type.as_deref() != Some("session") {
-        return None;
+        return Ok(None);
     }
 
-    let session_id = header.id?;
-    let cwd = header.cwd?;
+    let (Some(session_id), Some(cwd)) = (header.id, header.cwd) else {
+        return Ok(None);
+    };
     // pi's session-header timestamp is the CREATION time and never advances as
     // the session is used. The transcript file is appended on every turn, so
     // its mtime tracks last activity — take the max of the two so a
@@ -136,7 +117,7 @@ fn parse_session(path: &Path, agent: Agent) -> Option<Session> {
 
     let project_name = project_name_from_path(&cwd);
 
-    Some(Session {
+    Ok(Some(Session {
         agent,
         session_id,
         project_name,
@@ -146,7 +127,8 @@ fn parse_session(path: &Path, agent: Agent) -> Option<Session> {
         git_branch: None,
         worktree: None,
         recap: None,
-    })
+        interactive: true,
+    }))
 }
 
 fn extract_user_summary(value: &Value) -> Option<String> {
@@ -214,7 +196,9 @@ mod tests {
         let session = parse_session(&path, Agent::Pi);
         let _ = fs::remove_file(&path);
 
-        let session = session.expect("session header should parse");
+        let session = session
+            .expect("session file should be readable")
+            .expect("session header should parse");
         assert_eq!(session.session_id, "session-with-summary");
         assert_eq!(session.summaries, vec!["发布pip版本", "再发一个版本"]);
     }
@@ -240,7 +224,9 @@ mod tests {
         let session = parse_session(&path, Agent::Pi);
         let _ = fs::remove_file(&path);
 
-        let session = session.expect("header on line 1 should parse within the budget");
+        let session = session
+            .expect("session file should be readable")
+            .expect("header on line 1 should parse within the budget");
         assert_eq!(session.session_id, "big");
         // The 512 KiB budget stops collection before all 400 prompts are read.
         assert!(
@@ -282,7 +268,9 @@ mod tests {
         let session = parse_session(&path, Agent::Pi);
         let _ = fs::remove_file(&path);
 
-        let session = session.expect("session should surface despite invalid UTF-8 on line 1");
+        let session = session
+            .expect("session file should be readable")
+            .expect("session should surface despite invalid UTF-8 on line 1");
         assert_eq!(session.session_id, "recovered");
         assert_eq!(session.summaries, vec!["after garbage"]);
     }

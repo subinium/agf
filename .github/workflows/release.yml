@@ -39,6 +39,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: agf-x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            artifact: agf-aarch64-unknown-linux-gnu
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact: agf-x86_64-pc-windows-msvc
@@ -98,8 +101,8 @@ jobs:
           shopt -s nullglob
           files=(*/*.tar.gz */*.zip)
           # Keep in sync with the build matrix size.
-          if [ "${#files[@]}" -ne 4 ]; then
-            echo "expected 4 release archives, found ${#files[@]}: ${files[*]}" >&2
+          if [ "${#files[@]}" -ne 5 ]; then
+            echo "expected 5 release archives, found ${#files[@]}: ${files[*]}" >&2
             exit 1
           fi
           for f in "${files[@]}"; do

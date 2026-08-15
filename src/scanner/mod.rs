@@ -1,6 +1,7 @@
 use std::thread;
 
-use crate::model::Session;
+use crate::error::AgfError;
+use crate::model::{Agent, Session, compare_sessions, normalize_timestamp};
 
 pub mod claude;
 pub mod codex;
@@ -11,6 +12,7 @@ pub mod kiro;
 pub mod oh_my_pi;
 pub mod opencode;
 pub mod pi;
+pub mod prime_agent;
 pub mod yolop;
 
 /// Truncate a string to `max` chars, appending "..." if truncated.
@@ -25,23 +27,30 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 
 /// Read only the first non-empty line of a file without loading the rest.
 pub(crate) fn read_first_line(path: &std::path::Path) -> Option<String> {
+    read_first_line_result(path).ok().flatten()
+}
+
+/// Fallible counterpart used by authoritative scanners, where a transient
+/// read error must not be mistaken for a malformed/absent record and cached
+/// as a successful partial scan.
+pub(crate) fn read_first_line_result(path: &std::path::Path) -> std::io::Result<Option<String>> {
     use std::fs::File;
     use std::io::{BufRead, BufReader, Read};
     /// Defensive cap matching the 512 KiB budgets used by cursor/pi scanners;
     /// a real first line is ~1 KB, and a truncated line just fails JSON
     /// parse upstream and is skipped.
     const MAX_FIRST_LINE_BYTES: u64 = 512 * 1024;
-    let file = File::open(path).ok()?;
+    let file = File::open(path)?;
     let mut reader = BufReader::new(file).take(MAX_FIRST_LINE_BYTES);
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).ok()?;
+        let n = reader.read_line(&mut line)?;
         if n == 0 {
-            return None;
+            return Ok(None);
         }
         if !line.trim().is_empty() {
-            return Some(line);
+            return Ok(Some(line));
         }
     }
 }
@@ -76,6 +85,96 @@ pub(crate) fn read_head_lines(
         }
     }
     lines
+}
+
+/// Stream complete lines while enforcing both a total byte budget and a hard
+/// per-line allocation ceiling. Oversized lines are discarded in chunks
+/// instead of being accumulated by `BufRead::read_line/read_until`.
+pub(crate) fn for_each_bounded_line(
+    path: &std::path::Path,
+    max_total_bytes: usize,
+    max_line_bytes: usize,
+    mut visit: impl FnMut(&[u8]),
+) -> bool {
+    for_each_bounded_line_with_overflow(
+        path,
+        max_total_bytes,
+        max_line_bytes,
+        |line, _tail, oversized| {
+            if !oversized {
+                visit(line);
+            }
+        },
+    )
+}
+
+/// Variant that reports an oversized row with its bounded prefix. Callers
+/// such as Prime can still recover envelope fields (type/role/timestamp)
+/// without allocating a multi-megabyte tool payload.
+pub(crate) fn for_each_bounded_line_with_overflow(
+    path: &std::path::Path,
+    max_total_bytes: usize,
+    max_line_bytes: usize,
+    mut visit: impl FnMut(&[u8], &[u8], bool),
+) -> bool {
+    use std::collections::VecDeque;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    const MAX_TAIL_BYTES: usize = 64 * 1024;
+
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let mut reader = BufReader::new(file);
+    let mut total = 0usize;
+    let mut line = Vec::with_capacity(max_line_bytes.min(16 * 1024));
+    let mut tail = VecDeque::with_capacity(MAX_TAIL_BYTES);
+    let mut oversized = false;
+    while total < max_total_bytes {
+        let Ok(buffer) = reader.fill_buf() else {
+            return false;
+        };
+        if buffer.is_empty() {
+            if !line.is_empty() {
+                let tail_slice = tail.make_contiguous();
+                visit(&line, tail_slice, oversized);
+            }
+            return true;
+        }
+        let remaining = max_total_bytes - total;
+        let available = buffer.len().min(remaining);
+        let slice = &buffer[..available];
+        let (piece_len, ends_line) = match slice.iter().position(|byte| *byte == b'\n') {
+            Some(index) => (index + 1, true),
+            None => (slice.len(), false),
+        };
+        if !oversized {
+            let remaining_line = max_line_bytes.saturating_sub(line.len());
+            let copy_len = piece_len.min(remaining_line);
+            line.extend_from_slice(&slice[..copy_len]);
+            if copy_len < piece_len {
+                oversized = true;
+            }
+        }
+        if oversized {
+            tail.extend(slice[..piece_len].iter().copied());
+            let excess = tail.len().saturating_sub(MAX_TAIL_BYTES);
+            if excess > 0 {
+                tail.drain(..excess);
+            }
+        }
+        reader.consume(piece_len);
+        total += piece_len;
+        if ends_line {
+            let tail_slice = tail.make_contiguous();
+            visit(&line, tail_slice, oversized);
+            line.clear();
+            tail.clear();
+            oversized = false;
+        }
+    }
+    true
 }
 
 /// Char-safe slice: take first `max` chars (never panics on UTF-8 boundaries).
@@ -211,34 +310,65 @@ fn trim_partial_first_line(bytes: &[u8]) -> String {
     }
 }
 
-pub fn scan_all() -> Vec<Session> {
-    let handles = vec![
-        thread::spawn(|| claude::scan().unwrap_or_default()),
-        thread::spawn(|| codex::scan().unwrap_or_default()),
-        thread::spawn(|| opencode::scan().unwrap_or_default()),
-        thread::spawn(|| pi::scan().unwrap_or_default()),
-        thread::spawn(|| oh_my_pi::scan().unwrap_or_default()),
-        thread::spawn(|| kiro::scan().unwrap_or_default()),
-        thread::spawn(|| cursor_agent::scan().unwrap_or_default()),
-        thread::spawn(|| gemini::scan().unwrap_or_default()),
-        thread::spawn(|| hermes::scan().unwrap_or_default()),
-        thread::spawn(|| yolop::scan().unwrap_or_default()),
-    ];
-    let mut sessions: Vec<Session> = handles
-        .into_iter()
-        .flat_map(|h| match h.join() {
-            Ok(v) => v,
-            Err(_) => {
-                if std::env::var("AGF_DEBUG").is_ok() {
-                    eprintln!("[agf] scanner thread panicked");
-                }
-                Vec::new()
-            }
-        })
-        .collect();
+pub fn scan_agent(agent: Agent) -> Result<Vec<Session>, AgfError> {
+    match agent {
+        Agent::ClaudeCode => claude::scan(),
+        Agent::Codex => codex::scan(),
+        Agent::OpenCode => opencode::scan(),
+        Agent::Pi => pi::scan(),
+        Agent::OhMyPi => oh_my_pi::scan(),
+        Agent::Kiro => kiro::scan(),
+        Agent::CursorAgent => cursor_agent::scan(),
+        Agent::Gemini => gemini::scan(),
+        Agent::Hermes => hermes::scan(),
+        Agent::Yolop => yolop::scan(),
+        Agent::PrimeAgent => prime_agent::scan(),
+    }
+}
 
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
-    sessions
+pub struct CompletedScan {
+    pub sessions: Vec<Session>,
+    /// Present only when sources were unchanged for the whole scan. The
+    /// sessions remain useful when an active agent appended concurrently, but
+    /// that snapshot must not be persisted as fresh cache state.
+    pub fingerprint: Option<crate::cache::SourceFingerprint>,
+}
+
+pub fn scan_agent_consistent(agent: Agent) -> Result<CompletedScan, String> {
+    let before = crate::cache::agent_fingerprint(agent);
+    let mut sessions = scan_agent(agent).map_err(|error| error.to_string())?;
+    let after = crate::cache::agent_fingerprint(agent);
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut future_clamped = false;
+    for session in &mut sessions {
+        let raw_timestamp = session.timestamp;
+        session.timestamp = normalize_timestamp(raw_timestamp, 0);
+        // A timestamp just beyond the accepted skew window can become valid
+        // while the source remains byte-for-byte unchanged. Do not bless the
+        // clamped value as fresh cache state, or the raw durable timestamp is
+        // lost permanently and the session stays at the bottom.
+        future_clamped |= raw_timestamp > now && session.timestamp != raw_timestamp;
+    }
+    sessions.sort_by(|a, b| compare_sessions(a, b, crate::model::SortMode::Time));
+    Ok(CompletedScan {
+        sessions,
+        fingerprint: (before == after && !future_clamped).then_some(after),
+    })
+}
+
+pub fn scan_agents_detailed(agents: &[Agent]) -> Vec<(Agent, Result<CompletedScan, String>)> {
+    let handles: Vec<_> = agents
+        .iter()
+        .copied()
+        .map(|agent| (agent, thread::spawn(move || scan_agent_consistent(agent))))
+        .collect();
+    handles
+        .into_iter()
+        .map(|(agent, handle)| match handle.join() {
+            Ok(result) => (agent, result),
+            Err(_) => (agent, Err("scanner thread panicked".to_string())),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -278,6 +408,42 @@ mod tests {
         assert_eq!(collapse_whitespace("one"), "one");
         // Unicode whitespace (ideographic space) collapses like split_whitespace.
         assert_eq!(collapse_whitespace("a\u{3000}b"), "a b");
+    }
+
+    #[test]
+    fn bounded_line_reader_discards_oversized_rows_and_recovers() {
+        let mut content = vec![b'x'; 1024];
+        content.extend_from_slice(b"\n{\"ok\":true}\n");
+        let path = write_tmp("agf-test-bounded-lines.jsonl", &content);
+        let mut lines = Vec::new();
+        assert!(for_each_bounded_line(&path, 2048, 128, |line| lines.push(line.to_vec())));
+        assert_eq!(lines, [b"{\"ok\":true}\n".to_vec()]);
+    }
+
+    #[test]
+    fn overflow_reader_retains_a_bounded_tail_for_late_envelope_fields() {
+        let mut content = br#"{"display":""#.to_vec();
+        content.extend(std::iter::repeat_n(b'x', 1024));
+        content.extend_from_slice(br#"","project":"/tmp/p","sessionId":"sid","timestamp":42}"#);
+        content.push(b'\n');
+        let path = write_tmp("agf-test-bounded-tail.jsonl", &content);
+        let mut observed = None;
+        assert!(for_each_bounded_line_with_overflow(
+            &path,
+            usize::MAX,
+            128,
+            |prefix, tail, oversized| {
+                observed = Some((prefix.to_vec(), tail.to_vec(), oversized));
+            }
+        ));
+        let (prefix, tail, oversized) = observed.expect("one row");
+        assert!(oversized);
+        assert_eq!(prefix.len(), 128);
+        assert!(
+            String::from_utf8(tail)
+                .unwrap()
+                .contains("\"sessionId\":\"sid\"")
+        );
     }
 
     #[test]

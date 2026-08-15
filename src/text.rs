@@ -6,7 +6,67 @@
 //! every column to the right of a CJK cell, so all column work goes through
 //! these helpers instead of `format!` padding.
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+/// Remove terminal control sequences from untrusted session metadata.
+///
+/// Project names, branches, and paths originate in agent logs and repositories.
+/// Emitting ESC/C0/C1 bytes verbatim lets a crafted name rewrite the terminal,
+/// set a title, or copy data through OSC 52.  Single-line renderers do not need
+/// any control characters, so whitespace controls become spaces and all other
+/// controls are dropped.
+pub fn sanitize_terminal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '\n' | '\r' | '\t') {
+            out.push(' ');
+        } else if ch == '\u{1b}' || ch.is_control() || is_bidi_formatting(ch) {
+            continue;
+        } else {
+            out.push(ch);
+        }
+    }
+    collapse_spaces(&out)
+}
+
+fn is_bidi_formatting(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+fn collapse_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut previous_space = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !previous_space && !out.is_empty() {
+                out.push(' ');
+            }
+            previous_space = true;
+        } else {
+            out.push(ch);
+            previous_space = false;
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+pub fn color_enabled() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM").ok().as_deref() != Some("dumb")
+}
 
 /// Display width of `s` in terminal columns.
 pub fn width(s: &str) -> usize {
@@ -24,12 +84,7 @@ pub fn truncate(s: &str, max_width: usize) -> String {
 /// Used for free-form session summaries rendered inside a single TUI row,
 /// where a raw `\n` would break the layout.
 pub fn truncate_flat(s: &str, max_width: usize) -> String {
-    if s.contains(['\n', '\r', '\t']) {
-        let flattened = s.split_whitespace().collect::<Vec<_>>().join(" ");
-        truncate_with(&flattened, max_width, "...")
-    } else {
-        truncate_with(s, max_width, "...")
-    }
+    truncate_with(&sanitize_terminal(s), max_width, "...")
 }
 
 /// Pad `s` with trailing spaces to `to_width` columns. Wider input is returned
@@ -49,7 +104,7 @@ pub fn pad(s: &str, to_width: usize) -> String {
 /// long, space-padded if too short. This is the CJK-safe replacement for
 /// `format!("{:<column_width$}", truncate(s, column_width))`.
 pub fn fit(s: &str, column_width: usize) -> String {
-    pad(&truncate(s, column_width), column_width)
+    pad(&truncate(&sanitize_terminal(s), column_width), column_width)
 }
 
 /// Shared truncation core. The ellipsis is *included* in the budget, so the
@@ -70,15 +125,13 @@ fn truncate_with(s: &str, max_width: usize, ellipsis: &str) -> String {
 
     let mut out = String::with_capacity(s.len().min(budget.saturating_mul(4)) + ellipsis.len());
     let mut used = 0;
-    for ch in s.chars() {
-        // Zero-width and control chars report `None`; treat them as 0 columns
-        // so they ride along without consuming budget.
-        let ch_width = ch.width().unwrap_or(0);
-        if used + ch_width > budget {
+    for grapheme in s.graphemes(true) {
+        let grapheme_width = width(grapheme);
+        if used + grapheme_width > budget {
             break;
         }
-        used += ch_width;
-        out.push(ch);
+        used += grapheme_width;
+        out.push_str(grapheme);
     }
     if marked {
         out.push_str(ellipsis);
@@ -116,6 +169,13 @@ mod tests {
     }
 
     #[test]
+    fn truncate_never_splits_an_emoji_grapheme() {
+        let out = truncate("👩‍🔬xyz", 4);
+        assert_eq!(out, "👩‍🔬x…");
+        assert!(!out.ends_with('\u{200d}'));
+    }
+
+    #[test]
     fn truncate_keeps_short_input_verbatim() {
         assert_eq!(truncate("agf", 10), "agf");
         assert_eq!(truncate("프로젝트", 8), "프로젝트");
@@ -144,5 +204,13 @@ mod tests {
     fn zero_width_budget_yields_empty_string() {
         assert_eq!(truncate("anything", 0), "");
         assert_eq!(fit("anything", 0), "");
+    }
+
+    #[test]
+    fn sanitize_terminal_strips_escape_and_control_bytes() {
+        let hostile = "safe\x1b]52;c;secret\x07\nnext\tpart\u{0085}\u{202e}spoof\u{2066}end";
+        let clean = sanitize_terminal(hostile);
+        assert_eq!(clean, "safe]52;c;secret next partspoofend");
+        assert!(!clean.chars().any(char::is_control));
     }
 }

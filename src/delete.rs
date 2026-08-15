@@ -13,7 +13,15 @@ use crate::scanner::{read_first_line, read_head_lines};
 /// Only removes session data, NOT the project directory.
 pub fn delete_session(session: &Session) -> Result<(), io::Error> {
     let ids = HashSet::from([session.session_id.as_str()]);
-    delete_agent_sessions(session.agent, &ids)
+    let deleted = delete_agent_sessions(session.agent, &ids)?;
+    if deleted.contains(&session.session_id) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("session data was not found: {}", session.session_id),
+        ))
+    }
 }
 
 /// Delete every session named in `selection`, doing **one** filesystem or
@@ -36,8 +44,10 @@ pub fn delete_selection(
             continue;
         }
         let borrowed: HashSet<&str> = ids.iter().map(String::as_str).collect();
-        if delete_agent_sessions(agent, &borrowed).is_ok() {
-            deleted.insert(agent, ids.clone());
+        if let Ok(actually_deleted) = delete_agent_sessions(agent, &borrowed) {
+            if !actually_deleted.is_empty() {
+                deleted.insert(agent, actually_deleted);
+            }
             continue;
         }
         // The batch aborted somewhere, and a batch cannot say how far it got.
@@ -46,8 +56,12 @@ pub fn delete_selection(
         // pass per id, but only on the error path.
         let individually: HashSet<String> = ids
             .iter()
-            .filter(|id| delete_agent_sessions(agent, &HashSet::from([id.as_str()])).is_ok())
-            .cloned()
+            .filter_map(|id| {
+                delete_agent_sessions(agent, &HashSet::from([id.as_str()]))
+                    .ok()
+                    .filter(|removed| removed.contains(id))
+                    .map(|_| id.clone())
+            })
             .collect();
         if !individually.is_empty() {
             deleted.insert(agent, individually);
@@ -56,7 +70,7 @@ pub fn delete_selection(
     deleted
 }
 
-fn delete_agent_sessions(agent: Agent, ids: &HashSet<&str>) -> Result<(), io::Error> {
+fn delete_agent_sessions(agent: Agent, ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
     // Refuse the whole batch if any id is unsafe: acting on part of a delete
     // whose input we distrust is worse than refusing all of it.
     if let Some(bad) = ids.iter().find(|id| !is_safe_session_id(id)) {
@@ -81,6 +95,10 @@ fn delete_agent_sessions(agent: Agent, ids: &HashSet<&str>) -> Result<(), io::Er
         Agent::Gemini => delete_gemini_sessions(ids),
         Agent::Hermes => delete_hermes_sessions(ids),
         Agent::Yolop => delete_yolop_sessions(ids),
+        Agent::PrimeAgent => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Prime Agent deletion is disabled: use Prime Agent's /resume picker so active daemon sessions are protected",
+        )),
     }
 }
 
@@ -106,49 +124,6 @@ fn is_safe_session_id(id: &str) -> bool {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Rewrite a JSONL file, excluding every line whose `json_key` is in `values`.
-///
-/// Skips the write entirely when nothing matched, so a bulk delete that touches
-/// one agent does not rewrite another's multi-MB history file for nothing.
-fn rewrite_jsonl_excluding(
-    path: &Path,
-    json_key: &str,
-    values: &HashSet<&str>,
-) -> Result<(), io::Error> {
-    let content = fs::read_to_string(path)?;
-    let mut kept = String::with_capacity(content.len());
-    let mut dropped_any = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if line_field_matches_any(trimmed, json_key, values) {
-            dropped_any = true;
-            continue;
-        }
-        kept.push_str(line);
-        kept.push('\n');
-    }
-
-    if !dropped_any {
-        return Ok(());
-    }
-    crate::fsx::write_atomic(path, kept.as_bytes())
-}
-
-/// Check whether a JSON line's `key` holds any of `values`.
-fn line_field_matches_any(line: &str, key: &str, values: &HashSet<&str>) -> bool {
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
-        return false;
-    };
-    parsed
-        .get(key)
-        .and_then(|v| v.as_str())
-        .is_some_and(|v| values.contains(v))
-}
-
 /// Single walk of `base` removing every directory named in `dir_names` and
 /// every regular file named in `file_names`.
 ///
@@ -159,11 +134,13 @@ fn remove_matching_entries(
     base: &Path,
     dir_names: &HashSet<&str>,
     file_names: &HashSet<&str>,
-) -> Result<(), io::Error> {
+) -> Result<HashSet<String>, io::Error> {
+    let mut deleted = HashSet::new();
     if !base.is_dir() {
-        return Ok(());
+        return Ok(deleted);
     }
-    for entry in WalkDir::new(base).into_iter().flatten() {
+    for entry in WalkDir::new(base) {
+        let entry = entry.map_err(io::Error::other)?;
         // `entry.file_type()` reuses the readdir result; `path.is_dir()` would
         // pay a fresh stat for every file in the tree.
         let file_type = entry.file_type();
@@ -174,31 +151,31 @@ fn remove_matching_entries(
         if file_type.is_dir() {
             if dir_names.contains(name) {
                 fs::remove_dir_all(path)?;
+                deleted.insert(name.to_string());
             }
         } else if file_type.is_file() && file_names.contains(name) {
             fs::remove_file(path)?;
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                deleted.insert(stem.to_string());
+            }
         }
     }
-    Ok(())
+    Ok(deleted)
 }
 
 // ---------------------------------------------------------------------------
 // Claude Code
 // ---------------------------------------------------------------------------
 
-/// Claude sessions are listed as lines in `~/.claude/history.jsonl`.
-/// We rewrite the file excluding all lines whose `sessionId` matches, and
-/// remove any project-specific session directory under `~/.claude/projects/`.
-fn delete_claude_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
+/// Claude history is append-only and may have a live writer, so deletion never
+/// rewrites it. Removing the exact transcript is sufficient: the scanner's
+/// live-set filter ignores retained history summaries without a transcript.
+fn delete_claude_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
     let claude_dir = config::claude_dir().map_err(io::Error::other)?;
-
-    let history_path = claude_dir.join("history.jsonl");
-    if history_path.exists() {
-        rewrite_jsonl_excluding(&history_path, "sessionId", ids)?;
-    }
-
     let projects_dir = claude_dir.join("projects");
-    remove_matching_entries(&projects_dir, ids, &HashSet::new())
+    let transcript_names: Vec<String> = ids.iter().map(|id| format!("{id}.jsonl")).collect();
+    let transcript_names: HashSet<&str> = transcript_names.iter().map(String::as_str).collect();
+    remove_matching_entries(&projects_dir, ids, &transcript_names)
 }
 
 // ---------------------------------------------------------------------------
@@ -209,36 +186,39 @@ fn delete_claude_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
 /// depending on Codex CLI version):
 ///   * `state_*.sqlite` `threads` row (primary source for current Codex CLI),
 ///   * `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` rollout file,
-///   * `~/.codex/history.jsonl` per-prompt summary entries.
+///   * `~/.codex/history.jsonl` per-prompt summary entries (left append-only).
 ///
 /// We delete from all three so the session does not reappear after the next
 /// `agf` scan via the SQLite path.
-fn delete_codex_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
+fn delete_codex_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
     let codex_dir = config::codex_dir().map_err(io::Error::other)?;
 
-    delete_codex_sqlite_rows(&codex_dir, ids)?;
+    let mut deleted = delete_codex_sqlite_rows(&codex_dir, ids)?;
 
     let sessions_dir = codex_dir.join("sessions");
     if sessions_dir.exists() {
-        delete_codex_session_files(&sessions_dir, ids)?;
+        deleted.extend(delete_codex_session_files(&sessions_dir, ids)?);
     }
 
-    let history_path = codex_dir.join("history.jsonl");
-    if history_path.exists() {
-        rewrite_jsonl_excluding(&history_path, "session_id", ids)?;
-    }
-
-    Ok(())
+    Ok(deleted)
 }
 
 /// Remove the `threads` rows matching `ids` from every `state_*.sqlite` in
-/// `codex_dir`. Missing tables / open errors on a single file are swallowed so
-/// one corrupt or older-schema db cannot block the delete on the others.
-fn delete_codex_sqlite_rows(codex_dir: &Path, ids: &HashSet<&str>) -> Result<(), io::Error> {
-    let Ok(entries) = fs::read_dir(codex_dir) else {
-        return Ok(());
+/// `codex_dir`. Older schemas without `threads` are ignored, but lock/open/
+/// write failures are surfaced so the UI never reports a deletion that did
+/// not actually reach the current Codex database.
+fn delete_codex_sqlite_rows(
+    codex_dir: &Path,
+    ids: &HashSet<&str>,
+) -> Result<HashSet<String>, io::Error> {
+    let mut deleted = HashSet::new();
+    let entries = match fs::read_dir(codex_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(deleted),
+        Err(error) => return Err(error),
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
         let is_state_db = path
             .file_name()
@@ -247,25 +227,33 @@ fn delete_codex_sqlite_rows(codex_dir: &Path, ids: &HashSet<&str>) -> Result<(),
         if !is_state_db {
             continue;
         }
-        let Ok(conn) = rusqlite::Connection::open(&path) else {
-            continue;
-        };
-        // `threads` is the only table the Codex scanner reads from. Older
-        // Codex CLI versions may not have this table — ignore the error.
+        let mut conn = rusqlite::Connection::open(&path)
+            .map_err(|error| io::Error::other(format!("{}: {error}", path.display())))?;
+        let tx = conn.transaction().map_err(io::Error::other)?;
         for id in ids {
-            let _ = conn.execute("DELETE FROM threads WHERE id = ?1", [*id]);
+            match tx.execute("DELETE FROM threads WHERE id = ?1", [*id]) {
+                Ok(count) => {
+                    if count > 0 {
+                        deleted.insert((*id).to_string());
+                    }
+                }
+                Err(error) if error.to_string().contains("no such table") => break,
+                Err(error) => return Err(io::Error::other(error)),
+            }
         }
+        tx.commit().map_err(io::Error::other)?;
     }
-    Ok(())
+    Ok(deleted)
 }
 
 /// Find and delete the Codex rollout JSONL files matching `ids`.
-fn delete_codex_session_files(sessions_dir: &Path, ids: &HashSet<&str>) -> Result<(), io::Error> {
-    let mut remaining = ids.len();
-    for entry in WalkDir::new(sessions_dir).into_iter().flatten() {
-        if remaining == 0 {
-            break;
-        }
+fn delete_codex_session_files(
+    sessions_dir: &Path,
+    ids: &HashSet<&str>,
+) -> Result<HashSet<String>, io::Error> {
+    let mut deleted = HashSet::new();
+    for entry in WalkDir::new(sessions_dir) {
+        let entry = entry.map_err(io::Error::other)?;
         let path = entry.path();
         if !entry.file_type().is_file()
             || path.extension().and_then(|e| e.to_str()) != Some("jsonl")
@@ -288,10 +276,10 @@ fn delete_codex_session_files(sessions_dir: &Path, ids: &HashSet<&str>) -> Resul
             .unwrap_or_default();
         if ids.contains(payload_id) {
             fs::remove_file(path)?;
-            remaining -= 1;
+            deleted.insert(payload_id.to_string());
         }
     }
-    Ok(())
+    Ok(deleted)
 }
 
 // ---------------------------------------------------------------------------
@@ -300,11 +288,11 @@ fn delete_codex_session_files(sessions_dir: &Path, ids: &HashSet<&str>) -> Resul
 
 /// OpenCode sessions are stored in a SQLite database at
 /// `~/.local/share/opencode/opencode.db`.
-fn delete_opencode_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
+fn delete_opencode_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
     let opencode_dir = config::opencode_data_dir().map_err(io::Error::other)?;
     let db_path = opencode_dir.join("opencode.db");
     if !db_path.exists() {
-        return Ok(());
+        return Ok(HashSet::new());
     }
 
     let mut conn = rusqlite::Connection::open(&db_path)
@@ -312,9 +300,14 @@ fn delete_opencode_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
     let tx = conn
         .transaction()
         .map_err(|e| io::Error::other(format!("SQLite begin tx error: {e}")))?;
+    let mut deleted = HashSet::new();
     for id in ids {
-        tx.execute("DELETE FROM session WHERE id = ?1", [*id])
+        let count = tx
+            .execute("DELETE FROM session WHERE id = ?1", [*id])
             .map_err(|e| io::Error::other(format!("SQLite delete error: {e}")))?;
+        if count > 0 {
+            deleted.insert((*id).to_string());
+        }
     }
     tx.commit()
         .map_err(|e| io::Error::other(format!("SQLite commit error: {e}")))?;
@@ -336,7 +329,7 @@ fn delete_opencode_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
         }
     }
 
-    Ok(())
+    Ok(deleted)
 }
 
 // ---------------------------------------------------------------------------
@@ -351,16 +344,17 @@ const PI_HEADER_SCAN_BYTES: u64 = 64 * 1024;
 
 /// pi and Oh My Pi both store sessions as JSONL files under
 /// `<root>/<encoded-cwd>/<timestamp>_<sessionId>.jsonl`.
-fn delete_pi_style_sessions(sessions_dir: &Path, ids: &HashSet<&str>) -> Result<(), io::Error> {
+fn delete_pi_style_sessions(
+    sessions_dir: &Path,
+    ids: &HashSet<&str>,
+) -> Result<HashSet<String>, io::Error> {
+    let mut deleted = HashSet::new();
     if !sessions_dir.exists() {
-        return Ok(());
+        return Ok(deleted);
     }
 
-    let mut remaining = ids.len();
-    for entry in WalkDir::new(sessions_dir).into_iter().flatten() {
-        if remaining == 0 {
-            break;
-        }
+    for entry in WalkDir::new(sessions_dir) {
+        let entry = entry.map_err(io::Error::other)?;
         let path = entry.path();
         if !entry.file_type().is_file()
             || path.extension().and_then(|e| e.to_str()) != Some("jsonl")
@@ -368,30 +362,34 @@ fn delete_pi_style_sessions(sessions_dir: &Path, ids: &HashSet<&str>) -> Result<
             continue;
         }
 
-        let matches = read_head_lines(path, PI_HEADER_SCAN_LINES, PI_HEADER_SCAN_BYTES)
+        let matching_id = read_head_lines(path, PI_HEADER_SCAN_LINES, PI_HEADER_SCAN_BYTES)
             .iter()
-            .any(|line| pi_header_matches(line, ids));
-        if matches {
+            .find_map(|line| pi_header_id(line, ids));
+        if let Some(id) = matching_id {
             fs::remove_file(path)?;
-            remaining -= 1;
+            deleted.insert(id);
         }
     }
 
-    Ok(())
+    Ok(deleted)
 }
 
-fn pi_header_matches(line: &str, ids: &HashSet<&str>) -> bool {
+fn pi_header_id(line: &str, ids: &HashSet<&str>) -> Option<String> {
     if line.is_empty() {
-        return false;
+        return None;
     }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return false;
+        return None;
     };
-    value.get("type").and_then(|v| v.as_str()) == Some("session")
-        && value
-            .get("id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|id| ids.contains(id))
+    (value.get("type").and_then(|v| v.as_str()) == Some("session"))
+        .then(|| {
+            value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|id| ids.contains(*id))
+                .map(str::to_string)
+        })
+        .flatten()
 }
 
 // ---------------------------------------------------------------------------
@@ -401,27 +399,61 @@ fn pi_header_matches(line: &str, ids: &HashSet<&str>) -> bool {
 /// Kiro sessions are stored in a SQLite database at
 /// `~/Library/Application Support/kiro-cli/data.sqlite3` (macOS) or
 /// `~/.local/share/kiro-cli/data.sqlite3` (Linux).
-fn delete_kiro_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
+fn delete_kiro_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
+    let mut deleted = HashSet::new();
     let data_dir = config::kiro_data_dir().map_err(io::Error::other)?;
     let db_path = data_dir.join("data.sqlite3");
-    if !db_path.exists() {
-        return Ok(());
+    if db_path.exists() {
+        let mut conn = rusqlite::Connection::open(&db_path)
+            .map_err(|e| io::Error::other(format!("SQLite open error: {e}")))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| io::Error::other(format!("SQLite begin tx error: {e}")))?;
+        for id in ids {
+            match tx.execute(
+                "DELETE FROM conversations_v2 WHERE conversation_id = ?1",
+                [*id],
+            ) {
+                Ok(count) => {
+                    if count > 0 {
+                        deleted.insert((*id).to_string());
+                    }
+                }
+                Err(error) if error.to_string().contains("no such table") => break,
+                Err(error) => {
+                    return Err(io::Error::other(format!("SQLite delete error: {error}")));
+                }
+            }
+        }
+        tx.commit()
+            .map_err(|e| io::Error::other(format!("SQLite commit error: {e}")))?;
     }
 
-    let mut conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| io::Error::other(format!("SQLite open error: {e}")))?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| io::Error::other(format!("SQLite begin tx error: {e}")))?;
-    for id in ids {
-        tx.execute(
-            "DELETE FROM conversations_v2 WHERE conversation_id = ?1",
-            [*id],
-        )
-        .map_err(|e| io::Error::other(format!("SQLite delete error: {e}")))?;
+    let sessions_dir = config::kiro_sessions_dir().map_err(io::Error::other)?;
+    if sessions_dir.is_dir() {
+        for entry in fs::read_dir(&sessions_dir)? {
+            let entry = entry?;
+            let metadata_path = entry.path();
+            if !entry.file_type()?.is_file()
+                || metadata_path.extension().and_then(|ext| ext.to_str()) != Some("json")
+            {
+                continue;
+            }
+            let Some(id) = crate::scanner::kiro::v3_session_id(&metadata_path)
+                .map_err(io::Error::other)?
+                .filter(|id| ids.contains(id.as_str()))
+            else {
+                continue;
+            };
+            fs::remove_file(&metadata_path)?;
+            let event_path = metadata_path.with_extension("jsonl");
+            if event_path.is_file() {
+                fs::remove_file(event_path)?;
+            }
+            deleted.insert(id);
+        }
     }
-    tx.commit()
-        .map_err(|e| io::Error::other(format!("SQLite commit error: {e}")))
+    Ok(deleted)
 }
 
 // ---------------------------------------------------------------------------
@@ -439,17 +471,22 @@ fn delete_kiro_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
 /// Both shapes are still surfaced by the scanner (see `scan_from`), so delete
 /// must remove the directory AND the file form — otherwise legacy sessions
 /// silently no-op and the next scan resurrects the orphan.
-fn delete_cursor_agent_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
+fn delete_cursor_agent_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
     let cursor_dir = config::cursor_dir().map_err(io::Error::other)?;
 
     // 1. Chat metadata: ~/.cursor/chats/*/<session_id>/
-    remove_matching_entries(&cursor_dir.join("chats"), ids, &HashSet::new())?;
+    let mut deleted = remove_matching_entries(&cursor_dir.join("chats"), ids, &HashSet::new())?;
 
     // 2. Transcript: directory form (JSONL) and file form (legacy .txt), in a
     //    single traversal of the projects tree.
     let legacy_names: Vec<String> = ids.iter().map(|id| format!("{id}.txt")).collect();
     let legacy_names: HashSet<&str> = legacy_names.iter().map(String::as_str).collect();
-    remove_matching_entries(&cursor_dir.join("projects"), ids, &legacy_names)
+    deleted.extend(remove_matching_entries(
+        &cursor_dir.join("projects"),
+        ids,
+        &legacy_names,
+    )?);
+    Ok(deleted)
 }
 
 // ---------------------------------------------------------------------------
@@ -458,50 +495,38 @@ fn delete_cursor_agent_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
 
 /// Gemini sessions are stored as JSON files under
 /// `~/.gemini/tmp/<project-name-or-hash>/chats/session-<date>-<short-id>.json`.
-fn delete_gemini_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
+fn delete_gemini_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
+    let mut deleted = HashSet::new();
     let gemini_dir = config::gemini_dir().map_err(io::Error::other)?;
     let tmp_dir = gemini_dir.join("tmp");
     if !tmp_dir.exists() {
-        return Ok(());
+        return Ok(deleted);
     }
 
-    let mut remaining = ids.len();
-    for project_entry in fs::read_dir(&tmp_dir)?.flatten() {
-        if remaining == 0 {
-            break;
-        }
+    for project_entry in fs::read_dir(&tmp_dir)? {
+        let project_entry = project_entry?;
         let chats_dir = project_entry.path().join("chats");
         if !chats_dir.is_dir() {
             continue;
         }
 
-        for chat_entry in fs::read_dir(&chats_dir)?.flatten() {
-            if remaining == 0 {
-                break;
-            }
+        for chat_entry in fs::read_dir(&chats_dir)? {
+            let chat_entry = chat_entry?;
             let path = chat_entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
 
-            let Ok(content) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-                continue;
-            };
-            if json
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .is_some_and(|id| ids.contains(id))
+            if let Some(id) = read_top_level_json_string_prefix(&path, "sessionId", 64 * 1024)?
+                && ids.contains(id.as_str())
             {
                 fs::remove_file(&path)?;
-                remaining -= 1;
+                deleted.insert(id);
             }
         }
     }
 
-    Ok(())
+    Ok(deleted)
 }
 
 // ---------------------------------------------------------------------------
@@ -514,11 +539,12 @@ fn delete_gemini_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
 /// single transaction so a mid-cascade failure can't leave the DB in
 /// an inconsistent state (e.g. orphan messages whose sessions row is
 /// gone, which would surface as ghost rows on the next scan).
-fn delete_hermes_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
+fn delete_hermes_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
+    let mut deleted = HashSet::new();
     let hermes_dir = config::hermes_dir().map_err(io::Error::other)?;
     let db_path = hermes_dir.join("state.db");
     if !db_path.exists() {
-        return Ok(());
+        return Ok(deleted);
     }
 
     let mut conn = rusqlite::Connection::open(&db_path)
@@ -545,8 +571,12 @@ fn delete_hermes_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
             .map_err(|e| io::Error::other(format!("SQLite delete child sessions error: {e}")))?;
 
         // Delete the parent session.
-        tx.execute("DELETE FROM sessions WHERE id = ?1", [*id])
+        let count = tx
+            .execute("DELETE FROM sessions WHERE id = ?1", [*id])
             .map_err(|e| io::Error::other(format!("SQLite delete session error: {e}")))?;
+        if count > 0 {
+            deleted.insert((*id).to_string());
+        }
     }
 
     tx.commit()
@@ -560,31 +590,133 @@ fn delete_hermes_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
                 && name.ends_with(".json")
-                && ids
-                    .iter()
-                    .any(|id| name.starts_with(&format!("session_{id}")))
+                && ids.iter().any(|id| name == format!("session_{id}.json"))
             {
                 let _ = fs::remove_file(entry.path());
             }
         }
     }
 
-    Ok(())
+    Ok(deleted)
+}
+
+fn read_top_level_json_string_prefix(
+    path: &Path,
+    field: &str,
+    max_bytes: u64,
+) -> Result<Option<String>, io::Error> {
+    use std::io::Read;
+    let file = fs::File::open(path)?;
+    let mut prefix = Vec::new();
+    file.take(max_bytes).read_to_end(&mut prefix)?;
+
+    let mut index = 0usize;
+    while prefix.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    if prefix.get(index) != Some(&b'{') {
+        return Ok(None);
+    }
+    let mut depth = 1usize;
+    let mut expect_key = true;
+    index += 1;
+    while index < prefix.len() {
+        match prefix[index] {
+            b'"' => {
+                let start = index;
+                index += 1;
+                let mut escaped = false;
+                while index < prefix.len() {
+                    let byte = prefix[index];
+                    index += 1;
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        break;
+                    }
+                }
+                if index > prefix.len() || prefix.get(index.saturating_sub(1)) != Some(&b'"') {
+                    return Ok(None);
+                }
+                if depth == 1 && expect_key {
+                    let Ok(key) = serde_json::from_slice::<String>(&prefix[start..index]) else {
+                        return Ok(None);
+                    };
+                    while prefix.get(index).is_some_and(u8::is_ascii_whitespace) {
+                        index += 1;
+                    }
+                    if prefix.get(index) != Some(&b':') {
+                        return Ok(None);
+                    }
+                    index += 1;
+                    while prefix.get(index).is_some_and(u8::is_ascii_whitespace) {
+                        index += 1;
+                    }
+                    expect_key = false;
+                    if key == field {
+                        if prefix.get(index) != Some(&b'"') {
+                            return Ok(None);
+                        }
+                        let value_start = index;
+                        index += 1;
+                        let mut escaped = false;
+                        while index < prefix.len() {
+                            let byte = prefix[index];
+                            index += 1;
+                            if escaped {
+                                escaped = false;
+                            } else if byte == b'\\' {
+                                escaped = true;
+                            } else if byte == b'"' {
+                                return Ok(serde_json::from_slice::<String>(
+                                    &prefix[value_start..index],
+                                )
+                                .ok());
+                            }
+                        }
+                        return Ok(None);
+                    }
+                }
+            }
+            b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            b',' if depth == 1 => {
+                expect_key = true;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
 // Yolop
 // ---------------------------------------------------------------------------
 
-fn delete_yolop_sessions(ids: &HashSet<&str>) -> Result<(), io::Error> {
+fn delete_yolop_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
+    let mut deleted = HashSet::new();
     let sessions_dir = config::yolop_sessions_dir().map_err(io::Error::other)?;
     for id in ids {
-        delete_yolop_session_from(&sessions_dir, id)?;
+        if delete_yolop_session_from(&sessions_dir, id)? {
+            deleted.insert((*id).to_string());
+        }
     }
-    Ok(())
+    Ok(deleted)
 }
 
-fn delete_yolop_session_from(sessions_dir: &Path, session_id: &str) -> Result<(), io::Error> {
+fn delete_yolop_session_from(sessions_dir: &Path, session_id: &str) -> Result<bool, io::Error> {
     // Yolop is the only agent whose delete joins the id straight onto a
     // directory and calls `remove_dir_all`, so it re-checks the id against the
     // exact `session_<32 hex>` shape its scanner emits — a stricter gate than
@@ -595,15 +727,18 @@ fn delete_yolop_session_from(sessions_dir: &Path, session_id: &str) -> Result<()
             format!("not a Yolop session id: {session_id:?}"),
         ));
     }
+    let mut deleted = false;
     let session_dir = sessions_dir.join(session_id);
     if session_dir.is_dir() {
         fs::remove_dir_all(session_dir)?;
+        deleted = true;
     }
     let legacy_log = sessions_dir.join(format!("{session_id}.jsonl"));
     if legacy_log.is_file() {
         fs::remove_file(legacy_log)?;
+        deleted = true;
     }
-    Ok(())
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -772,40 +907,40 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    // -- shared jsonl rewrite ------------------------------------------------
-
     #[test]
-    fn rewrite_jsonl_excluding_drops_every_id_in_the_batch() {
-        let dir = make_dir("agf-test-history-rewrite");
-        let path = dir.join("history.jsonl");
+    fn bounded_json_field_reader_handles_whitespace_and_escapes() {
+        let dir = make_dir("agf-test-json-prefix");
+        let path = dir.join("session.json");
         fs::write(
             &path,
-            concat!(
-                "{\"sessionId\":\"a\",\"display\":\"one\"}\n",
-                "{\"sessionId\":\"keep\",\"display\":\"two\"}\n",
-                "{\"sessionId\":\"b\",\"display\":\"three\"}\n",
-            ),
+            b"{\n  \"sessionId\" : \"id-\\\"quoted\",\n  \"messages\": [",
         )
         .unwrap();
 
-        rewrite_jsonl_excluding(&path, "sessionId", &ids(&["a", "b"])).unwrap();
-
-        let out = fs::read_to_string(&path).unwrap();
-        assert_eq!(out, "{\"sessionId\":\"keep\",\"display\":\"two\"}\n");
-        let _ = fs::remove_dir_all(dir);
+        assert_eq!(
+            read_top_level_json_string_prefix(&path, "sessionId", 1024)
+                .unwrap()
+                .as_deref(),
+            Some("id-\"quoted")
+        );
     }
 
     #[test]
-    fn rewrite_jsonl_excluding_leaves_file_untouched_when_nothing_matches() {
-        let dir = make_dir("agf-test-history-noop");
-        let path = dir.join("history.jsonl");
-        let original = "{\"sessionId\":\"keep\"}\n\n{\"sessionId\":\"other\"}\n";
-        fs::write(&path, original).unwrap();
+    fn top_level_json_reader_ignores_nested_session_id() {
+        let dir = make_dir("agf-test-json-nested-id");
+        let path = dir.join("session.json");
+        fs::write(
+            &path,
+            br#"{"metadata":{"sessionId":"wrong"},"sessionId":"right"}"#,
+        )
+        .unwrap();
 
-        rewrite_jsonl_excluding(&path, "sessionId", &ids(&["absent"])).unwrap();
-
-        // Byte-identical: no rewrite happened at all, blank line included.
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            read_top_level_json_string_prefix(&path, "sessionId", 1024)
+                .unwrap()
+                .as_deref(),
+            Some("right")
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -899,7 +1034,7 @@ mod tests {
     /// The batch entry point must report per agent, and an agent whose pass
     /// was refused must not appear as deleted — the TUI keeps those rows.
     #[test]
-    fn delete_selection_reports_only_agents_whose_pass_succeeded() {
+    fn delete_selection_reports_only_sessions_with_backing_data() {
         let good = "session_019e3db018a17450aba5407af5777237";
         let selection = HashMap::from([
             (Agent::Yolop, HashSet::from([good.to_string()])),
@@ -912,15 +1047,12 @@ mod tests {
 
         let deleted = delete_selection(&selection);
 
-        assert_eq!(
-            deleted.get(&Agent::Yolop),
-            Some(&HashSet::from([good.to_string()]))
-        );
+        assert_eq!(deleted.get(&Agent::Yolop), None);
         assert_eq!(deleted.get(&Agent::ClaudeCode), None);
     }
 
-    /// A batch that aborts must not take healthy siblings down with it: the
-    /// per-id retry recovers exactly the ones whose data really is gone.
+    /// A batch that aborts must not turn a merely valid-looking ID into a
+    /// successful deletion when no authoritative backing data was present.
     #[test]
     fn delete_selection_falls_back_to_per_session_truth_when_the_batch_fails() {
         let good = "session_019e3db018a17450aba5407af5777237";
@@ -933,11 +1065,7 @@ mod tests {
 
         let deleted = delete_selection(&selection);
 
-        assert_eq!(
-            deleted.get(&Agent::Yolop),
-            Some(&HashSet::from([good.to_string()])),
-            "the valid session must still be reported as deleted"
-        );
+        assert!(deleted.is_empty());
     }
 
     #[test]

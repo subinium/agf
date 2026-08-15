@@ -105,9 +105,12 @@ impl CommandShell {
     /// Used by the delivery path to warn when shell integration is missing
     /// (a bare `cd` printed to stdout doesn't persist in the parent shell).
     pub fn is_cd_only(&self, cmd: &str) -> bool {
+        let command = cmd.trim_start();
         match self {
-            Self::Posix => !cmd.contains(" && "),
-            Self::PowerShell => !cmd.contains("; if ($?) {"),
+            Self::Posix => command.starts_with("cd ") && !command.contains(" && "),
+            Self::PowerShell => {
+                command.starts_with("Set-Location ") && !command.contains("; if ($?) {")
+            }
         }
     }
 
@@ -127,24 +130,32 @@ impl CommandShell {
 }
 
 /// Detect user's shell and append the init line to the appropriate rc file.
-pub fn setup() -> anyhow::Result<()> {
+pub fn setup(shell_override: Option<&str>) -> anyhow::Result<()> {
     let shell_path = std::env::var("SHELL").unwrap_or_default();
-    let shell_name = shell_path.rsplit('/').next().unwrap_or("");
+    let detected = shell_path.rsplit('/').next().unwrap_or("");
+    let shell_name = shell_override.unwrap_or(detected).to_ascii_lowercase();
 
-    let (rc_file, init_line) = match shell_name {
+    let (rc_file, init_line, reload) = match shell_name.as_str() {
         "zsh" => (
             dirs::home_dir().unwrap_or_default().join(".zshrc"),
             r#"eval "$(agf init zsh)""#.to_string(),
+            "source".to_string(),
         ),
         "bash" => {
             let home = dirs::home_dir().unwrap_or_default();
-            // Prefer .bashrc, fall back to .bash_profile on macOS
-            let rc = if home.join(".bashrc").exists() {
-                home.join(".bashrc")
-            } else {
+            // Login Bash reads .bash_profile on macOS. Linux interactive Bash
+            // reads .bashrc; create it instead of overwriting an unrelated
+            // .profile.
+            let rc = if cfg!(target_os = "macos") {
                 home.join(".bash_profile")
+            } else {
+                home.join(".bashrc")
             };
-            (rc, r#"eval "$(agf init bash)""#.to_string())
+            (
+                rc,
+                r#"eval "$(agf init bash)""#.to_string(),
+                "source".to_string(),
+            )
         }
         "fish" => (
             dirs::config_dir()
@@ -152,11 +163,23 @@ pub fn setup() -> anyhow::Result<()> {
                 .join("fish")
                 .join("config.fish"),
             "agf init fish | source".to_string(),
+            "source".to_string(),
+        ),
+        "powershell" => (
+            powershell_profile_path(Some("powershell")),
+            "agf init powershell | Out-String | Invoke-Expression".to_string(),
+            ".".to_string(),
+        ),
+        "pwsh" => (
+            powershell_profile_path(Some("pwsh")),
+            "agf init powershell | Out-String | Invoke-Expression".to_string(),
+            ".".to_string(),
         ),
         // No POSIX SHELL and we're on Windows — default to PowerShell.
         _ if shell_name.is_empty() && cfg!(windows) => (
-            powershell_profile_path(),
+            powershell_profile_path(None),
             "agf init powershell | Out-String | Invoke-Expression".to_string(),
+            ".".to_string(),
         ),
         _ => {
             eprintln!("Unsupported shell: {shell_name}");
@@ -174,7 +197,10 @@ pub fn setup() -> anyhow::Result<()> {
         let content = fs::read_to_string(&rc_file)?;
         if content.contains("# agf - AI Agent Session Finder") {
             eprintln!("Already configured in {}", rc_file.display());
-            eprintln!("Restart your shell or run: source {}", rc_file.display());
+            eprintln!(
+                "Restart your shell or run: {reload} '{}'",
+                rc_file.display()
+            );
             return Ok(());
         }
     }
@@ -200,7 +226,10 @@ pub fn setup() -> anyhow::Result<()> {
     crate::fsx::write_atomic(&rc_file, content.as_bytes())?;
 
     eprintln!("Added to {}", rc_file.display());
-    eprintln!("Restart your shell or run: source {}", rc_file.display());
+    eprintln!(
+        "Restart your shell or run: {reload} '{}'",
+        rc_file.display()
+    );
     Ok(())
 }
 
@@ -212,17 +241,19 @@ pub fn setup() -> anyhow::Result<()> {
 /// to the PS 7 path (modern default, created on demand).
 ///
 /// On non-Windows, PowerShell 7 uses `~/.config/powershell/profile.ps1`.
-fn powershell_profile_path() -> PathBuf {
+fn powershell_profile_path(preferred_shell: Option<&str>) -> PathBuf {
     if cfg!(windows) {
         let docs = dirs::document_dir()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
         let ps5 = docs.join("WindowsPowerShell");
         // Prefer PS 7 (`PowerShell`); fall back to PS 5.1 only when its dir
         // exists and PS 7's does not. Created on demand by setup().
-        let dir = if ps5.exists() && !docs.join("PowerShell").exists() {
-            ps5
-        } else {
-            docs.join("PowerShell")
+        let ps7 = docs.join("PowerShell");
+        let dir = match preferred_shell {
+            Some("powershell") => ps5,
+            Some("pwsh") => ps7,
+            _ if ps5.exists() && !ps7.exists() => ps5,
+            _ => ps7,
         };
         dir.join("profile.ps1")
     } else {
@@ -239,9 +270,7 @@ pub fn shell_init(shell: &str) -> String {
         "bash" => BASH_WRAPPER.to_string(),
         "fish" => FISH_WRAPPER.to_string(),
         "powershell" | "pwsh" => POWERSHELL_WRAPPER.to_string(),
-        other => {
-            format!("echo \"Unsupported shell: {other}. Use zsh, bash, fish, or powershell.\"")
-        }
+        _ => "echo 'Unsupported shell. Use zsh, bash, fish, or powershell.'".to_string(),
     }
 }
 
@@ -255,9 +284,11 @@ const ZSH_WRAPPER: &str = r#"function agf() {
         result="$(cat "$tmpfile")"
         if [ -n "$result" ]; then
             eval "$result"
+            ret=$?
         fi
     fi
     rm -f "$tmpfile"
+    return $ret
 }"#;
 
 const BASH_WRAPPER: &str = r#"function agf() {
@@ -270,9 +301,11 @@ const BASH_WRAPPER: &str = r#"function agf() {
         result="$(cat "$tmpfile")"
         if [ -n "$result" ]; then
             eval "$result"
+            ret=$?
         fi
     fi
     rm -f "$tmpfile"
+    return $ret
 }"#;
 
 const FISH_WRAPPER: &str = r#"function agf
@@ -283,9 +316,11 @@ const FISH_WRAPPER: &str = r#"function agf
         set -l result (cat $tmpfile)
         if test -n "$result"
             eval $result
+            set ret $status
         end
     end
     rm -f $tmpfile
+    return $ret
 end"#;
 
 // PowerShell wrapper. Compatible with Windows PowerShell 5.1 and PowerShell 7+.
@@ -309,6 +344,10 @@ const POWERSHELL_WRAPPER: &str = r#"function agf {
         return
     }
     $__agfTmp = [System.IO.Path]::GetTempFileName()
+    $__agfHadCmdFile = Test-Path Env:AGF_CMD_FILE
+    $__agfOldCmdFile = $env:AGF_CMD_FILE
+    $__agfHadShell = Test-Path Env:AGF_SHELL
+    $__agfOldShell = $env:AGF_SHELL
     try {
         $env:AGF_CMD_FILE = $__agfTmp
         $env:AGF_SHELL = 'powershell'
@@ -318,13 +357,26 @@ const POWERSHELL_WRAPPER: &str = r#"function agf {
             $__agfResult = Get-Content -Raw -LiteralPath $__agfTmp -Encoding UTF8
             if ($__agfResult) {
                 Invoke-Expression $__agfResult
+                $__agfInvokeOk = $?
+                $__agfNativeExit = $LASTEXITCODE
+                if ($__agfInvokeOk -or $__agfNativeExit -ne 0) {
+                    $__agfExit = $__agfNativeExit
+                } else {
+                    $__agfExit = 1
+                }
             }
         }
     }
     finally {
         Remove-Item -Force -LiteralPath $__agfTmp -ErrorAction SilentlyContinue
-        Remove-Item -Path Env:AGF_CMD_FILE -ErrorAction SilentlyContinue
-        Remove-Item -Path Env:AGF_SHELL -ErrorAction SilentlyContinue
+        if ($__agfHadCmdFile) { $env:AGF_CMD_FILE = $__agfOldCmdFile }
+        else { Remove-Item -Path Env:AGF_CMD_FILE -ErrorAction SilentlyContinue }
+        if ($__agfHadShell) { $env:AGF_SHELL = $__agfOldShell }
+        else { Remove-Item -Path Env:AGF_SHELL -ErrorAction SilentlyContinue }
+    }
+    $global:LASTEXITCODE = $__agfExit
+    if ($__agfExit -ne 0) {
+        Write-Error "agf command failed with exit code $__agfExit"
     }
 }"#;
 
@@ -361,10 +413,12 @@ mod tests {
         let posix = CommandShell::Posix;
         assert!(posix.is_cd_only("cd '/tmp'"));
         assert!(!posix.is_cd_only("cd '/tmp' && claude"));
+        assert!(!posix.is_cd_only("hermes --resume 'session-id'"));
 
         let pwsh = CommandShell::PowerShell;
         assert!(pwsh.is_cd_only("Set-Location '/tmp'"));
         assert!(!pwsh.is_cd_only("Set-Location '/tmp'; if ($?) { claude }"));
+        assert!(!pwsh.is_cd_only("hermes --resume 'session-id'"));
     }
 
     #[test]
