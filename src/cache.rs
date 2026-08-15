@@ -593,12 +593,16 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(b"a").unwrap();
         file.set_modified(
-            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(1),
+            SystemTime::UNIX_EPOCH
+                + Duration::from_secs(1_700_000_000)
+                + Duration::from_millis(100),
         )
         .unwrap();
         let first = source_fingerprint(std::slice::from_ref(&path));
         file.set_modified(
-            SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(2),
+            SystemTime::UNIX_EPOCH
+                + Duration::from_secs(1_700_000_000)
+                + Duration::from_millis(200),
         )
         .unwrap();
         let second = source_fingerprint(std::slice::from_ref(&path));
