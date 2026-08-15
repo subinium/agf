@@ -329,7 +329,6 @@ pub fn installed_agents() -> Vec<Agent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn prime_project_settings_override_global_and_resolve_from_cwd() {
@@ -399,6 +398,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn executable_detection_rejects_plain_files_and_accepts_exec_bits() {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "agf-executable-test-{}-{}",
@@ -421,12 +421,11 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn insert_executable_name_no_stem_when_ext_missing() {
+    fn insert_executable_name_ignores_non_pathext_files() {
         let pathext: Vec<String> = [".exe"].iter().map(|s| s.to_string()).collect();
         let mut set = HashSet::new();
         insert_executable_name(&mut set, "README.md", &pathext);
-        assert!(set.contains("readme.md"));
-        // No bare "readme" stem should be inserted — .md is not in PATHEXT.
+        assert!(!set.contains("readme.md"));
         assert!(!set.contains("readme"));
     }
 
