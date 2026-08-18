@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-08-18
+
+### Added
+
+- **Grok Build support** — discovers official xAI Grok sessions under `$GROK_HOME/sessions` (default `~/.grok/sessions`), reads durable activity/title/recap/git/worktree metadata from `summary.json`, filters hidden subagents by default, and resumes the exact selected ID with `grok --resume`.
+- **Kimi Code support** — discovers v1 ISO-timestamp and v2 epoch-ms `state.json` sessions under `$KIMI_CODE_HOME/sessions` (default `~/.kimi-code/sessions`), uses `session_index.jsonl` to recover migrated legacy working directories, and resumes with `kimi --session`.
+- **Qwen Code support** — discovers current `projects/*/chats` and legacy `tmp/*/chats` JSONL sessions, honors `QWEN_RUNTIME_DIR`, `QWEN_HOME`, and `advanced.runtimeOutputDir`, surfaces custom titles/first prompts/branches, and resumes with `qwen --resume`.
+
+### Fixed
+
+- The New Session permission picker now uses the same current flag definitions as Resume, removing a second stale Codex flag table and automatically keeping Kimi permission modes consistent.
+
+### Performance and safety
+
+- Qwen scanning reads at most a bounded head window plus 64 KiB title windows, including a safe oversized-first-prompt fallback; it never materializes whole multi-megabyte transcripts merely to render the list.
+- Grok and Kimi metadata documents have explicit size bounds, and all three scanners propagate directory/read failures so a partial scan cannot replace valid stale cache rows.
+- Direct AGF deletion is fail-closed for Grok, Kimi, and Qwen because their native tools coordinate active sessions and secondary indexes that a file-only delete would bypass; the single-delete action is hidden and bulk mode marks these rows as unavailable.
+
 ## [0.14.0] - 2026-08-15
 
 ### Added

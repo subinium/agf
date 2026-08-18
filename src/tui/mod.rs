@@ -372,6 +372,9 @@ impl App {
     }
 
     fn toggle_checked(&mut self, agent: Agent, session_id: &str) {
+        if !agent.supports_delete() {
+            return;
+        }
         let ids = self.selected_set.entry(agent).or_default();
         if !ids.remove(session_id) {
             ids.insert(session_id.to_string());
@@ -1326,9 +1329,22 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     });
 }
 
+fn available_actions(agent: Agent) -> Vec<Action> {
+    Action::MENU
+        .into_iter()
+        .filter(|action| *action != Action::Delete || agent.supports_delete())
+        .collect()
+}
+
 fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
-    let actions = Action::MENU;
+    let Some(action_agent) = app.action_session().map(|session| session.agent) else {
+        app.active_session = None;
+        app.mode = Mode::Browse;
+        return;
+    };
+    let actions = available_actions(action_agent);
     let action_count = actions.len();
+    app.action_index = app.action_index.min(action_count.saturating_sub(1));
 
     if ui.key_code(slt::KeyCode::Esc) {
         app.active_session = None;
@@ -1671,31 +1687,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
 }
 
 fn permission_options_for(agent: Agent) -> Vec<(&'static str, &'static str)> {
-    match agent {
-        Agent::ClaudeCode => vec![
-            ("default", ""),
-            ("acceptEdits", " --permission-mode acceptEdits"),
-            ("plan (read-only)", " --permission-mode plan"),
-            ("bypass permissions", " --dangerously-skip-permissions"),
-        ],
-        Agent::Codex => vec![
-            ("suggest (default)", ""),
-            ("auto-edit", " -a untrusted"),
-            ("full-auto", " --full-auto"),
-            (
-                "bypass sandbox",
-                " --dangerously-bypass-approvals-and-sandbox",
-            ),
-        ],
-        Agent::Gemini => vec![
-            ("default", ""),
-            ("auto_edit", " --approval-mode auto_edit"),
-            ("yolo (no approval)", " -y"),
-            ("plan (read-only)", " --approval-mode plan"),
-            ("sandbox", " -s"),
-        ],
-        _ => vec![("default", "")],
-    }
+    agent.resume_mode_options().to_vec()
 }
 
 fn dispatch_agent_option(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
@@ -2614,14 +2606,19 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
         };
 
         if bulk_mode {
+            let deletable = session.agent.supports_delete();
             let is_checked = app.is_checked(session);
-            let indicator = match (is_selected, is_checked) {
-                (true, true) => ">[x] ",
-                (true, false) => ">[ ] ",
-                (false, true) => " [x] ",
-                (false, false) => " [ ] ",
+            let indicator = match (is_selected, is_checked, deletable) {
+                (true, _, false) => ">[—] ",
+                (false, _, false) => " [—] ",
+                (true, true, true) => ">[x] ",
+                (true, false, true) => ">[ ] ",
+                (false, true, true) => " [x] ",
+                (false, false, true) => " [ ] ",
             };
-            let indicator_style = if is_checked {
+            let indicator_style = if !deletable {
+                slt::Style::new().fg(GRAY_500).bg(bg)
+            } else if is_checked {
                 slt::Style::new().fg(RED).bold().bg(bg)
             } else {
                 slt::Style::new().fg(slt::Color::White).bg(bg)
@@ -3244,6 +3241,26 @@ mod bulk_selection_tests {
         // The now-empty per-agent bucket is dropped, so `is_empty()` (which
         // drives "am I in bulk mode") stays truthful.
         assert!(app.selected_set.is_empty());
+    }
+
+    #[test]
+    fn native_managed_sessions_cannot_enter_bulk_delete_selection() {
+        let mut app = app_with(
+            vec![session(Agent::Grok, "grok", 30)],
+            crate::settings::Settings::default(),
+        );
+        app.toggle_checked(Agent::Grok, "grok");
+        assert!(app.selected_set.is_empty());
+        assert_eq!(app.selection_count(), 0);
+    }
+
+    #[test]
+    fn native_managed_sessions_hide_single_delete_action() {
+        assert!(!available_actions(Agent::Grok).contains(&Action::Delete));
+        assert!(!available_actions(Agent::Kimi).contains(&Action::Delete));
+        assert!(!available_actions(Agent::Qwen).contains(&Action::Delete));
+        assert!(!available_actions(Agent::PrimeAgent).contains(&Action::Delete));
+        assert!(available_actions(Agent::Codex).contains(&Action::Delete));
     }
 
     #[test]

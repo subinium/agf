@@ -82,6 +82,18 @@ fn delete_agent_sessions(agent: Agent, ids: &HashSet<&str>) -> Result<HashSet<St
     match agent {
         Agent::ClaudeCode => delete_claude_sessions(ids),
         Agent::Codex => delete_codex_sessions(ids),
+        Agent::Grok => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Grok deletion is disabled: use Grok Build's session picker so its search index and active-session state stay consistent",
+        )),
+        Agent::Kimi => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Kimi deletion is disabled: use Kimi Code's session picker so session_index.jsonl stays consistent",
+        )),
+        Agent::Qwen => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Qwen deletion is disabled: use Qwen Code's /delete command so active and archived state stay consistent",
+        )),
         Agent::OpenCode => delete_opencode_sessions(ids),
         Agent::Pi => {
             delete_pi_style_sessions(&config::pi_sessions_dir().map_err(io::Error::other)?, ids)

@@ -17,6 +17,69 @@ pub fn codex_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".codex"))
 }
 
+pub fn grok_dir() -> Result<PathBuf, AgfError> {
+    if let Some(path) = std::env::var_os("GROK_HOME").filter(|path| !path.is_empty()) {
+        return resolve_configured_path(PathBuf::from(path));
+    }
+    Ok(home_dir()?.join(".grok"))
+}
+
+pub fn kimi_code_dir() -> Result<PathBuf, AgfError> {
+    if let Some(path) = std::env::var_os("KIMI_CODE_HOME").filter(|path| !path.is_empty()) {
+        return resolve_configured_path(PathBuf::from(path));
+    }
+    Ok(home_dir()?.join(".kimi-code"))
+}
+
+pub fn qwen_global_dir() -> Result<PathBuf, AgfError> {
+    if let Some(path) = std::env::var_os("QWEN_HOME").filter(|path| !path.is_empty()) {
+        return resolve_configured_path(PathBuf::from(path));
+    }
+    Ok(home_dir()?.join(".qwen"))
+}
+
+pub fn qwen_runtime_dir() -> Result<PathBuf, AgfError> {
+    if let Some(path) = std::env::var_os("QWEN_RUNTIME_DIR").filter(|path| !path.is_empty()) {
+        return resolve_configured_path(PathBuf::from(path));
+    }
+    let global = qwen_global_dir()?;
+    let cwd = std::env::current_dir()?;
+    qwen_runtime_dir_from_settings(&global, &cwd)
+}
+
+fn qwen_runtime_dir_from_settings(
+    global_dir: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<PathBuf, AgfError> {
+    let mut configured = None;
+    for settings_path in [
+        global_dir.join("settings.json"),
+        cwd.join(".qwen/settings.json"),
+    ] {
+        let Some(path) = std::fs::read_to_string(settings_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|settings| {
+                settings
+                    .pointer("/advanced/runtimeOutputDir")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+            })
+        else {
+            continue;
+        };
+        configured = Some(path);
+    }
+    match configured {
+        // Qwen resolves both user and workspace relative values from the
+        // active project root; workspace settings override user settings.
+        Some(path) => resolve_configured_path_from(path, cwd),
+        None => Ok(global_dir.to_path_buf()),
+    }
+}
+
 pub fn opencode_data_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".local/share/opencode"))
 }
@@ -159,6 +222,100 @@ fn sqlite_sources(path: PathBuf) -> Vec<PathBuf> {
     vec![path, wal]
 }
 
+fn grok_summary_sources() -> Vec<PathBuf> {
+    let Ok(root) = grok_dir().map(|dir| dir.join("sessions")) else {
+        return Vec::new();
+    };
+    // A non-existent marker keeps the configured root identity in the
+    // fingerprint without recursively walking every rewind/checkpoint file.
+    let mut sources = vec![root.join(".agf-session-root")];
+    let Ok(cwds) = std::fs::read_dir(&root) else {
+        return sources;
+    };
+    for cwd in cwds
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+    {
+        let Ok(sessions) = std::fs::read_dir(cwd.path()) else {
+            continue;
+        };
+        for session in sessions
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        {
+            let summary = session.path().join("summary.json");
+            if summary.is_file() {
+                sources.push(summary);
+            }
+        }
+    }
+    sources
+}
+
+fn kimi_state_sources() -> Vec<PathBuf> {
+    let Ok(home) = kimi_code_dir() else {
+        return Vec::new();
+    };
+    let root = home.join("sessions");
+    let mut sources = vec![
+        home.join("session_index.jsonl"),
+        root.join(".agf-session-root"),
+    ];
+    let Ok(workspaces) = std::fs::read_dir(&root) else {
+        return sources;
+    };
+    for workspace in workspaces
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+    {
+        let Ok(sessions) = std::fs::read_dir(workspace.path()) else {
+            continue;
+        };
+        for session in sessions
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        {
+            let direct = session.path().join("state.json");
+            let legacy = session.path().join("session-meta/state.json");
+            if direct.is_file() {
+                sources.push(direct);
+            } else if legacy.is_file() {
+                sources.push(legacy);
+            }
+        }
+    }
+    sources
+}
+
+fn qwen_chat_sources(root: &std::path::Path) -> Vec<PathBuf> {
+    let mut sources = vec![root.join(".agf-session-root")];
+    let Ok(projects) = std::fs::read_dir(root) else {
+        return sources;
+    };
+    for project in projects
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+    {
+        let chats = project.path().join("chats");
+        let Ok(entries) = std::fs::read_dir(chats) else {
+            continue;
+        };
+        sources.extend(
+            entries
+                .flatten()
+                .filter_map(|entry| {
+                    entry
+                        .file_type()
+                        .ok()
+                        .filter(|kind| kind.is_file())
+                        .map(|_| entry.path())
+                })
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")),
+        );
+    }
+    sources
+}
+
 /// Paths whose newest mtime decides whether `agent`'s cache entry is still
 /// fresh (see `cache::load_cache`).
 ///
@@ -194,6 +351,22 @@ pub fn data_sources(agent: Agent) -> Vec<PathBuf> {
                 sources
             })
             .unwrap_or_default(),
+        Agent::Grok => grok_summary_sources(),
+        Agent::Kimi => kimi_state_sources(),
+        Agent::Qwen => {
+            let mut sources = Vec::new();
+            if let Ok(global) = qwen_global_dir() {
+                sources.push(global.join("settings.json"));
+            }
+            if let Ok(cwd) = std::env::current_dir() {
+                sources.push(cwd.join(".qwen/settings.json"));
+            }
+            if let Ok(dir) = qwen_runtime_dir() {
+                sources.extend(qwen_chat_sources(&dir.join("projects")));
+                sources.extend(qwen_chat_sources(&dir.join("tmp")));
+            }
+            sources
+        }
         Agent::OpenCode => opencode_data_dir()
             .map(|d| sqlite_sources(d.join("opencode.db")))
             .unwrap_or_default(),
@@ -329,6 +502,30 @@ pub fn installed_agents() -> Vec<Agent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qwen_workspace_runtime_dir_overrides_user_and_resolves_from_cwd() {
+        let root = std::env::temp_dir().join(format!("agf-qwen-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let global = root.join("global");
+        let cwd = root.join("project");
+        std::fs::create_dir_all(cwd.join(".qwen")).unwrap();
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(
+            global.join("settings.json"),
+            r#"{"advanced":{"runtimeOutputDir":"user-runtime"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".qwen/settings.json"),
+            r#"{"advanced":{"runtimeOutputDir":"workspace-runtime"}}"#,
+        )
+        .unwrap();
+
+        let resolved = qwen_runtime_dir_from_settings(&global, &cwd).unwrap();
+        assert_eq!(resolved, cwd.join("workspace-runtime"));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn prime_project_settings_override_global_and_resolve_from_cwd() {

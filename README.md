@@ -8,7 +8,7 @@
 > Find the AI coding session you meant to resume.
 
 `agf` is a local-first fuzzy finder for AI coding-agent sessions.
-Search local sessions across **Claude Code**, **Codex**, **Prime Agent**, **Gemini CLI**, **Cursor CLI**, **OpenCode**, **Kiro**, **pi**, and **Hermes** — then resume the right one in a keystroke.
+Search the sessions your terminal agents already keep locally, then resume the right one in a keystroke.
 
 ![agf demo](./assets/demo.gif)
 
@@ -45,6 +45,9 @@ Then you either dig through history files or start over.
 |:---|:---|:---|
 | [Claude Code](https://github.com/anthropics/claude-code) | `claude --resume <id>` | `~/.claude/history.jsonl` + `~/.claude/projects/` |
 | [Codex](https://github.com/openai/codex) | `codex resume <id>` | `~/.codex/sessions/**/*.jsonl` |
+| [Grok Build](https://github.com/xai-org/grok-build) | `grok --resume <id>` | `$GROK_HOME/sessions/` or `~/.grok/sessions/` |
+| [Kimi Code](https://github.com/MoonshotAI/kimi-code) | `kimi --session <id>` | `$KIMI_CODE_HOME/sessions/` or `~/.kimi-code/sessions/` |
+| [Qwen Code](https://github.com/QwenLM/qwen-code) | `qwen --resume <id>` | `$QWEN_RUNTIME_DIR/projects/` or `~/.qwen/projects/` |
 | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `prime-agent --resume <id>` | `~/.prime/agent/sessions/<id>.jsonl` |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` |
 | [Cursor CLI](https://cursor.com/docs/cli/overview) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy) |
@@ -62,6 +65,9 @@ Then you either dig through history files or start over.
 |:---|:---|:---|
 | Claude Code | JSONL | `~/.claude/history.jsonl` (sessions)<br>`~/.claude/projects/*/` (worktree detection) |
 | Codex | JSONL | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| Grok Build | JSON + JSONL | `$GROK_HOME/sessions/<encoded-cwd>/<id>/summary.json` (default `~/.grok`)<br>Activity, title, recap, branch, and worktree metadata come from the bounded summary document |
+| Kimi Code | JSON + JSONL | `$KIMI_CODE_HOME/sessions/<workDirKey>/<id>/state.json` (default `~/.kimi-code`)<br>`session_index.jsonl` supplies cwd fallback for migrated legacy sessions |
+| Qwen Code | JSONL | `$QWEN_RUNTIME_DIR/projects/<project>/chats/<id>.jsonl`<br>Defaults to `$QWEN_HOME` or `~/.qwen`; `advanced.runtimeOutputDir` and legacy `tmp/<project>/chats/` are also supported |
 | Prime Agent | JSONL | `~/.prime/agent/sessions/<id>.jsonl` (also honors Prime Agent environment/global settings overrides) |
 | OpenCode | SQLite | `~/.local/share/opencode/opencode.db` |
 | pi | JSONL | `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl` |
@@ -173,7 +179,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 ## Requirements
 
 - macOS, Linux, or Windows (PowerShell 5.1+ / PowerShell 7+)
-- One or more of: `claude`, `codex`, `prime-agent`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `omp`, `yolop`
+- One or more of: `claude`, `codex`, `grok`, `kimi`, `qwen`, `prime-agent`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `omp`, `yolop`
 
 ## Install from source
 
@@ -188,7 +194,7 @@ agf setup
 
 `agf` works best with agents that store resumable sessions locally.
 
-Prime Agent session discovery and resume are supported, but deletion is intentionally disabled: Prime Agent has no public session-delete command and direct file deletion would bypass its active-daemon guard.
+Direct deletion is intentionally disabled for Prime Agent, Grok Build, Kimi Code, and Qwen Code. Their native pickers coordinate active sessions and/or secondary indexes; deleting only the visible file from AGF could leave corrupted or stale upstream state. Discovery and exact-ID resume remain fully supported.
 
 **Amp** is not supported yet because its sessions are stored remotely, which makes it hard to reliably resolve local project paths from session metadata. We are monitoring upstream changes and will add support when feasible.
 

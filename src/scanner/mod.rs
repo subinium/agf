@@ -7,12 +7,15 @@ pub mod claude;
 pub mod codex;
 pub mod cursor_agent;
 pub mod gemini;
+pub mod grok;
 pub mod hermes;
+pub mod kimi;
 pub mod kiro;
 pub mod oh_my_pi;
 pub mod opencode;
 pub mod pi;
 pub mod prime_agent;
+pub mod qwen;
 pub mod yolop;
 
 /// Truncate a string to `max` chars, appending "..." if truncated.
@@ -314,6 +317,9 @@ pub fn scan_agent(agent: Agent) -> Result<Vec<Session>, AgfError> {
     match agent {
         Agent::ClaudeCode => claude::scan(),
         Agent::Codex => codex::scan(),
+        Agent::Grok => grok::scan(),
+        Agent::Kimi => kimi::scan(),
+        Agent::Qwen => qwen::scan(),
         Agent::OpenCode => opencode::scan(),
         Agent::Pi => pi::scan(),
         Agent::OhMyPi => oh_my_pi::scan(),
