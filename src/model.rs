@@ -12,6 +12,9 @@ use crate::shell::CommandShell;
 pub enum Agent {
     ClaudeCode,
     Codex,
+    Grok,
+    Kimi,
+    Qwen,
     OpenCode,
     Pi,
     OhMyPi,
@@ -28,6 +31,9 @@ impl fmt::Display for Agent {
         match self {
             Agent::ClaudeCode => write!(f, "Claude Code"),
             Agent::Codex => write!(f, "Codex"),
+            Agent::Grok => write!(f, "Grok Build"),
+            Agent::Kimi => write!(f, "Kimi Code"),
+            Agent::Qwen => write!(f, "Qwen Code"),
             Agent::OpenCode => write!(f, "OpenCode"),
             Agent::Pi => write!(f, "pi"),
             Agent::OhMyPi => write!(f, "Oh My Pi"),
@@ -46,6 +52,9 @@ impl Agent {
         match self {
             Agent::ClaudeCode => (217, 119, 87), // #D97757 terra cotta (Anthropic)
             Agent::Codex => (0, 166, 126),       // #00A67E teal green (OpenAI)
+            Agent::Grok => (229, 229, 229),      // xAI monochrome
+            Agent::Kimi => (74, 120, 255),       // Kimi blue
+            Agent::Qwen => (121, 93, 255),       // Qwen violet
             Agent::OpenCode => (59, 130, 246),   // #3B82F6 blue
             Agent::Pi => (236, 72, 153),         // #EC4899 pink
             Agent::OhMyPi => (249, 115, 22),     // #F97316 orange
@@ -62,6 +71,9 @@ impl Agent {
         &[
             Agent::ClaudeCode,
             Agent::Codex,
+            Agent::Grok,
+            Agent::Kimi,
+            Agent::Qwen,
             Agent::OpenCode,
             Agent::Pi,
             Agent::OhMyPi,
@@ -79,6 +91,9 @@ impl Agent {
         match self {
             Agent::ClaudeCode => "claude",
             Agent::Codex => "codex",
+            Agent::Grok => "grok",
+            Agent::Kimi => "kimi",
+            Agent::Qwen => "qwen",
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
             Agent::OhMyPi => "omp",
@@ -102,6 +117,9 @@ impl Agent {
         match self {
             Agent::ClaudeCode => format!("claude --resume {id}"),
             Agent::Codex => format!("codex resume {id}"),
+            Agent::Grok => format!("grok --resume {id}"),
+            Agent::Kimi => format!("kimi --session {id}"),
+            Agent::Qwen => format!("qwen --resume {id}"),
             Agent::OpenCode => format!("opencode -s {id}"),
             Agent::Pi => format!("pi --session {id}"),
             Agent::OhMyPi => format!("omp --resume {id}"),
@@ -139,6 +157,12 @@ impl Agent {
                 ("plan (read-only)", " --approval-mode plan"),
                 ("sandbox", " -s"),
             ],
+            Agent::Kimi => &[
+                ("default", ""),
+                ("auto", " --auto"),
+                ("plan (read-only)", " --plan"),
+                ("yolo (no approval)", " --yolo"),
+            ],
             _ => &[("default", "")],
         }
     }
@@ -148,6 +172,9 @@ impl Agent {
         match self {
             Agent::ClaudeCode => "claude",
             Agent::Codex => "codex",
+            Agent::Grok => "grok",
+            Agent::Kimi => "kimi",
+            Agent::Qwen => "qwen",
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
             Agent::OhMyPi => "omp",
@@ -165,6 +192,9 @@ impl Agent {
         match self {
             Agent::ClaudeCode => "claude",
             Agent::Codex => "codex",
+            Agent::Grok => "grok",
+            Agent::Kimi => "kimi",
+            Agent::Qwen => "qwen",
             Agent::OpenCode => "opencode",
             Agent::Pi => "pi",
             Agent::OhMyPi => "oh-my-pi",
@@ -182,6 +212,9 @@ impl Agent {
         match normalized.as_str() {
             "claude" | "claude-code" => Some(Agent::ClaudeCode),
             "codex" => Some(Agent::Codex),
+            "grok" | "grok-build" | "xai" | "xai-grok" => Some(Agent::Grok),
+            "kimi" | "kimi-code" | "kimi-cli" => Some(Agent::Kimi),
+            "qwen" | "qwen-code" => Some(Agent::Qwen),
             "opencode" | "open-code" => Some(Agent::OpenCode),
             "pi" => Some(Agent::Pi),
             "omp" | "oh-my-pi" | "ohmypi" => Some(Agent::OhMyPi),
@@ -193,6 +226,13 @@ impl Agent {
             "prime" | "prime-agent" | "prime-intellect" => Some(Agent::PrimeAgent),
             _ => None,
         }
+    }
+
+    pub fn supports_delete(self) -> bool {
+        !matches!(
+            self,
+            Agent::Grok | Agent::Kimi | Agent::Qwen | Agent::PrimeAgent
+        )
     }
 }
 
@@ -481,6 +521,28 @@ mod tests {
             Agent::PrimeAgent.resume_cmd("prime-session", &shell),
             "prime-agent --resume 'prime-session'"
         );
+    }
+
+    #[test]
+    fn grok_kimi_and_qwen_resume_commands_keep_the_selected_id() {
+        let shell = CommandShell::Posix;
+        assert_eq!(
+            Agent::Grok.resume_cmd("grok-session", &shell),
+            "grok --resume 'grok-session'"
+        );
+        assert_eq!(
+            Agent::Kimi.resume_cmd("kimi-session", &shell),
+            "kimi --session 'kimi-session'"
+        );
+        assert_eq!(
+            Agent::Qwen.resume_cmd("qwen-session", &shell),
+            "qwen --resume 'qwen-session'"
+        );
+        assert!(!Agent::Grok.supports_delete());
+        assert!(!Agent::Kimi.supports_delete());
+        assert!(!Agent::Qwen.supports_delete());
+        assert!(!Agent::PrimeAgent.supports_delete());
+        assert!(Agent::Codex.supports_delete());
     }
 
     #[test]
