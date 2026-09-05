@@ -9,3 +9,4 @@
 CLAUDE.md
 .claude/
 .release-notes-*.md
+__pycache__/

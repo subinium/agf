@@ -4,12 +4,17 @@ use std::io::{self, Write};
 use crate::model::{Agent, Session};
 use crate::text;
 
-pub fn print_stats(sessions: &[Session], json: bool) {
+pub fn print_stats(sessions: &[Session], json: bool) -> io::Result<()> {
+    write_stats(&mut io::stdout().lock(), sessions, json)
+}
+
+pub fn write_stats(out: &mut impl Write, sessions: &[Session], json: bool) -> io::Result<()> {
     if json {
-        print_json(sessions);
+        print_json(out, sessions)?;
     } else {
-        print_text(sessions);
+        print_text(out, sessions)?;
     }
+    out.flush()
 }
 
 struct Ansi {
@@ -54,30 +59,28 @@ impl Ansi {
     }
 }
 
-fn print_text(sessions: &[Session]) {
+fn print_text(out: &mut impl Write, sessions: &[Session]) -> io::Result<()> {
     if sessions.is_empty() {
-        eprintln!("No sessions found.");
-        return;
+        return writeln!(out, "No sessions found.");
     }
 
     let a = Ansi::new();
-    let mut out = io::stdout().lock();
     let total = sessions.len();
     let bar_width = 25;
 
     // Title
-    let _ = writeln!(out);
-    let _ = writeln!(
+    writeln!(out)?;
+    writeln!(
         out,
         "  {} {}",
         a.bold("agf stats"),
         a.dim(&format!("— {total} sessions total"))
-    );
+    )?;
 
     // Sessions per agent
-    let _ = writeln!(out);
-    let _ = writeln!(out, "  {}", a.bold("Sessions by Agent"));
-    let _ = writeln!(out);
+    writeln!(out)?;
+    writeln!(out, "  {}", a.bold("Sessions by Agent"))?;
+    writeln!(out)?;
 
     let mut by_agent: Vec<(Agent, usize)> = Vec::new();
     let mut agent_map: HashMap<Agent, usize> = HashMap::new();
@@ -99,20 +102,20 @@ fn print_text(sessions: &[Session]) {
         let filled = filled.max(if *count > 0 { 1 } else { 0 });
         let empty = bar_width.saturating_sub(filled);
         let pct = (*count as f64 / total as f64 * 100.0) as u32;
-        let _ = writeln!(
+        writeln!(
             out,
             "   {} {} {:>3} {:>3}%",
             a.rgb(r, g, b, &text::fit(&agent.to_string(), col_width)),
             a.bar_rgb(r, g, b, filled, empty),
             a.bold(&count.to_string()),
             pct,
-        );
+        )?;
     }
 
     // Top projects
-    let _ = writeln!(out);
-    let _ = writeln!(out, "  {}", a.bold("Top Projects"));
-    let _ = writeln!(out);
+    writeln!(out)?;
+    writeln!(out, "  {}", a.bold("Top Projects"))?;
+    writeln!(out)?;
 
     let mut by_project: HashMap<String, (usize, Option<Agent>)> = HashMap::new();
     for s in sessions {
@@ -149,22 +152,22 @@ fn print_text(sessions: &[Session]) {
         let filled = (count * bar_width) / max_proj_count;
         let filled = filled.max(if *count > 0 { 1 } else { 0 });
         let empty = bar_width.saturating_sub(filled);
-        let _ = writeln!(
+        writeln!(
             out,
             "   {} {} {:>3}",
             a.bold(&text::fit(name, max_name_width)),
             a.bar_rgb(r, g, b, filled, empty),
             count,
-        );
+        )?;
     }
 
     // Activity timeline
     let now = chrono::Utc::now().timestamp_millis();
     let activity = activity_counts(sessions, now);
 
-    let _ = writeln!(out);
-    let _ = writeln!(out, "  {}", a.bold("Activity"));
-    let _ = writeln!(out);
+    writeln!(out)?;
+    writeln!(out, "  {}", a.bold("Activity"))?;
+    writeln!(out)?;
 
     let max_time = [
         activity.today,
@@ -188,18 +191,18 @@ fn print_text(sessions: &[Session]) {
         let filled = (count * bar_width).checked_div(max_time).unwrap_or(0);
         let filled = filled.max(if *count > 0 { 1 } else { 0 });
         let empty = bar_width.saturating_sub(filled);
-        let _ = writeln!(
+        writeln!(
             out,
             "   {} {} {:>3}",
             a.dim(&text::fit(label, 12)),
             a.bar_rgb(*r, *g, *b, filled, empty),
             count,
-        );
+        )?;
     }
-    let _ = writeln!(out);
+    writeln!(out)
 }
 
-fn print_json(sessions: &[Session]) {
+fn print_json(out: &mut impl Write, sessions: &[Session]) -> io::Result<()> {
     let mut by_agent: HashMap<String, usize> = HashMap::new();
     for s in sessions {
         *by_agent.entry(s.agent.to_string()).or_insert(0) += 1;
@@ -225,10 +228,8 @@ fn print_json(sessions: &[Session]) {
             "future_or_invalid": activity.future,
         }
     });
-    if let Ok(s) = serde_json::to_string_pretty(&json) {
-        let mut out = io::stdout().lock();
-        let _ = writeln!(out, "{s}");
-    }
+    let json = serde_json::to_string_pretty(&json).map_err(io::Error::other)?;
+    writeln!(out, "{json}")
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -268,6 +269,69 @@ fn activity_counts(sessions: &[Session], now: i64) -> ActivityCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingWriter {
+        kind: io::ErrorKind,
+        flush_only: bool,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.flush_only {
+                Ok(bytes.len())
+            } else {
+                Err(self.kind.into())
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(self.kind.into())
+        }
+    }
+
+    #[test]
+    fn both_stats_formats_propagate_write_and_flush_errors() {
+        let session = Session {
+            agent: Agent::Codex,
+            session_id: "sid".into(),
+            project_name: "project".into(),
+            project_path: "/tmp/project".into(),
+            summaries: Vec::new(),
+            timestamp: 1_800_000_000_000,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+            interactive: true,
+        };
+        for json in [false, true] {
+            for sessions in [std::slice::from_ref(&session), &[]] {
+                for kind in [
+                    io::ErrorKind::BrokenPipe,
+                    io::ErrorKind::PermissionDenied,
+                    io::ErrorKind::WriteZero,
+                ] {
+                    for flush_only in [false, true] {
+                        let mut writer = FailingWriter { kind, flush_only };
+                        assert_eq!(
+                            write_stats(&mut writer, sessions, json).unwrap_err().kind(),
+                            kind
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_stats_are_written_to_the_injected_writer() {
+        let mut out = Vec::new();
+        write_stats(&mut out, &[], false).unwrap();
+        assert_eq!(out, b"No sessions found.\n");
+        out.clear();
+        write_stats(&mut out, &[], true).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["total"], 0);
+    }
 
     #[test]
     fn activity_windows_are_cumulative_and_future_is_separate() {

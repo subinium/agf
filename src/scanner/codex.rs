@@ -14,24 +14,31 @@ const MAX_SUMMARIES: usize = 10;
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     let codex_dir = crate::config::codex_dir()?;
+    let sqlite_dir = crate::config::codex_sqlite_dir()?;
+    scan_roots(&codex_dir, &sqlite_dir)
+}
 
+fn scan_roots(
+    codex_dir: &std::path::Path,
+    sqlite_dir: &std::path::Path,
+) -> Result<Vec<Session>, AgfError> {
     // SQLite is the current Codex source of truth and already stores title /
     // first prompt metadata. Query it first; opening every rollout merely to
     // reconstruct the same live-id set made a 4k-session store pay thousands
     // of file opens on every cold CLI scan.
-    let has_rollout_path = state_db_has_rollout_path(&codex_dir)?;
+    let has_rollout_path = state_db_has_rollout_path(sqlite_dir)?;
     let live_session_ids = if has_rollout_path {
         None
     } else {
-        collect_live_session_ids(&codex_dir)
+        collect_live_session_ids(codex_dir)
     };
-    if let Some(mut sessions) = scan_sqlite(&codex_dir, &HashMap::new(), live_session_ids.as_ref())?
+    if let Some(mut sessions) = scan_sqlite(sqlite_dir, &HashMap::new(), live_session_ids.as_ref())?
     {
         let live_ids: HashSet<String> = sessions
             .iter()
             .map(|session| session.session_id.clone())
             .collect();
-        let summaries = read_history_summaries(&codex_dir, Some(&live_ids))?;
+        let summaries = read_history_summaries(codex_dir, Some(&live_ids))?;
         for session in &mut sessions {
             if let Some(history) = summaries.get(&session.session_id) {
                 session.summaries.clone_from(history);
@@ -58,10 +65,10 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     // v0.11.3 post-ship audit; the `CACHE_VERSION=6` bump forces a cold
     // rescan on every upgrader, which would otherwise pay this cost on first
     // launch.)
-    let summaries = read_history_summaries(&codex_dir, live_session_ids.as_ref())?;
+    let summaries = read_history_summaries(codex_dir, live_session_ids.as_ref())?;
 
     // Legacy fallback for installs without a usable state database.
-    let mut sessions = scan_jsonl(&codex_dir, &summaries)?;
+    let mut sessions = scan_jsonl(codex_dir, &summaries)?;
 
     sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
     Ok(sessions)
@@ -519,9 +526,17 @@ mod tests {
     /// the helper used in `delete::tests`. We do not pull in the
     /// `tempfile` crate because the rest of the codebase does not depend
     /// on it.
-    fn make_codex_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("agf-codex-test-{name}"));
-        let _ = fs::remove_dir_all(&dir);
+    fn make_codex_dir(_name: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "agf-codex-test-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

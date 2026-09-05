@@ -24,6 +24,7 @@ const MAX_PARSE_BYTES: usize = 512 * 1024;
 /// pathological transcripts that pad with non-`role=user` rows.
 const MAX_PARSE_LINES: usize = 50;
 const MAX_LINE_BYTES: usize = 256 * 1024;
+const MAX_META_BYTES: usize = 128 * 1024;
 
 pub fn scan() -> Result<Vec<Session>, AgfError> {
     scan_from(&crate::config::cursor_dir()?)
@@ -41,7 +42,7 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
     // O(session_count × workspace_count) and dominated cold scans for users
     // with many Cursor workspaces.
     let store_dbs = index_store_dbs(&chats_dir)?;
-    let mut sessions = Vec::new();
+    let mut sessions: HashMap<String, (bool, Session)> = HashMap::new();
 
     // Single walk covers both storage formats:
     //
@@ -151,7 +152,16 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
             .map(|d| d.as_millis() as i64);
 
         let (summary, timestamp) = match meta {
-            Some(m) => (m.name, file_mtime.unwrap_or(m.created_at)),
+            Some(m) => (
+                m.name.or_else(|| {
+                    if ext == Some("jsonl") {
+                        extract_first_prompt(path)
+                    } else {
+                        None
+                    }
+                }),
+                file_mtime.unwrap_or(m.created_at),
+            ),
             None => {
                 // Prompt extraction only applies to JSONL; .txt format is unknown
                 let prompt = if ext == Some("jsonl") {
@@ -163,7 +173,7 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
             }
         };
 
-        sessions.push(Session {
+        let session = Session {
             agent: Agent::CursorAgent,
             session_id,
             project_name,
@@ -174,10 +184,19 @@ fn scan_from(cursor_dir: &Path) -> Result<Vec<Session>, AgfError> {
             worktree: None,
             recap: None,
             interactive: true,
-        });
+        };
+        let current_format = ext == Some("jsonl");
+        if sessions
+            .get(&session.session_id)
+            .is_none_or(|(current, existing)| {
+                (session.timestamp, current_format) > (existing.timestamp, *current)
+            })
+        {
+            sessions.insert(session.session_id.clone(), (current_format, session));
+        }
     }
 
-    Ok(sessions)
+    Ok(sessions.into_values().map(|(_, session)| session).collect())
 }
 
 struct StoreMeta {
@@ -185,7 +204,7 @@ struct StoreMeta {
     created_at: i64,
 }
 
-/// Locate the first existing ~/.cursor/chats/<workspace>/<session_id>/store.db.
+/// Locate the first existing `~/.cursor/chats/<workspace>/<session_id>/store.db`.
 ///
 /// Presence of this file means cursor-agent considers the session resumable;
 /// the file is the source of truth for `/resume`.
@@ -219,12 +238,14 @@ fn read_store_db(store_path: &Path) -> Result<Option<StoreMeta>, AgfError> {
     )?;
 
     // Cursor CLI stores session metadata as hex-encoded JSON in meta WHERE key='0'
-    let mut stmt = match conn.prepare("SELECT value FROM meta WHERE key = '0'") {
+    let mut stmt = match conn
+        .prepare("SELECT value FROM meta WHERE key = '0' AND length(CAST(value AS BLOB)) <= ?1")
+    {
         Ok(stmt) => stmt,
         Err(error) if error.to_string().contains("no such table") => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let hex_value: String = match stmt.query_row([], |row| row.get(0)) {
+    let hex_value: String = match stmt.query_row([MAX_META_BYTES as i64], |row| row.get(0)) {
         Ok(value) => value,
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -336,20 +357,38 @@ fn prompt_from_cursor_value(value: &serde_json::Value) -> Option<String> {
 /// e.g. "Users-subinium-Desktop-my-project" -> /Users/subinium/Desktop/my-project
 fn decode_dash_path(encoded: &str) -> Option<PathBuf> {
     let parts: Vec<&str> = encoded.split('-').collect();
-    #[cfg(windows)]
-    if let Some(drive) = parts.first()
-        && drive.len() == 1
-        && drive.as_bytes()[0].is_ascii_alphabetic()
-    {
-        let root = PathBuf::from(format!("{}:\\", drive.to_ascii_uppercase()));
-        if let Some(path) = solve(&parts, 1, &root) {
-            return Some(path);
-        }
-    }
-    solve(&parts, 0, Path::new("/"))
+    let (root, index) = decode_dash_root(encoded, cfg!(windows))?;
+    solve(&parts, index, &root, &mut 512)
 }
 
-fn solve(parts: &[&str], idx: usize, current: &Path) -> Option<PathBuf> {
+/// A lossy UNC slug has no verified server/share boundary. Do not reinterpret
+/// it, a foreign drive, or a raw/traversal path as a local POSIX directory.
+fn decode_dash_root(encoded: &str, windows: bool) -> Option<(PathBuf, usize)> {
+    if encoded.is_empty()
+        || encoded.len() > 4096
+        || encoded.starts_with('-')
+        || encoded.contains(['/', '\\', ':'])
+        || encoded.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let parts: Vec<&str> = encoded.split('-').collect();
+    if parts.len() > 128 || parts.iter().any(|part| matches!(*part, "." | "..")) {
+        return None;
+    }
+    let first = parts[0];
+    if first.len() == 1 && first.as_bytes()[0].is_ascii_alphabetic() {
+        return (windows && parts.get(1).is_none_or(|part| !part.is_empty())).then(|| {
+            (
+                PathBuf::from(format!("{}:\\", first.to_ascii_uppercase())),
+                1,
+            )
+        });
+    }
+    (!windows).then(|| (PathBuf::from("/"), 0))
+}
+
+fn solve(parts: &[&str], idx: usize, current: &Path, budget: &mut usize) -> Option<PathBuf> {
     if idx >= parts.len() {
         return if current.is_dir() {
             Some(current.to_path_buf())
@@ -359,6 +398,10 @@ fn solve(parts: &[&str], idx: usize, current: &Path) -> Option<PathBuf> {
     }
     // Try longest segment first (greedy — fewer filesystem checks)
     for end in (idx + 1..=parts.len()).rev() {
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
         let segment = parts[idx..end].join("-");
         let candidate = current.join(&segment);
         if end == parts.len() {
@@ -366,7 +409,7 @@ fn solve(parts: &[&str], idx: usize, current: &Path) -> Option<PathBuf> {
                 return Some(candidate);
             }
         } else if candidate.is_dir()
-            && let Some(result) = solve(parts, end, &candidate)
+            && let Some(result) = solve(parts, end, &candidate, budget)
         {
             return Some(result);
         }
@@ -378,6 +421,141 @@ fn solve(parts: &[&str], idx: usize, current: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn decode_dash_path_rejects_raw_paths_and_traversal() {
+        for encoded in [
+            "/",
+            "/tmp",
+            ".",
+            "..",
+            "tmp-..",
+            "--server-share",
+            r"C:\Users\dev",
+            r"\\server\share",
+        ] {
+            assert_eq!(decode_dash_path(encoded), None, "{encoded}");
+        }
+    }
+
+    #[test]
+    fn windows_drive_roots_never_fall_back_to_posix_or_guess_unc() {
+        assert_eq!(
+            decode_dash_root("c-Users-dev-my-project", true),
+            Some((PathBuf::from("C:\\"), 1))
+        );
+        assert_eq!(decode_dash_root("C-Users-dev-project", false), None);
+        assert_eq!(decode_dash_root("Users-dev-project", true), None);
+        assert_eq!(
+            decode_dash_root("Users-dev-project", false),
+            Some((PathBuf::from("/"), 0))
+        );
+        for slug in [
+            "--server-share-project",
+            "-server-share",
+            "C--Users-dev",
+            r"\\?\UNC\server\share",
+            r"\\?\C:\Users\dev",
+        ] {
+            assert_eq!(decode_dash_root(slug, true), None, "{slug}");
+            assert_eq!(decode_dash_root(slug, false), None, "{slug}");
+        }
+    }
+
+    #[test]
+    fn path_decoder_bounds_ambiguous_input_and_filesystem_probes() {
+        assert!(decode_dash_root(&"segment-".repeat(129), false).is_none());
+        assert!(decode_dash_root(&"a".repeat(4097), false).is_none());
+        assert!(solve(&["tmp", "project"], 0, Path::new("/"), &mut 0).is_none());
+    }
+
+    #[test]
+    fn store_metadata_is_read_only_and_bounded() {
+        let path = std::env::temp_dir().join(format!("agf-cursor-meta-{}.db", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+            .unwrap();
+        let json = r#"{"name":"fixture title","createdAt":1785542400000}"#;
+        let hex: String = json.bytes().map(|byte| format!("{byte:02x}")).collect();
+        conn.execute("INSERT INTO meta VALUES ('0', ?1)", [&hex])
+            .unwrap();
+        drop(conn);
+        let before = fs::read(&path).unwrap();
+        let meta = read_store_db(&path).unwrap().unwrap();
+        assert_eq!(meta.name.as_deref(), Some("fixture title"));
+        assert_eq!(meta.created_at, 1785542400000);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = ?1",
+            ["a".repeat(MAX_META_BYTES + 1)],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(read_store_db(&path).unwrap().is_none());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_deduplicates_migrated_cursor_identity_by_activity() {
+        let (cursor_dir, real_proj, encoded) = make_fixture("dedup");
+        let id = "exact-session-id";
+        place_session(&cursor_dir, &encoded, id);
+        place_store_db(&cursor_dir, "workspace", id);
+        let store = cursor_dir.join("chats/workspace").join(id).join("store.db");
+        let conn = Connection::open(store).unwrap();
+        conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+            .unwrap();
+        let hex: String = br#"{"createdAt":1}"#.iter().map(|byte| format!("{byte:02x}")).collect();
+        conn.execute("INSERT INTO meta VALUES ('0', ?1)", [&hex])
+            .unwrap();
+        drop(conn);
+        let transcripts = cursor_dir
+            .join("projects")
+            .join(encoded)
+            .join("agent-transcripts");
+        let legacy = transcripts.join(format!("{id}.txt"));
+        let current = transcripts.join(id).join(format!("{id}.jsonl"));
+        fs::write(&legacy, b"legacy").unwrap();
+        fs::write(
+            &current,
+            br#"{"role":"user","message":{"content":[{"type":"text","text":"current prompt"}]}}"#,
+        )
+        .unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+        let latest = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2000);
+        fs::File::options()
+            .write(true)
+            .open(&legacy)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&current)
+            .unwrap()
+            .set_modified(latest)
+            .unwrap();
+        let sessions = scan_from(&cursor_dir).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, id);
+        assert_eq!(sessions[0].timestamp, 2_000_000);
+        assert_eq!(sessions[0].summaries, ["current prompt"]);
+        fs::File::options()
+            .write(true)
+            .open(&legacy)
+            .unwrap()
+            .set_modified(latest)
+            .unwrap();
+        assert_eq!(
+            scan_from(&cursor_dir).unwrap()[0].summaries,
+            ["current prompt"]
+        );
+        fs::remove_dir_all(cursor_dir).unwrap();
+        fs::remove_dir_all(real_proj).unwrap();
+    }
     // Only the unix-gated fixture helpers use the Write trait; gate the
     // import the same way so Windows clippy doesn't flag it as unused.
     #[cfg(unix)]

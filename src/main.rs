@@ -1,4 +1,5 @@
 mod action;
+mod automation;
 mod cache;
 mod config;
 mod delete;
@@ -6,6 +7,8 @@ mod error;
 mod fsx;
 mod fuzzy;
 mod list;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod model;
 mod scanner;
 mod settings;
@@ -23,6 +26,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "agf",
+    version = VERSION,
     about = "AI Agent Session Finder TUI",
     args_conflicts_with_subcommands = true
 )]
@@ -36,6 +40,62 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Serve read-only tools over local MCP stdio (no HTTP listener)
+    #[cfg(feature = "mcp")]
+    Mcp {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Search session metadata as versioned JSON without launching an agent
+    Search {
+        query: Vec<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        #[arg(long, default_value = "0")]
+        offset: usize,
+        #[arg(long)]
+        include_summaries: bool,
+        #[arg(long)]
+        include_non_interactive: bool,
+    },
+    /// Show exact session metadata as JSON; never returns a full transcript
+    Show {
+        session_id: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        include_summaries: bool,
+        #[arg(long)]
+        include_non_interactive: bool,
+    },
+    /// Return a structured resume plan without executing it
+    ResumePlan {
+        session_id: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        include_non_interactive: bool,
+    },
+    /// Describe the read-only API, providers and executable availability as JSON
+    #[command(alias = "doctor")]
+    Capabilities {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Output shell wrapper function for the given shell
     Init {
         /// Shell type: zsh, bash, fish, or powershell (alias: pwsh)
@@ -74,8 +134,8 @@ enum Commands {
         #[arg(long, default_value = "20")]
         limit: usize,
         /// Output format: table, json, csv
-        #[arg(long, default_value = "table")]
-        format: String,
+        #[arg(long, value_enum, default_value = "table")]
+        format: list::OutputFormat,
         /// Include Codex subagents and non-interactive exec sessions
         #[arg(long)]
         include_non_interactive: bool,
@@ -103,15 +163,83 @@ enum Commands {
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> anyhow::Result<()> {
-    // Handle --version / -V manually (clap hides it due to args_conflicts_with_subcommands)
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
-        write_stdout(format!("agf {VERSION}\n").as_bytes())?;
-        return Ok(());
-    }
-
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if !error.use_stderr() => return write_stdout(error.to_string().as_bytes()),
+        Err(error) => error.exit(),
+    };
 
     match cli.command {
+        #[cfg(feature = "mcp")]
+        Some(Commands::Mcp { agent, project }) => {
+            return mcp::run(automation::Scope::new(
+                agent.as_deref(),
+                project.as_deref(),
+            )?);
+        }
+        Some(Commands::Search {
+            query,
+            agent,
+            project,
+            limit,
+            offset,
+            include_summaries,
+            include_non_interactive,
+        }) => {
+            return output_api(
+                automation::Scope::default().search(automation::SearchRequest {
+                    query: query.join(" "),
+                    agent,
+                    project,
+                    limit,
+                    offset,
+                    include_summaries,
+                    include_non_interactive,
+                }),
+            );
+        }
+        Some(Commands::Show {
+            session_id,
+            agent,
+            project,
+            include_summaries,
+            include_non_interactive,
+        }) => {
+            return output_api(automation::Scope::new(None, project.as_deref()).and_then(
+                |scope| {
+                    scope.get_session(automation::SessionRequest {
+                        agent,
+                        session_id,
+                        include_summaries,
+                        include_non_interactive,
+                    })
+                },
+            ));
+        }
+        Some(Commands::ResumePlan {
+            session_id,
+            agent,
+            project,
+            mode,
+            include_non_interactive,
+        }) => {
+            return output_api(automation::Scope::new(None, project.as_deref()).and_then(
+                |scope| {
+                    scope.resume_plan(automation::ResumeRequest {
+                        agent,
+                        session_id,
+                        mode,
+                        include_non_interactive,
+                    })
+                },
+            ));
+        }
+        Some(Commands::Capabilities { agent, project }) => {
+            return output_api(
+                automation::Scope::new(agent.as_deref(), project.as_deref())
+                    .map(|scope| scope.capabilities()),
+            );
+        }
         Some(Commands::Init { shell }) => {
             write_stdout(shell::shell_init(&shell).as_bytes())?;
             return Ok(());
@@ -173,6 +301,9 @@ fn main() -> anyhow::Result<()> {
             };
 
             // Build resume command with optional mode flags
+            if !model::valid_resume_id(&chosen.session_id) {
+                anyhow::bail!("invalid resume session ID");
+            }
             let flags = match mode.as_deref() {
                 None => "",
                 Some(requested) => chosen
@@ -207,20 +338,14 @@ fn main() -> anyhow::Result<()> {
         }) => {
             let mut sessions = scan_for_cli(agent.as_deref(), include_non_interactive)?;
             sessions.truncate(limit);
-            if sessions.is_empty() {
-                eprintln!("No sessions found.");
-                std::process::exit(1);
-            }
-            list::list_sessions(&sessions, list::OutputFormat::parse(&format));
-            return Ok(());
+            return handle_stdout_result(list::list_sessions(&sessions, format));
         }
         Some(Commands::Stats {
             json,
             include_non_interactive,
         }) => {
             let sessions = scan_for_cli(None, include_non_interactive)?;
-            stats::print_stats(&sessions, json);
-            return Ok(());
+            return handle_stdout_result(stats::print_stats(&sessions, json));
         }
         Some(Commands::Watch {
             interval,
@@ -312,11 +437,26 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn write_stdout(content: &[u8]) -> anyhow::Result<()> {
-    match std::io::stdout().lock().write_all(content) {
+    handle_stdout_result(std::io::stdout().lock().write_all(content))
+}
+
+fn handle_stdout_result(result: std::io::Result<()>) -> anyhow::Result<()> {
+    match result {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+fn output_api(result: automation::ApiResult) -> anyhow::Result<()> {
+    let failed = result.is_err();
+    let mut output = serde_json::to_vec(&automation::envelope(result))?;
+    output.push(b'\n');
+    write_stdout(&output)?;
+    if failed {
+        anyhow::bail!("request failed; see JSON error on stdout");
+    }
+    Ok(())
 }
 
 fn scan_for_cli(
@@ -380,6 +520,7 @@ fn scan_for_cli(
     if !include_non_interactive {
         sessions.retain(|session| session.interactive);
     }
+    sessions.retain(|session| model::valid_resume_id(&session.session_id));
     Ok(sessions)
 }
 
@@ -405,8 +546,7 @@ fn deliver_command(cmd: &str) -> anyhow::Result<()> {
     if shell.is_cd_only(cmd) {
         eprintln!("⚠  Shell integration not active — `cd` won't persist in your shell.");
         eprintln!("   Run `agf setup` to install the wrapper, then restart your shell.");
-        println!("{cmd}");
-        return Ok(());
+        return write_stdout(format!("{cmd}\n").as_bytes());
     }
 
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -414,15 +554,17 @@ fn deliver_command(cmd: &str) -> anyhow::Result<()> {
     }
 
     // Piped / redirected: preserve the printable contract so callers can capture output.
-    println!("{cmd}");
-    Ok(())
+    write_stdout(format!("{cmd}\n").as_bytes())
 }
 
 #[cfg(unix)]
 fn exec_via_shell(cmd: &str, shell: shell::CommandShell) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     let (exe, args) = shell.exec_parts();
-    let err = std::process::Command::new(exe).args(args).arg(cmd).exec();
+    let err = std::process::Command::new(exe)
+        .args(args)
+        .arg(shell.exec_script(cmd))
+        .exec();
     // `exec` only returns on failure.
     Err(anyhow::anyhow!("failed to exec shell: {err}"))
 }
@@ -432,7 +574,7 @@ fn exec_via_shell(cmd: &str, shell: shell::CommandShell) -> anyhow::Result<()> {
     let (exe, args) = shell.exec_parts();
     let status = std::process::Command::new(exe)
         .args(args)
-        .arg(cmd)
+        .arg(shell.exec_script(cmd))
         .status()?;
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));

@@ -222,20 +222,6 @@ pub(crate) fn project_name_from_path(path: impl AsRef<std::path::Path>) -> Strin
         .to_string()
 }
 
-/// Split a GROUP_CONCAT('|||') blob into trimmed, non-empty titles,
-/// deduplicated within the blob only, appended to `out`. Entries already in
-/// `out` are intentionally NOT considered: a child title equal to the
-/// already-pushed parent title is re-pushed (preserves existing behavior).
-pub(crate) fn push_concat_titles(out: &mut Vec<String>, blob: &str) {
-    let mut seen = std::collections::HashSet::new();
-    for t in blob.split("|||") {
-        let t = t.trim();
-        if !t.is_empty() && seen.insert(t) {
-            out.push(t.to_string());
-        }
-    }
-}
-
 /// Read up to `head_bytes` from the start and `tail_bytes` from the end of
 /// `path`, returning UTF-8-safe complete lines (no partial lines on the slice
 /// boundary). For files ≤ `head_bytes + tail_bytes`, the whole file is read.
@@ -343,6 +329,7 @@ pub struct CompletedScan {
 pub fn scan_agent_consistent(agent: Agent) -> Result<CompletedScan, String> {
     let before = crate::cache::agent_fingerprint(agent);
     let mut sessions = scan_agent(agent).map_err(|error| error.to_string())?;
+    sessions.retain(|session| crate::model::valid_resume_id(&session.session_id));
     let after = crate::cache::agent_fingerprint(agent);
     let now = chrono::Utc::now().timestamp_millis();
     let mut future_clamped = false;
@@ -467,19 +454,6 @@ mod tests {
             project_name_from_path(std::path::PathBuf::from("/tmp/proj")),
             "proj"
         );
-    }
-
-    #[test]
-    fn push_concat_titles_dedups_within_blob_only() {
-        let mut out = vec!["parent".to_string()];
-        push_concat_titles(&mut out, " a ||| b |||a||| ||| c ");
-        // "a" deduped within the blob; existing "parent" is not considered.
-        assert_eq!(out, vec!["parent", "a", "b", "c"]);
-
-        let mut out2 = vec!["dup".to_string()];
-        push_concat_titles(&mut out2, "dup");
-        // Blob-only dedup scope: a title equal to the parent is re-pushed.
-        assert_eq!(out2, vec!["dup", "dup"]);
     }
 
     #[test]

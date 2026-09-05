@@ -3,7 +3,10 @@ use rusqlite::Connection;
 use crate::error::AgfError;
 use crate::model::{Agent, Session};
 
-use super::{char_prefix, collapse_whitespace, push_concat_titles};
+use super::{char_prefix, collapse_whitespace};
+
+const MAX_TITLE_CHARS: i64 = 200;
+const MAX_CHILD_TITLES: i64 = 10;
 
 /// Trim a chunk of message text down to a single-line preview that fits in
 /// a TUI summary row. Collapses whitespace, drops common wrapper tags, and
@@ -74,9 +77,14 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
 
+    scan_connection(&conn)
+}
+
+fn scan_connection(conn: &Connection) -> Result<Vec<Session>, AgfError> {
     // Fetch top-level sessions (no parent), ordered by most recent activity.
     // Use MAX(messages.timestamp) as last_active, falling back to started_at.
-    // Aggregate child session titles as extra summaries; pull the first few
+    // Bound child title length and count before JSON aggregation; delimiter
+    // text inside a title must survive intact. Pull the first few
     // user messages as a conversation preview so sessions with NULL title
     // (short / un-titled sessions) still surface readable history in the
     // TUI detail pane. We `||| `-join up to 4 user messages chronologically
@@ -84,12 +92,16 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
     // conversation started without flooding the row.
     let mut stmt = conn.prepare(
         "SELECT s.id, \
-                s.title, \
+                substr(s.title, 1, ?1), \
                 s.source, \
                 s.model, \
                 s.message_count, \
                 CAST(COALESCE(m.last_active, s.started_at) * 1000 AS INTEGER) AS ts_ms, \
-                GROUP_CONCAT(child.title, '|||'), \
+                (SELECT json_group_array(title) FROM ( \
+                    SELECT substr(child.title, 1, ?1) AS title FROM sessions child \
+                    WHERE child.parent_session_id = s.id AND child.title IS NOT NULL \
+                    ORDER BY child.started_at DESC, child.id ASC LIMIT ?2 \
+                )), \
                 ( \
                     SELECT GROUP_CONCAT(content, '|||') FROM ( \
                         SELECT substr(content, 1, 4096) AS content FROM messages \
@@ -102,13 +114,11 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
              SELECT session_id, MAX(timestamp) AS last_active \
              FROM messages GROUP BY session_id \
          ) m ON m.session_id = s.id \
-         LEFT JOIN sessions child ON child.parent_session_id = s.id \
          WHERE s.parent_session_id IS NULL \
-         GROUP BY s.id \
-         ORDER BY ts_ms DESC",
+         ORDER BY ts_ms DESC, s.id ASC",
     )?;
 
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map([MAX_TITLE_CHARS, MAX_CHILD_TITLES], |row| {
         let id: String = row.get(0)?;
         let title: Option<String> = row.get(1)?;
         let source: String = row.get(2)?;
@@ -142,7 +152,13 @@ pub fn scan() -> Result<Vec<Session>, AgfError> {
             summaries.push(t.clone());
         }
         if let Some(ref children) = child_titles {
-            push_concat_titles(&mut summaries, children);
+            let mut seen = std::collections::HashSet::new();
+            for title in serde_json::from_str::<Vec<String>>(children)? {
+                let title = title.trim();
+                if !title.is_empty() && seen.insert(title.to_string()) {
+                    summaries.push(title.to_string());
+                }
+            }
         }
         // Only surface user-message previews for ids that look like
         // CLI/TUI sessions. dashboard:*/api-*/named ids get messages
@@ -235,5 +251,102 @@ mod tests {
         assert!(!is_user_cli_session("research"));
         assert!(!is_user_cli_session("test"));
         assert!(!is_user_cli_session("4619234e-10b6-4db2-8745-cc56a2682503"));
+    }
+
+    fn fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, title TEXT, source TEXT, model TEXT,
+                message_count INTEGER, started_at REAL, parent_session_id TEXT
+             );
+             CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, timestamp REAL);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn bounded_ordered_titles_preserve_delimiters_and_user_message_budget() {
+        let conn = fixture();
+        let parent = "20260905_010203_abcdef";
+        conn.execute(
+            "INSERT INTO sessions VALUES (?1, ?2, 'cli', NULL, 6, 100, NULL)",
+            rusqlite::params![parent, "\u{89aa}".repeat(700_000)],
+        )
+        .unwrap();
+        for index in (0..64).rev() {
+            conn.execute(
+                "INSERT INTO sessions VALUES (?1, ?2, 'cli', NULL, 0, 50, ?3)",
+                rusqlite::params![
+                    format!("child-{index:02}"),
+                    format!(
+                        "child {index:02} ||| \"quoted\" {}",
+                        "\u{754c}".repeat(8192)
+                    ),
+                    parent
+                ],
+            )
+            .unwrap();
+        }
+        for index in (0..6).rev() {
+            // The sentinel would become a second preview if SQL loaded more
+            // than 4096 chars of this message before delimiter splitting.
+            let content = format!(
+                "message {index} {}|||OUTSIDE-BUDGET",
+                "\u{754c}".repeat(5000)
+            );
+            conn.execute(
+                "INSERT INTO messages VALUES (?1, 'user', ?2, ?3)",
+                rusqlite::params![parent, content, 200 + index],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO sessions VALUES ('sibling', NULL, 'api', 'provider/model', 2, 90, NULL);",
+        )
+        .unwrap();
+
+        for reverse in [false, true] {
+            conn.pragma_update(None, "reverse_unordered_selects", reverse)
+                .unwrap();
+            let sessions = scan_connection(&conn).unwrap();
+            assert_eq!(sessions.len(), 2);
+            let session = &sessions[0];
+            assert_eq!(session.session_id, parent);
+            assert_eq!(session.summaries.len(), 15);
+            assert_eq!(session.summaries[0], "\u{89aa}".repeat(200));
+            for (index, title) in session.summaries[1..11].iter().enumerate() {
+                assert!(title.starts_with(&format!("child {index:02} ||| \"quoted\" ")));
+                assert_eq!(title.chars().count(), 200);
+                assert!(title.len() <= 4 * 200);
+            }
+            for (index, preview) in session.summaries[11..].iter().enumerate() {
+                assert!(preview.starts_with(&format!("message {index} ")));
+                assert_eq!(preview.chars().count(), 161);
+                assert!(!preview.contains("OUTSIDE-BUDGET"));
+            }
+            assert_eq!(session.timestamp, 205_000);
+            assert!(session.project_path.is_empty());
+            assert!(sessions[1].summaries[0].starts_with("api session (model)"));
+        }
+    }
+
+    #[test]
+    fn child_titles_deduplicate_without_splitting_literal_delimiters() {
+        let conn = fixture();
+        conn.execute_batch(
+            "INSERT INTO sessions VALUES ('parent', 'Same', 'cli', NULL, 0, 100, NULL);
+             INSERT INTO sessions VALUES ('a', ' Same ', 'cli', NULL, 0, 50, 'parent');
+             INSERT INTO sessions VALUES ('b', 'Same', 'cli', NULL, 0, 50, 'parent');
+             INSERT INTO sessions VALUES ('c', '   ', 'cli', NULL, 0, 50, 'parent');
+             INSERT INTO sessions VALUES ('d', NULL, 'cli', NULL, 0, 50, 'parent');
+             INSERT INTO sessions VALUES ('e', 'Literal ||| title', 'cli', NULL, 0, 50, 'parent');",
+        )
+        .unwrap();
+        assert_eq!(
+            scan_connection(&conn).unwrap()[0].summaries,
+            ["Same", "Same", "Literal ||| title"]
+        );
     }
 }
