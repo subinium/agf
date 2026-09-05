@@ -94,7 +94,7 @@ fn list_session_files(
     Ok(file_paths)
 }
 
-/// Scan ~/.claude/projects/*/<sessionId>.jsonl to detect worktree sessions
+/// Scan `~/.claude/projects/*/<sessionId>.jsonl` to detect worktree sessions
 /// and extract recap (away_summary / aiTitle) metadata.
 ///
 /// `cwd` in the per-session JSONL is the actual working directory, which for
@@ -423,9 +423,17 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn make_claude_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        let _ = fs::remove_dir_all(&dir);
+    fn make_claude_dir(_name: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "agf-claude-test-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         fs::create_dir_all(dir.join("projects")).unwrap();
         dir
     }
@@ -464,7 +472,7 @@ mod tests {
 
     #[test]
     fn list_session_files_returns_empty_when_projects_missing() {
-        let dir = std::env::temp_dir().join("agf-test-no-projects");
+        let dir = make_claude_dir("no-projects");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         assert!(list_session_files(&dir).unwrap().is_empty());

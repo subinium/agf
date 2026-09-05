@@ -135,23 +135,36 @@ struct HeadInfo {
 
 fn read_head(path: &Path) -> Result<Option<HeadInfo>, AgfError> {
     let file = std::fs::File::open(path)?;
+    let exceeds_budget = file.metadata()?.len() > MAX_HEAD_BYTES;
     let mut reader = BufReader::new(file).take(MAX_HEAD_BYTES);
-    let mut line = String::new();
+    let mut line_bytes = Vec::new();
     let mut info = HeadInfo::default();
     let mut records_seen = 0usize;
     let mut first_record_seen = false;
 
     while records_seen < MAX_HEAD_RECORDS {
-        line.clear();
-        let bytes = reader.read_line(&mut line)?;
+        line_bytes.clear();
+        let bytes = reader.read_until(b'\n', &mut line_bytes)?;
         if bytes == 0 {
             break;
         }
+        let line = match std::str::from_utf8(&line_bytes) {
+            Ok(line) => line,
+            // Only an incomplete code point at the artificial read boundary
+            // may be dropped. Malformed input and incomplete real EOF fail.
+            Err(error) if exceeds_budget && reader.limit() == 0 && error.error_len().is_none() => {
+                std::str::from_utf8(&line_bytes[..error.valid_up_to()])
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+            }
+            Err(error) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error).into());
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
         records_seen += 1;
-        let parsed = serde_json::from_str::<Value>(&line).ok();
+        let parsed = serde_json::from_str::<Value>(line).ok();
         if !first_record_seen {
             first_record_seen = true;
             if let Some(record) = parsed.as_ref() {
@@ -164,10 +177,10 @@ fn read_head(path: &Path) -> Result<Option<HeadInfo>, AgfError> {
                 // exceed our allocation budget. Qwen writes the resumable
                 // envelope before message content, so recover those bounded
                 // prefix fields without retaining the payload.
-                info.session_id = json_string_from_prefix(&line, "sessionId").unwrap_or_default();
-                info.cwd = json_string_from_prefix(&line, "cwd").unwrap_or_default();
-                info.start_time = json_string_from_prefix(&line, "timestamp").unwrap_or_default();
-                info.git_branch = json_string_from_prefix(&line, "gitBranch");
+                info.session_id = json_string_from_prefix(line, "sessionId").unwrap_or_default();
+                info.cwd = json_string_from_prefix(line, "cwd").unwrap_or_default();
+                info.start_time = json_string_from_prefix(line, "timestamp").unwrap_or_default();
+                info.git_branch = json_string_from_prefix(line, "gitBranch");
                 if info.session_id.is_empty() || info.cwd.is_empty() {
                     return Ok(None);
                 }
@@ -339,5 +352,72 @@ mod tests {
         assert_eq!(sessions[0].project_path, "/work/qwen-large");
         assert_eq!(sessions[0].summaries, ["(large prompt)"]);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_cjk_header_preserves_session_and_sibling_at_each_byte_boundary() {
+        for partial_bytes in 1..=2 {
+            let root = std::env::temp_dir().join(format!(
+                "agf-qwen-cjk-{partial_bytes}-{}",
+                std::process::id()
+            ));
+            let chats = root.join("project/chats");
+            std::fs::create_dir_all(&chats).unwrap();
+            let id = "019d1234-1234-7234-8234-123456789abc";
+            let sibling = "019d1234-1234-7234-8234-123456789abd";
+            let prefix = format!(
+                r#"{{"sessionId":"{id}","cwd":"/work/cjk","gitBranch":"feature","type":"user","message":{{"parts":[{{"text":""#
+            );
+            let padding = (MAX_HEAD_BYTES as usize - prefix.len() - partial_bytes) % 3;
+            let record = format!(
+                "{prefix}{}{}\"}}]}}}}\n",
+                "x".repeat(padding),
+                "\u{754c}".repeat(MAX_HEAD_BYTES as usize / 3 + 1024)
+            );
+            let error =
+                std::str::from_utf8(&record.as_bytes()[..MAX_HEAD_BYTES as usize]).unwrap_err();
+            assert_eq!(error.error_len(), None);
+            assert_eq!(MAX_HEAD_BYTES as usize - error.valid_up_to(), partial_bytes);
+            std::fs::write(chats.join(format!("{id}.jsonl")), record).unwrap();
+            std::fs::write(
+                chats.join(format!("{sibling}.jsonl")),
+                format!(r#"{{"sessionId":"{sibling}","cwd":"/work/sibling"}}"#),
+            )
+            .unwrap();
+
+            let sessions = scan_from_roots(std::slice::from_ref(&root)).unwrap();
+            assert_eq!(sessions.len(), 2);
+            let session = sessions.iter().find(|s| s.session_id == id).unwrap();
+            assert_eq!(session.project_path, "/work/cjk");
+            assert_eq!(session.git_branch.as_deref(), Some("feature"));
+            assert_eq!(session.summaries, ["(large prompt)"]);
+            assert!(sessions.iter().any(|s| s.session_id == sibling));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn malformed_utf8_and_incomplete_eof_are_not_header_boundary_recovery() {
+        let root = std::env::temp_dir().join(format!("agf-qwen-invalid-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("019d1234-1234-7234-8234-123456789abc.jsonl");
+        for suffix in [&b"\xff"[..], &b"\xe7\x95"[..]] {
+            let mut record = br#"{"sessionId":"019d1234-1234-7234-8234-123456789abc","cwd":"/work/test","text":""#.to_vec();
+            record.extend_from_slice(suffix);
+            std::fs::write(&path, &record).unwrap();
+            assert!(
+                matches!(read_head(&path), Err(AgfError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData)
+            );
+        }
+        let mut malformed =
+            br#"{"sessionId":"019d1234-1234-7234-8234-123456789abc","cwd":"/work/test","text":""#
+                .to_vec();
+        malformed.push(0xff);
+        malformed.resize(MAX_HEAD_BYTES as usize + 1, b'x');
+        std::fs::write(&path, malformed).unwrap();
+        assert!(
+            matches!(read_head(&path), Err(AgfError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

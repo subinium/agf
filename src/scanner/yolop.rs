@@ -54,8 +54,11 @@ pub(crate) fn valid_session_id(id: &str) -> bool {
 
 fn parse_session(dir: &Path, session_id: String) -> Result<Option<Session>, AgfError> {
     let log_path = dir.join("events.jsonl");
-    if !log_path.is_file() {
-        return Ok(None);
+    match std::fs::metadata(&log_path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
     }
     let workspace: Value = serde_json::from_slice(&std::fs::read(dir.join("workspace.json"))?)?;
     let project_path = workspace
@@ -98,11 +101,15 @@ fn parse_session(dir: &Path, session_id: String) -> Result<Option<Session>, AgfE
         })
         .unwrap_or(0);
 
-    // An unreadable event log degrades the entry, it does not remove it:
-    // workspace.json already supplies the project, title and worktree, and
-    // `yolop --session <id>` still resumes. Propagating the failure with `?`
-    // would drop an otherwise-resumable session from the listing entirely.
-    let events = read_head_tail(&log_path, EVENT_HEAD_BYTES, EVENT_TAIL_BYTES).unwrap_or_default();
+    // Failed refreshes preserve the prior stale cache. Metadata-only output
+    // would instead replace it and be marked fresh despite the missing log.
+    let events =
+        read_head_tail(&log_path, EVENT_HEAD_BYTES, EVENT_TAIL_BYTES).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "failed to read Yolop event log {}",
+                log_path.display()
+            ))
+        })?;
     let mut prompt_summaries = Vec::new();
     let mut event_title = None;
     let mut latest_ts = None;
@@ -420,10 +427,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// An unreadable event log must degrade the entry, not remove it: the
-    /// session is still resumable and workspace.json still names the project.
     #[test]
-    fn unreadable_event_log_still_yields_a_session() {
+    fn unreadable_event_log_fails_refresh_instead_of_yielding_partial_metadata() {
         let root = temp_root("unreadable-log");
         let dir = root.join(SESSION_ID);
         fs::create_dir_all(&dir).unwrap();
@@ -432,22 +437,156 @@ mod tests {
             r#"{"active_root":"/tmp/example","repo_root":"/tmp/example","title":"Still here"}"#,
         )
         .unwrap();
-        // A directory named `events.jsonl` passes nothing but `is_file()` is
-        // false, so make it a real file we then make unreadable by content
-        // shape rather than permissions (portable across CI users).
+        // Invalid UTF-8 makes the bounded reader fail even for privileged CI
+        // users. It must not bless metadata-only output as an authoritative scan.
         fs::write(
             dir.join("events.jsonl"),
             b"\xff\xfe not utf-8 and no newline",
         )
         .unwrap();
 
-        let session = parse_session(&dir, SESSION_ID.to_string())
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(session.project_name, "example");
-        assert_eq!(session.summaries, ["Still here"]);
+        assert!(matches!(
+            parse_session(&dir, SESSION_ID.to_string()),
+            Err(AgfError::Io(_))
+        ));
+        assert!(matches!(scan_from(&root), Err(AgfError::Io(_))));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_event_log_metadata_error_fails_scan_even_with_a_healthy_sibling() {
+        let root = temp_root("io-error");
+        write_session(&root);
+        let broken_id = "session_019e3db018a17450aba5407af5777238";
+        let broken = root.join(broken_id);
+        fs::create_dir_all(&broken).unwrap();
+        fs::copy(
+            root.join(SESSION_ID).join("workspace.json"),
+            broken.join("workspace.json"),
+        )
+        .unwrap();
+        // A symlink loop produces a real metadata I/O error without relying
+        // on permission bits, timing, or the privileges of the test runner.
+        std::os::unix::fs::symlink("events.jsonl", broken.join("events.jsonl")).unwrap();
+        let expected = fs::metadata(broken.join("events.jsonl")).unwrap_err();
+        assert!(matches!(
+            scan_from(&root),
+            Err(AgfError::Io(error)) if error.raw_os_error() == expected.raw_os_error()
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_refresh_preserves_stale_cache_until_a_successful_retry() {
+        const CHILD_ENV: &str = "AGF_YOLOP_CACHE_FIXTURE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let home = temp_root("cache-home");
+            fs::create_dir(home.join("bin")).unwrap();
+            let executable = home.join("bin/yolop");
+            fs::write(&executable, b"").unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "scanner::yolop::tests::failed_refresh_preserves_stale_cache_until_a_successful_retry",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", home.join("bin"))
+                .env("XDG_CONFIG_HOME", home.join("config"))
+                .env("XDG_DATA_HOME", home.join("data"))
+                .env("XDG_CACHE_HOME", home.join("cache"))
+                .env(CHILD_ENV, "1")
+                .current_dir(&home)
+                .output()
+                .unwrap();
+            fs::remove_dir_all(home).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let root = crate::config::yolop_sessions_dir().unwrap();
+        let cache_path = dirs::cache_dir().unwrap().join("agf/sessions.json");
+        assert!(root.starts_with(&home));
+        assert!(cache_path.starts_with(&home));
+        let dir = write_session(&root);
+        let initial = crate::scanner::scan_agent_consistent(Agent::Yolop).unwrap();
+        let observed =
+            std::collections::HashMap::from([(Agent::Yolop, initial.fingerprint.unwrap())]);
+        crate::cache::write_cache(
+            &initial.sessions,
+            &Default::default(),
+            &Default::default(),
+            &observed,
+        );
+        let before: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert!(!before["agents"]["Yolop"].is_null());
+
+        fs::write(dir.join("events.jsonl"), b"\xff unreadable update").unwrap();
+        let (cached, stale) = crate::cache::load_cache();
+        assert!(stale.contains(&Agent::Yolop));
+        assert_eq!(cached.len(), 1);
+        let refresh = crate::scanner::scan_agent_consistent(Agent::Yolop);
+        assert!(refresh.is_err());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = crate::tui::App::new(
+            cached,
+            None,
+            5,
+            false,
+            None,
+            Vec::new(),
+            crate::settings::Settings::default(),
+            Some(rx),
+            std::collections::HashSet::from([Agent::Yolop]),
+        );
+        tx.send(crate::cache::ScanResult {
+            agent: Agent::Yolop,
+            sessions: refresh,
+        })
+        .unwrap();
+        app.ingest_scan_results();
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].summaries, initial.sessions[0].summaries);
+        assert!(app.failed_agents.contains(&Agent::Yolop));
+        assert!(!app.scan_fingerprints.contains_key(&Agent::Yolop));
+        crate::cache::write_cache(
+            &app.sessions,
+            &app.failed_agents,
+            &Default::default(),
+            &app.scan_fingerprints,
+        );
+        let after: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert_eq!(after["agents"]["Yolop"], before["agents"]["Yolop"]);
+        assert!(crate::cache::load_cache().1.contains(&Agent::Yolop));
+
+        write_session(&root);
+        let retry = crate::scanner::scan_agent_consistent(Agent::Yolop).unwrap();
+        assert!(retry.fingerprint.is_some());
+        tx.send(crate::cache::ScanResult {
+            agent: Agent::Yolop,
+            sessions: Ok(retry),
+        })
+        .unwrap();
+        app.ingest_scan_results();
+        assert!(!app.failed_agents.contains(&Agent::Yolop));
+        crate::cache::write_cache(
+            &app.sessions,
+            &app.failed_agents,
+            &Default::default(),
+            &app.scan_fingerprints,
+        );
+        assert!(!crate::cache::load_cache().1.contains(&Agent::Yolop));
     }
 
     #[test]

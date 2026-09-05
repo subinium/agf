@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -58,6 +59,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-test.txt
+      - run: python -m unittest discover -s tests/support -p '*_test.py'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features --locked
@@ -74,3 +80,45 @@ jobs:
       # Lint here too so #[cfg(windows)]-gated code is covered.
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo test --all-features --locked
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-test.txt
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --all-features --locked
+
+  minimal:
+    name: No default features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-test.txt
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --no-default-features --all-targets --locked -- -D warnings
+      - run: cargo test --no-default-features --locked
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: python3 -m unittest discover -s scripts -p '*_test.py'
+      - run: cargo package --locked --target-dir "$RUNNER_TEMP/agf-package"

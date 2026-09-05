@@ -73,6 +73,61 @@ impl CommandShell {
         }
     }
 
+    /// A quoted executable requires PowerShell's call operator. Keep static
+    /// provider names unchanged for the existing wrapper/preview contract.
+    pub fn program(&self, name: &str, default_name: &str) -> String {
+        if name == default_name {
+            return name.to_string();
+        }
+        let quoted = self.quote(name);
+        match self {
+            Self::Posix => quoted,
+            Self::PowerShell => format!("& {quoted}"),
+        }
+    }
+
+    /// Apply a static allowlist of provider storage variables to one command.
+    /// PowerShell has no `env NAME=value command` syntax; isolate bookkeeping
+    /// in a script scope and restore both values and absence in `finally`.
+    pub fn with_environment(
+        &self,
+        cmd: &str,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> String {
+        if env.is_empty() {
+            return cmd.to_string();
+        }
+        match self {
+            Self::Posix => {
+                let assignments = env
+                    .iter()
+                    .map(|(key, value)| format!("{key}={}", self.quote(value)))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{assignments} command {cmd}")
+            }
+            Self::PowerShell => {
+                let mut before = String::new();
+                let mut apply = String::new();
+                let mut restore = String::new();
+                for (index, (key, value)) in env.iter().enumerate() {
+                    before.push_str(&format!("$__agfHad{index} = Test-Path -LiteralPath 'Env:{key}'; $__agfOld{index} = $env:{key}; "));
+                    apply.push_str(&format!("$env:{key} = {}; ", self.quote(value)));
+                    restore.push_str(&format!("if ($__agfHad{index}) {{ $env:{key} = $__agfOld{index} }} else {{ Remove-Item -LiteralPath 'Env:{key}' -ErrorAction SilentlyContinue }}; "));
+                }
+                format!("& {{ {before}try {{ {apply}{cmd} }} finally {{ {restore}}} }}")
+            }
+        }
+    }
+
+    pub fn error_command(&self, message: &str) -> String {
+        let quoted = self.quote(message);
+        match self {
+            Self::Posix => format!("printf '%s\\n' {quoted} >&2; false"),
+            Self::PowerShell => format!("Write-Error {quoted}"),
+        }
+    }
+
     /// Build "change directory to `path`, then run `cmd` only if the cd
     /// succeeded." The separator differs between shells.
     ///
@@ -125,6 +180,20 @@ impl CommandShell {
             Self::PowerShell => ("pwsh", &["-NoProfile", "-Command"]),
             #[cfg(not(unix))]
             Self::PowerShell => ("powershell", &["-NoProfile", "-Command"]),
+        }
+    }
+
+    /// Used only for a dedicated child shell, never for the parent-shell wrapper.
+    pub fn exec_script(&self, cmd: &str) -> String {
+        match self {
+            Self::Posix => cmd.to_owned(),
+            Self::PowerShell => format!(
+                "$ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $false; \
+                 $global:LASTEXITCODE = 0; try {{ & {{ {cmd} }}; $__agfOk = $?; \
+                 $__agfNative = $LASTEXITCODE; if ($__agfNative -ne 0) {{ exit $__agfNative }}; \
+                 if (-not $__agfOk) {{ exit 1 }}; exit 0 }} \
+                 catch {{ [Console]::Error.WriteLine('agf: PowerShell command failed'); exit 1 }}"
+            ),
         }
     }
 }
@@ -385,6 +454,84 @@ mod tests {
     use super::*;
 
     #[test]
+    fn powershell_child_script_has_explicit_status_boundary() {
+        let shell = CommandShell::PowerShell;
+        let script = shell.exec_script("Write-Output 'ok'");
+        assert!(script.contains("exit $__agfNative"));
+        assert!(script.contains("$ErrorActionPreference = 'Stop'"));
+        assert_eq!(CommandShell::Posix.exec_script("false"), "false");
+        let program = std::env::var_os("AGF_TEST_PWSH")
+            .or_else(|| cfg!(windows).then(|| "powershell.exe".into()));
+        if let Some(program) = program {
+            let native = if cfg!(windows) {
+                "& cmd.exe /d /c 'exit 37'"
+            } else {
+                "& /bin/sh -c 'exit 37'"
+            };
+            let env = std::collections::BTreeMap::from([(
+                "AGF_PS_TEST".into(),
+                "temporary ' value".into(),
+            )]);
+            let wrapped = shell.with_environment(native, &env);
+            for (script, code) in [
+                (wrapped, 37),
+                ("Write-Error 'probe'".into(), 1),
+                ("Write-Output 'ok'".into(), 0),
+            ] {
+                let output = std::process::Command::new(&program)
+                    .args([
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        &shell.exec_script(&script),
+                    ])
+                    .env("POWERSHELL_TELEMETRY_OPTOUT", "1")
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(code),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_environment_does_not_require_a_path_helper() {
+        let shell = CommandShell::Posix;
+        let env = std::collections::BTreeMap::from([(
+            "AGF_TEST_STORE".into(),
+            "configured ' 한글".into(),
+        )]);
+        let command = format!(
+            "/bin/sh -c {}",
+            shell.quote("printf '%s' \"$AGF_TEST_STORE\"")
+        );
+        let wrapped = shell.with_environment(&command, &env);
+        let script = format!("{wrapped} && printf '\\n%s' \"$AGF_TEST_STORE\"");
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .env_clear()
+            .env("PATH", "")
+            .env("AGF_TEST_STORE", "original")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "configured ' 한글\noriginal"
+        );
+    }
+
+    #[test]
     fn posix_quote_escapes_single_quote() {
         let s = CommandShell::Posix.quote("Jon's files");
         assert_eq!(s, r#"'Jon'\''s files'"#);
@@ -394,6 +541,45 @@ mod tests {
     fn powershell_quote_doubles_single_quote() {
         let s = CommandShell::PowerShell.quote("Jon's files");
         assert_eq!(s, "'Jon''s files'");
+    }
+
+    #[test]
+    fn executable_override_is_quoted_with_powershell_call_operator() {
+        let name = "C:/Cursor's tools/agent.exe";
+        assert_eq!(
+            CommandShell::PowerShell.program(name, "cursor-agent"),
+            "& 'C:/Cursor''s tools/agent.exe'"
+        );
+        assert_eq!(
+            CommandShell::Posix.program("/Cursor's tools/agent", "cursor-agent"),
+            "'/Cursor'\\''s tools/agent'"
+        );
+        assert_eq!(
+            CommandShell::PowerShell.program("cursor-agent", "cursor-agent"),
+            "cursor-agent"
+        );
+    }
+
+    #[test]
+    fn storage_environment_is_scoped_and_restored_in_powershell() {
+        let env = std::collections::BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".into(),
+            "C:/user's \u{c800}\u{c7a5}".into(),
+        )]);
+        let script = CommandShell::PowerShell.with_environment("claude --resume 'id'", &env);
+        assert!(script.starts_with("& { "));
+        assert!(script.contains("$__agfHad0 = Test-Path -LiteralPath 'Env:CLAUDE_CONFIG_DIR'"));
+        assert!(script.contains("$__agfOld0 = $env:CLAUDE_CONFIG_DIR"));
+        assert!(script.contains("try { $env:CLAUDE_CONFIG_DIR = 'C:/user''s \u{c800}\u{c7a5}'; claude --resume 'id' } finally"));
+        assert!(script.contains("if ($__agfHad0) { $env:CLAUDE_CONFIG_DIR = $__agfOld0 } else { Remove-Item -LiteralPath 'Env:CLAUDE_CONFIG_DIR'"));
+        assert_eq!(
+            CommandShell::Posix.with_environment("claude", &env),
+            "CLAUDE_CONFIG_DIR='C:/user'\\''s \u{c800}\u{c7a5}' command claude"
+        );
+        assert_eq!(
+            CommandShell::PowerShell.with_environment("claude", &std::collections::BTreeMap::new()),
+            "claude"
+        );
     }
 
     #[test]

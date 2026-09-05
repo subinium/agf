@@ -219,7 +219,15 @@ fn parse_session(path: &Path) -> Result<Option<Session>, AgfError> {
 }
 
 fn json_string_from_prefix(prefix: &[u8], field: &str) -> Option<String> {
-    let text = std::str::from_utf8(prefix).ok()?;
+    let text = match std::str::from_utf8(prefix) {
+        Ok(text) => text,
+        // Oversized rows can end the retained prefix mid-code-point. Do not
+        // recover across an actual malformed sequence anywhere in the prefix.
+        Err(error) if error.error_len().is_none() => {
+            std::str::from_utf8(&prefix[..error.valid_up_to()]).ok()?
+        }
+        Err(_) => return None,
+    };
     let key = format!("\"{field}\"");
     let mut search_from = 0usize;
     while let Some(relative) = text.get(search_from..)?.find(&key) {
@@ -368,5 +376,57 @@ mod tests {
 
         assert!(parse_session(&path).unwrap().is_none());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn oversized_cjk_message_updates_activity_invalidates_recap_and_keeps_sibling() {
+        for partial_bytes in 1..=2 {
+            let prefix = r#"{"type":"message","timestamp":"2026-08-01T00:00:05Z","message":{"role":"user","content":""#;
+            let padding = (MAX_LINE_BYTES - prefix.len() - partial_bytes) % 3;
+            let message = format!(
+                "{prefix}{}{}\"}}}}",
+                "x".repeat(padding),
+                "\u{754c}".repeat(MAX_LINE_BYTES / 3 + 1024)
+            );
+            let error = std::str::from_utf8(&message.as_bytes()[..MAX_LINE_BYTES]).unwrap_err();
+            assert_eq!(error.error_len(), None);
+            assert_eq!(MAX_LINE_BYTES - error.valid_up_to(), partial_bytes);
+            let path = fixture(
+                &format!("cjk-{partial_bytes}"),
+                &[
+                    r#"{"type":"session","id":"prime-cjk","timestamp":"2026-08-01T00:00:00Z","cwd":"/tmp/project"}"#,
+                    r#"{"type":"agent_status","status":{"basedOnMessageCount":0,"summary":"stale"}}"#,
+                    &message,
+                    r#"{"type":"session_info","name":"Latest name"}"#,
+                ],
+            );
+            let root = path.parent().unwrap();
+            std::fs::write(
+                root.join("sibling.jsonl"),
+                r#"{"type":"session","id":"prime-sibling","cwd":"/tmp/sibling"}"#,
+            )
+            .unwrap();
+
+            let sessions = scan_from(root).unwrap();
+            assert_eq!(sessions.len(), 2);
+            let session = sessions
+                .iter()
+                .find(|s| s.session_id == "prime-cjk")
+                .unwrap();
+            assert_eq!(session.timestamp, 1_785_542_405_000);
+            assert_eq!(session.recap, None);
+            assert_eq!(session.summaries, ["Latest name", "(large message)"]);
+            assert!(sessions.iter().any(|s| s.session_id == "prime-sibling"));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn prefix_recovery_rejects_malformed_utf8_before_or_at_the_boundary() {
+        for suffix in [&b"\xff"[..], &b"\xe7x"[..], &b"\x80"[..]] {
+            let mut prefix = br#"{"type":"message","content":""#.to_vec();
+            prefix.extend_from_slice(suffix);
+            assert_eq!(json_string_from_prefix(&prefix, "type"), None);
+        }
     }
 }

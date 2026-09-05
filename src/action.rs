@@ -1,6 +1,59 @@
 use crate::model::{Action, Agent, Session};
 use crate::shell::CommandShell;
 
+/// A read-only launch description. Availability is a snapshot, not a promise
+/// that the provider will accept the session or allow the requested mode.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResumePlan {
+    pub agent: String,
+    pub session_id: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub cwd: Option<String>,
+    pub executable_found: bool,
+    pub working_directory_exists: bool,
+}
+
+/// Construct data only: never execute a provider or modify its configuration.
+/// `cwd: None` inherits the caller's directory, including Prime's recovery
+/// behavior when its recorded directory no longer exists.
+pub fn resume_plan(session: &Session, mode: Option<&str>) -> Result<ResumePlan, String> {
+    if !crate::model::valid_resume_id(&session.session_id) {
+        return Err("invalid resume session ID".to_string());
+    }
+    // Reject caller-supplied flags before any storage configuration is read.
+    session.agent.resume_mode_args(mode)?;
+    resume_plan_with_environment(
+        session,
+        mode,
+        crate::config::resume_environment(session.agent)?,
+    )
+}
+
+fn resume_plan_with_environment(
+    session: &Session,
+    mode: Option<&str>,
+    env: std::collections::BTreeMap<String, String>,
+) -> Result<ResumePlan, String> {
+    let mut args = session.agent.resume_args(&session.session_id);
+    args.extend(session.agent.resume_mode_args(mode)?);
+    let path = resume_launch_path(session);
+    let program = crate::config::agent_program(session.agent);
+    let executable_found = crate::config::is_program_installed(&program);
+    Ok(ResumePlan {
+        agent: session.agent.slug().to_string(),
+        session_id: session.session_id.clone(),
+        program,
+        args,
+        env,
+        cwd: (!path.is_empty()).then(|| path.to_string()),
+        executable_found,
+        working_directory_exists: session.project_path.is_empty()
+            || std::path::Path::new(&session.project_path).is_dir(),
+    })
+}
+
 pub fn generate_command(
     session: &Session,
     action: Action,
@@ -12,18 +65,23 @@ pub fn generate_command(
     match action {
         Action::Resume => {
             let cmd = session.agent.resume_cmd(&session.session_id, &shell);
+            let env = crate::config::resume_environment(session.agent).ok()?;
+            let cmd = shell.with_environment(&cmd, &env);
             let resume_path = resume_launch_path(session);
             Some(shell.cd_and(&shell.quote(resume_path), &cmd))
         }
         Action::NewSession => {
             let agent = new_agent.unwrap_or(session.agent);
-            let cmd = agent.new_session_cmd();
-            Some(shell.cd_and(&quoted_path, cmd))
+            let cmd = agent.new_session_command(&shell);
+            let env = crate::config::resume_environment(agent).ok()?;
+            let cmd = shell.with_environment(&cmd, &env);
+            Some(shell.cd_and(&quoted_path, &cmd))
         }
         Action::Open => {
             let editor = detect_editor();
             Some(shell.cd_and(&quoted_path, &format!("{editor} .")))
         }
+        Action::Cd if session.project_path.is_empty() => None,
         Action::Cd => Some(shell.cd_only(&quoted_path)),
         Action::Delete | Action::Back | Action::Pin => None,
     }
@@ -86,7 +144,15 @@ pub fn resume_with_flags(session: &Session, flags: &str) -> String {
     let shell = CommandShell::from_env();
     let quoted_path = shell.quote(resume_launch_path(session));
     let base_cmd = session.agent.resume_cmd(&session.session_id, &shell);
-    shell.cd_and(&quoted_path, &format!("{base_cmd}{flags}"))
+    let cmd = scoped_launch(&shell, session.agent, &format!("{base_cmd}{flags}"));
+    shell.cd_and(&quoted_path, &cmd)
+}
+
+fn scoped_launch(shell: &CommandShell, agent: Agent, command: &str) -> String {
+    match crate::config::resume_environment(agent) {
+        Ok(env) => shell.with_environment(command, &env),
+        Err(error) => shell.error_command(&format!("agf: invalid resume plan: {error}")),
+    }
 }
 
 fn resume_launch_path(session: &Session) -> &str {
@@ -105,8 +171,9 @@ fn resume_launch_path(session: &Session) -> &str {
 pub fn new_session_with_flags(session: &Session, agent: Agent, flags: &str) -> String {
     let shell = CommandShell::from_env();
     let quoted_path = shell.quote(&session.project_path);
-    let base = agent.new_session_cmd();
-    shell.cd_and(&quoted_path, &format!("{base}{flags}"))
+    let base = agent.new_session_command(&shell);
+    let cmd = scoped_launch(&shell, agent, &format!("{base}{flags}"));
+    shell.cd_and(&quoted_path, &cmd)
 }
 
 #[cfg(test)]
@@ -127,6 +194,10 @@ mod tests {
             recap: None,
             interactive: true,
         }
+    }
+
+    fn test_plan(session: &Session, mode: Option<&str>) -> Result<ResumePlan, String> {
+        resume_plan_with_environment(session, mode, std::collections::BTreeMap::new())
     }
 
     /// Regression: the preview passed the raw `~`-shortened path straight into
@@ -152,6 +223,7 @@ mod tests {
 
     #[test]
     fn cd_preview_reports_missing_directory_instead_of_a_broken_command() {
+        assert!(generate_command(&session(""), Action::Cd, None).is_none());
         assert_eq!(
             action_preview(&session(""), Action::Cd),
             "no project directory"
@@ -162,9 +234,93 @@ mod tests {
     fn prime_resume_skips_a_deleted_stored_cwd() {
         let mut s = session("/definitely/missing/agf-prime-project");
         s.agent = Agent::PrimeAgent;
+        assert_eq!(resume_launch_path(&s), "");
+        assert_eq!(s.agent.resume_args(&s.session_id), ["--resume", "sid"]);
+    }
+
+    #[test]
+    fn resume_plan_preserves_data_and_rejects_arbitrary_flags() {
+        let mut s = session("/definitely/missing/agf-project");
+        s.agent = Agent::Codex;
+        s.session_id = "a'b; $(echo nope)".into();
+        let plan = test_plan(&s, Some("workspace-write")).unwrap();
+        assert_eq!(plan.agent, "codex");
         assert_eq!(
-            generate_command(&s, Action::Resume, None).unwrap(),
-            "prime-agent --resume 'sid'"
+            plan.args,
+            [
+                "resume",
+                "a'b; $(echo nope)",
+                "-a",
+                "on-request",
+                "-s",
+                "workspace-write"
+            ]
         );
+        assert_eq!(plan.cwd.as_deref(), Some(s.project_path.as_str()));
+        assert!(!plan.working_directory_exists);
+        assert!(resume_plan(&s, Some("--dangerously-bypass-approvals-and-sandbox")).is_err());
+        assert!(resume_plan(&s, Some("default; echo nope")).is_err());
+        assert!(
+            serde_json::to_value(plan)
+                .unwrap()
+                .get("executable_found")
+                .unwrap()
+                .is_boolean()
+        );
+    }
+
+    #[test]
+    fn resume_plan_rejects_invalid_ids_before_modes_or_storage_resolution() {
+        let mut s = session("");
+        s.agent = Agent::Codex;
+        for id in [
+            "",
+            "--dangerously-skip-permissions",
+            "id\0tail",
+            "id\ntail",
+            "id\u{85}tail",
+        ] {
+            s.session_id = id.to_string();
+            assert_eq!(
+                resume_plan(&s, Some("invalid-mode")).unwrap_err(),
+                "invalid resume session ID"
+            );
+        }
+        s.session_id = "a".repeat(1025);
+        assert_eq!(
+            resume_plan(&s, None).unwrap_err(),
+            "invalid resume session ID"
+        );
+    }
+
+    #[test]
+    fn resume_plan_retains_inherited_directory_semantics() {
+        let s = session("");
+        let plan = test_plan(&s, None).unwrap();
+        assert!(plan.cwd.is_none());
+        assert!(plan.working_directory_exists);
+        assert_eq!(plan.args, ["--resume", "sid"]);
+        let mut prime = session("/definitely/missing/agf-prime-project");
+        prime.agent = Agent::PrimeAgent;
+        let plan = test_plan(&prime, Some("default")).unwrap();
+        assert!(plan.cwd.is_none());
+        assert!(!plan.working_directory_exists);
+    }
+
+    #[test]
+    fn resume_plan_default_is_opt_in_and_covers_every_provider() {
+        for agent in Agent::all() {
+            let mut s = session("");
+            s.agent = *agent;
+            let plan = test_plan(&s, None).unwrap();
+            assert_eq!(plan.args, agent.resume_args("sid"));
+            assert_eq!(plan.args, test_plan(&s, Some("default")).unwrap().args);
+            for (mode, flags) in agent.resume_mode_options() {
+                let plan = test_plan(&s, Some(mode)).unwrap();
+                let mut expected = agent.resume_args("sid");
+                expected.extend(flags.split_ascii_whitespace().map(str::to_string));
+                assert_eq!(plan.args, expected);
+            }
+        }
     }
 }

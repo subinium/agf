@@ -28,6 +28,21 @@ Requires a Rust toolchain (`rustup` recommended). Prebuilt binaries for macOS, L
 agf resume project-name   # fuzzy-matches and resumes the best match directly
 ```
 
+### Scripts and agent tools
+
+```bash
+agf search parser --agent codex --limit 10
+agf show SESSION_ID --agent codex --include-summaries
+agf resume-plan SESSION_ID --agent codex
+agf mcp --agent codex --project /absolute/project/path
+```
+
+The first three commands return versioned JSON. They do not launch agents or
+modify their stores; `resume-plan` returns literal arguments, working directory
+and scoped storage environment for review. The stdio MCP server uses the same
+read-only API. See [agent integration](docs/AGENT_INTEGRATION.md) for schemas,
+limits, client configuration and the portable [AGF skill](skills/agf/SKILL.md).
+
 ## Why agf?
 
 AI coding agents are great at keeping context — until you lose the terminal.
@@ -49,7 +64,7 @@ Then you either dig through history files or start over.
 | [Kimi Code](https://github.com/MoonshotAI/kimi-code) | `kimi --session <id>` | `$KIMI_CODE_HOME/sessions/` or `~/.kimi-code/sessions/` |
 | [Qwen Code](https://github.com/QwenLM/qwen-code) | `qwen --resume <id>` | `$QWEN_RUNTIME_DIR/projects/` or `~/.qwen/projects/` |
 | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `prime-agent --resume <id>` | `~/.prime/agent/sessions/<id>.jsonl` |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` or `.jsonl` |
 | [Cursor CLI](https://cursor.com/docs/cli/overview) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy) |
 | [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
 | [Kiro](https://kiro.dev) | `kiro-cli chat --resume-id <id>` | Kiro v2 SQLite + Kiro v3 `~/.kiro/sessions/cli/` |
@@ -74,11 +89,29 @@ Then you either dig through history files or start over.
 | Oh My Pi | JSONL | `~/.omp/agent/sessions/<encoded-cwd>/<ts>_<id>.jsonl` |
 | Kiro | SQLite + JSON/JSONL | v2: macOS `~/Library/Application Support/kiro-cli/data.sqlite3`, Linux `~/.local/share/kiro-cli/data.sqlite3`<br>v3: `$KIRO_HOME/sessions/cli/` or `~/.kiro/sessions/cli/` |
 | Cursor CLI | SQLite + JSONL/TXT | `~/.cursor/chats/<workspace>/<id>/store.db` (metadata; required for `.jsonl` to be resumable)<br>`~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+ transcript)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy transcript) |
-| Gemini | JSON | `~/.gemini/tmp/<project>/chats/session-<date>-<id>.json`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
+| Gemini | JSON + JSONL | `~/.gemini/tmp/<project>/chats/session-*.json` or `.jsonl`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
 | Hermes | SQLite | `~/.hermes/state.db` (sessions + messages)<br>JSON dumps in `~/.hermes/sessions/session_<id>.json`<br>Hermes is cwd-independent — resume runs in your current shell directory |
 | Yolop | JSONL + JSON | macOS: `~/Library/Application Support/yolop/sessions/<id>/`<br>Linux: `$XDG_DATA_HOME/yolop/sessions/<id>/`<br>Windows: `%APPDATA%\yolop\sessions\<id>\` |
 
 </details>
+
+### Storage and executable overrides
+
+| Provider | Supported settings |
+|:---|:---|
+| Codex | `CODEX_HOME`; user `config.toml` `sqlite_home` takes precedence over `CODEX_SQLITE_HOME`, then the Codex home |
+| Claude Code | `CLAUDE_CONFIG_DIR` |
+| Gemini | `GEMINI_CLI_HOME` selects the parent of `.gemini` |
+| Cursor | `AGF_CURSOR_CLI` explicitly selects one executable path/name, including installations named `agent` |
+| OpenCode | `XDG_DATA_HOME` |
+| pi | `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR` |
+| Hermes | `HERMES_HOME`; native Windows defaults to `%APPDATA%/hermes` |
+
+Existing Grok, Kimi, Qwen, Kiro and Prime Agent overrides remain supported.
+Resuming freezes the resolved executable and applicable storage roots before
+changing directory. A generic `agent` found on PATH is not automatically assumed
+to be Cursor. Codex project-trust/profile/managed configuration layers and Oh My
+Pi profile/XDG extensions are not emulated; use the documented roots explicitly.
 
 ## Features
 
@@ -194,17 +227,30 @@ agf setup
 
 `agf` works best with agents that store resumable sessions locally.
 
-Direct deletion is intentionally disabled for Prime Agent, Grok Build, Kimi Code, and Qwen Code. Their native pickers coordinate active sessions and/or secondary indexes; deleting only the visible file from AGF could leave corrupted or stale upstream state. Discovery and exact-ID resume remain fully supported.
+Direct deletion is intentionally disabled for Prime Agent, Grok Build, Kimi Code, Qwen Code, and Gemini. Their native pickers coordinate active sessions, secondary indexes, or session sidecar/subagent artifacts; deleting only the visible file from AGF could leave corrupted or stale upstream state. Use the provider's native deletion workflow instead.
+
+JSON API and MCP metadata can contain private or untrusted text. Summaries are
+opt-in, and project scope limits returned records rather than providing an OS
+sandbox. CSV preserves source values, including spreadsheet formula prefixes;
+import it as text when opening untrusted session data in a spreadsheet.
 
 **Amp** is not supported yet because its sessions are stored remotely, which makes it hard to reliably resolve local project paths from session metadata. We are monitoring upstream changes and will add support when feasible.
 
 ## Built with
 
-`agf` is written in Rust and built with [SuperLightTUI (SLT)](https://github.com/subinium/SuperLightTUI) — an immediate-mode terminal UI library for Rust.
+`agf` uses Rust 2024 (MSRV 1.88), [SuperLightTUI 0.24](https://github.com/subinium/SuperLightTUI),
+and the official [Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk).
+The default `mcp` feature can be omitted with `--no-default-features`; the TUI and
+JSON CLI remain available.
 
 ## Contributing
 
 Issues and PRs are welcome. Adding support for another agent/harness is a self-contained change — see [docs/adding-an-agent.md](docs/adding-an-agent.md) for the wiring checklist.
+
+Unix PTY tests use Python 3 and `requirements-test.txt` to reconstruct terminal
+screens, including incremental redraws. Install these test dependencies in a
+virtual environment and set `AGF_TEST_PYTHON` to its Python executable when
+running `cargo test`. They are not AGF runtime dependencies.
 
 [![Contributors](https://contrib.rocks/image?repo=subinium/agf)](https://github.com/subinium/agf/graphs/contributors)
 

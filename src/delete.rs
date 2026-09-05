@@ -104,7 +104,10 @@ fn delete_agent_sessions(agent: Agent, ids: &HashSet<&str>) -> Result<HashSet<St
         ),
         Agent::Kiro => delete_kiro_sessions(ids),
         Agent::CursorAgent => delete_cursor_agent_sessions(ids),
-        Agent::Gemini => delete_gemini_sessions(ids),
+        Agent::Gemini => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Gemini deletion is disabled: use Gemini CLI's session deletion so subagents, plans, tracker, and tool-output artifacts stay consistent",
+        )),
         Agent::Hermes => delete_hermes_sessions(ids),
         Agent::Yolop => delete_yolop_sessions(ids),
         Agent::PrimeAgent => Err(io::Error::new(
@@ -204,8 +207,9 @@ fn delete_claude_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Er
 /// `agf` scan via the SQLite path.
 fn delete_codex_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
     let codex_dir = config::codex_dir().map_err(io::Error::other)?;
+    let sqlite_dir = config::codex_sqlite_dir().map_err(io::Error::other)?;
 
-    let mut deleted = delete_codex_sqlite_rows(&codex_dir, ids)?;
+    let mut deleted = delete_codex_sqlite_rows(&sqlite_dir, ids)?;
 
     let sessions_dir = codex_dir.join("sessions");
     if sessions_dir.exists() {
@@ -502,46 +506,6 @@ fn delete_cursor_agent_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, 
 }
 
 // ---------------------------------------------------------------------------
-// Gemini
-// ---------------------------------------------------------------------------
-
-/// Gemini sessions are stored as JSON files under
-/// `~/.gemini/tmp/<project-name-or-hash>/chats/session-<date>-<short-id>.json`.
-fn delete_gemini_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
-    let mut deleted = HashSet::new();
-    let gemini_dir = config::gemini_dir().map_err(io::Error::other)?;
-    let tmp_dir = gemini_dir.join("tmp");
-    if !tmp_dir.exists() {
-        return Ok(deleted);
-    }
-
-    for project_entry in fs::read_dir(&tmp_dir)? {
-        let project_entry = project_entry?;
-        let chats_dir = project_entry.path().join("chats");
-        if !chats_dir.is_dir() {
-            continue;
-        }
-
-        for chat_entry in fs::read_dir(&chats_dir)? {
-            let chat_entry = chat_entry?;
-            let path = chat_entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-
-            if let Some(id) = read_top_level_json_string_prefix(&path, "sessionId", 64 * 1024)?
-                && ids.contains(id.as_str())
-            {
-                fs::remove_file(&path)?;
-                deleted.insert(id);
-            }
-        }
-    }
-
-    Ok(deleted)
-}
-
-// ---------------------------------------------------------------------------
 // Hermes
 // ---------------------------------------------------------------------------
 
@@ -612,107 +576,6 @@ fn delete_hermes_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Er
     Ok(deleted)
 }
 
-fn read_top_level_json_string_prefix(
-    path: &Path,
-    field: &str,
-    max_bytes: u64,
-) -> Result<Option<String>, io::Error> {
-    use std::io::Read;
-    let file = fs::File::open(path)?;
-    let mut prefix = Vec::new();
-    file.take(max_bytes).read_to_end(&mut prefix)?;
-
-    let mut index = 0usize;
-    while prefix.get(index).is_some_and(u8::is_ascii_whitespace) {
-        index += 1;
-    }
-    if prefix.get(index) != Some(&b'{') {
-        return Ok(None);
-    }
-    let mut depth = 1usize;
-    let mut expect_key = true;
-    index += 1;
-    while index < prefix.len() {
-        match prefix[index] {
-            b'"' => {
-                let start = index;
-                index += 1;
-                let mut escaped = false;
-                while index < prefix.len() {
-                    let byte = prefix[index];
-                    index += 1;
-                    if escaped {
-                        escaped = false;
-                    } else if byte == b'\\' {
-                        escaped = true;
-                    } else if byte == b'"' {
-                        break;
-                    }
-                }
-                if index > prefix.len() || prefix.get(index.saturating_sub(1)) != Some(&b'"') {
-                    return Ok(None);
-                }
-                if depth == 1 && expect_key {
-                    let Ok(key) = serde_json::from_slice::<String>(&prefix[start..index]) else {
-                        return Ok(None);
-                    };
-                    while prefix.get(index).is_some_and(u8::is_ascii_whitespace) {
-                        index += 1;
-                    }
-                    if prefix.get(index) != Some(&b':') {
-                        return Ok(None);
-                    }
-                    index += 1;
-                    while prefix.get(index).is_some_and(u8::is_ascii_whitespace) {
-                        index += 1;
-                    }
-                    expect_key = false;
-                    if key == field {
-                        if prefix.get(index) != Some(&b'"') {
-                            return Ok(None);
-                        }
-                        let value_start = index;
-                        index += 1;
-                        let mut escaped = false;
-                        while index < prefix.len() {
-                            let byte = prefix[index];
-                            index += 1;
-                            if escaped {
-                                escaped = false;
-                            } else if byte == b'\\' {
-                                escaped = true;
-                            } else if byte == b'"' {
-                                return Ok(serde_json::from_slice::<String>(
-                                    &prefix[value_start..index],
-                                )
-                                .ok());
-                            }
-                        }
-                        return Ok(None);
-                    }
-                }
-            }
-            b'{' | b'[' => {
-                depth = depth.saturating_add(1);
-                index += 1;
-            }
-            b'}' | b']' => {
-                depth = depth.saturating_sub(1);
-                index += 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            b',' if depth == 1 => {
-                expect_key = true;
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-    Ok(None)
-}
-
 // ---------------------------------------------------------------------------
 // Yolop
 // ---------------------------------------------------------------------------
@@ -762,9 +625,17 @@ mod tests {
         list.iter().copied().collect()
     }
 
-    fn make_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        let _ = fs::remove_dir_all(&dir);
+    fn make_dir(_name: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "agf-delete-test-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -920,40 +791,13 @@ mod tests {
     }
 
     #[test]
-    fn bounded_json_field_reader_handles_whitespace_and_escapes() {
-        let dir = make_dir("agf-test-json-prefix");
-        let path = dir.join("session.json");
-        fs::write(
-            &path,
-            b"{\n  \"sessionId\" : \"id-\\\"quoted\",\n  \"messages\": [",
-        )
-        .unwrap();
-
-        assert_eq!(
-            read_top_level_json_string_prefix(&path, "sessionId", 1024)
-                .unwrap()
-                .as_deref(),
-            Some("id-\"quoted")
-        );
-    }
-
-    #[test]
-    fn top_level_json_reader_ignores_nested_session_id() {
-        let dir = make_dir("agf-test-json-nested-id");
-        let path = dir.join("session.json");
-        fs::write(
-            &path,
-            br#"{"metadata":{"sessionId":"wrong"},"sessionId":"right"}"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            read_top_level_json_string_prefix(&path, "sessionId", 1024)
-                .unwrap()
-                .as_deref(),
-            Some("right")
-        );
-        let _ = fs::remove_dir_all(dir);
+    fn gemini_deletion_is_native_managed_for_single_and_bulk_paths() {
+        assert!(!Agent::Gemini.supports_delete());
+        let error = delete_agent_sessions(Agent::Gemini, &ids(&["selected-id"])).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        let selection =
+            HashMap::from([(Agent::Gemini, HashSet::from(["selected-id".to_string()]))]);
+        assert!(delete_selection(&selection).is_empty());
     }
 
     // -- cursor --------------------------------------------------------------

@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-06
+
+### Added
+
+- Versioned, read-only JSON `search`, `show`, `resume-plan` and `capabilities`
+  commands. Results are bounded and summaries opt-in; exact identities, scope,
+  error codes and per-request pagination are explicit (#85).
+- Local stdio MCP tools over the same core, using official `rmcp` 3.2, with
+  fixed scopes, bounded incoming messages/concurrency and no model calls or
+  agent execution. A portable Skill and client integration guide are included.
+- Structured resume plans contain literal argv, cwd, storage-root environment
+  and executable/directory availability. Plans never execute commands.
+- Current Gemini JSONL support alongside legacy JSON, migration deduplication,
+  bounded record recovery and explicit Cursor executable selection (#84).
+
+### Changed
+
+- SuperLightTUI 0.22.3 to 0.24.0; Rust 2024/MSRV 1.88 retained (#86).
+- Default builds include the optional `mcp` feature; no-default builds retain
+  the native TUI and JSON API without the MCP dependency.
+- Provider root overrides are shared across scans, fingerprints and resume.
+  Codex supports separate SQLite storage and user-config precedence; supported
+  Claude, Gemini, pi, Hermes and OpenCode root settings are honored (#83).
+- Gemini direct deletion is disabled to preserve native sidecar/subagent
+  consistency. Other native-managed deletion restrictions remain intact.
+- Empty JSON lists succeed; invalid output formats are rejected. Stdout write
+  failures propagate, with BrokenPipe handled at the CLI boundary (#79).
+
+### Fixed
+
+- Preserve malformed/unreadable settings instead of replacing unrelated values.
+  Parser diagnostics and automation errors do not echo configuration snippets.
+- Freeze resolved executable paths and storage roots before changing cwd;
+  temporary shell environments do not overwrite the parent environment.
+- Preserve native failure codes through a dedicated PowerShell child even
+  after environment restoration.
+- Reject option-like/control-character session IDs before discovery/launch;
+  preserve literal metacharacters as arguments and keep plans non-executing.
+- Preserve large Unicode record metadata/activity at bounded UTF-8 prefixes
+  for Qwen and Prime Agent, while rejecting malformed interior bytes (#87).
+- Retain failed source scans for retry and fingerprint followed file-symlink
+  target metadata; incomplete fingerprints are not stored as fresh (#88).
+- Bound OpenCode/Hermes title aggregation before materialization (#89).
+- Keep footer/separator clicks outside session rows, match visible-row budgets,
+  hide unavailable Cd actions, and use grapheme-based search cursors (#90).
+- Distinguish unknown process state from confirmed idle state in Watch and
+  preserve unfiltered successful scan data in its refreshed cache (#75).
+- Preserve file permissions and report Unix parent-directory sync failures
+  after atomic writes; no Windows crash-durability guarantee is implied.
+
+### Scope
+
+- Existing 14 scanner providers remain; no Copilot scanner or browser port.
+- Codex user configuration is supported, not its full project/profile/managed
+  stack. Oh My Pi profile/XDG extensions remain outside the validated scope.
+- Metadata and summaries remain untrusted data. MCP annotations are not user
+  permission to execute a returned plan or select a bypass mode.
+- CSV retains original values; use text import for untrusted spreadsheet data.
+- Protocol/PTY fixtures do not establish physical OS IME or actual provider
+  execution. Validation and supported client setup are documented separately.
+
 ## [0.14.1] - 2026-08-18
 
 ### Added

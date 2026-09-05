@@ -9,13 +9,73 @@ use crate::text;
 
 struct WatchState {
     sessions: Vec<Session>,
-    running_agents: Vec<Agent>,
+    running_agents: RunningAgents,
     last_refresh: Instant,
     selected: usize,
     scroll_offset: usize,
 }
 
 type ScanBatch = Vec<(Agent, Result<crate::scanner::CompletedScan, String>)>;
+
+#[derive(Debug, PartialEq, Eq)]
+struct RunningAgents(Option<Vec<Agent>>);
+
+impl RunningAgents {
+    fn label(&self) -> String {
+        match &self.0 {
+            None => "running status unknown".to_string(),
+            Some(agents) if agents.is_empty() => "no agents running".to_string(),
+            Some(agents) => format!(
+                "running: {}",
+                agents
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    fn is_running(&self, agent: Agent) -> Option<bool> {
+        self.0.as_ref().map(|agents| agents.contains(&agent))
+    }
+}
+
+fn cacheable_scan_batch(
+    batch: &ScanBatch,
+) -> (
+    Vec<Session>,
+    std::collections::HashMap<Agent, crate::cache::SourceFingerprint>,
+) {
+    let mut sessions = Vec::new();
+    let mut fingerprints = std::collections::HashMap::new();
+    for (agent, result) in batch {
+        if let Ok(scan) = result
+            && let Some(fingerprint) = &scan.fingerprint
+            && fingerprint.is_complete()
+        {
+            // Persist the full worker result before applying display filters,
+            // including hidden Codex subagent/exec rows.
+            sessions.extend(scan.sessions.iter().cloned());
+            fingerprints.insert(*agent, fingerprint.clone());
+        }
+    }
+    (sessions, fingerprints)
+}
+
+fn refresh() -> (ScanBatch, RunningAgents) {
+    let batch = scanner::scan_agents_detailed(&crate::config::installed_agents());
+    let (sessions, fingerprints) = cacheable_scan_batch(&batch);
+    if !fingerprints.is_empty() {
+        crate::cache::write_cache(
+            &sessions,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &fingerprints,
+        );
+    }
+    (batch, detect_running_agents())
+}
 
 /// Replace only agents whose scanner completed successfully. A transient
 /// permission/SQLite error must not erase stale-but-useful rows in watch mode.
@@ -57,21 +117,19 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
 
     let mut state = WatchState {
         sessions,
-        running_agents: Vec::new(),
+        running_agents: RunningAgents(None),
         last_refresh: Instant::now(),
         selected: 0,
         scroll_offset: 0,
     };
 
-    let (tx, rx) = mpsc::channel::<(ScanBatch, Vec<Agent>)>();
+    let (tx, rx) = mpsc::channel::<(ScanBatch, RunningAgents)>();
     let refreshing = Arc::new(AtomicBool::new(true));
     {
         let tx = tx.clone();
         let refreshing = Arc::clone(&refreshing);
         std::thread::spawn(move || {
-            let sessions = scanner::scan_agents_detailed(&crate::config::installed_agents());
-            let running = detect_running_agents();
-            let _ = tx.send((sessions, running));
+            let _ = tx.send(refresh());
             refreshing.store(false, Ordering::SeqCst);
         });
     }
@@ -107,10 +165,7 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
                 let tx = tx.clone();
                 let r = Arc::clone(&refreshing);
                 std::thread::spawn(move || {
-                    let sessions =
-                        scanner::scan_agents_detailed(&crate::config::installed_agents());
-                    let running = detect_running_agents();
-                    let _ = tx.send((sessions, running));
+                    let _ = tx.send(refresh());
                     r.store(false, Ordering::SeqCst);
                 });
             }
@@ -144,11 +199,6 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
             }
 
             // Render
-            let running_names: Vec<String> = state
-                .running_agents
-                .iter()
-                .map(ToString::to_string)
-                .collect();
             let elapsed = state.last_refresh.elapsed().as_secs();
 
             let _ = ui.col(|ui| {
@@ -158,13 +208,11 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
                         .fg(slt::Color::Rgb(229, 229, 229))
                         .bold();
                     ui.spacer();
-                    if running_names.is_empty() {
-                        ui.text("no agents running")
-                            .fg(slt::Color::Rgb(107, 114, 128));
-                    } else {
-                        ui.text(format!("running: {}", running_names.join(", ")))
-                            .fg(slt::Color::Rgb(52, 211, 153));
-                    }
+                    let running_color = match &state.running_agents.0 {
+                        Some(agents) if !agents.is_empty() => slt::Color::Rgb(52, 211, 153),
+                        _ => slt::Color::Rgb(107, 114, 128),
+                    };
+                    ui.text(state.running_agents.label()).fg(running_color);
                     ui.text(format!("  {elapsed}s ago"))
                         .fg(slt::Color::Rgb(107, 114, 128));
                 });
@@ -188,11 +236,10 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
                             slt::Color::Reset
                         };
 
-                        let is_running = state.running_agents.contains(&s.agent);
-                        let status = if is_running {
-                            ("\u{25cf} ", slt::Color::Rgb(52, 211, 153))
-                        } else {
-                            ("\u{25cb} ", slt::Color::Rgb(107, 114, 128))
+                        let status = match state.running_agents.is_running(s.agent) {
+                            Some(true) => ("\u{25cf} ", slt::Color::Rgb(52, 211, 153)),
+                            Some(false) => ("\u{25cb} ", slt::Color::Rgb(107, 114, 128)),
+                            None => ("? ", slt::Color::Rgb(107, 114, 128)),
                         };
 
                         let (r, g, b) = s.agent.color();
@@ -244,9 +291,9 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
 /// isn't on this machine can never succeed. `output()` (not `status()`) is
 /// required: the child's stdout must be captured, or it would paint over the
 /// TUI. Note this runs on the refresh worker thread, not the render path.
-fn detect_running_agents() -> Vec<Agent> {
+fn detect_running_agents() -> RunningAgents {
     #[cfg(windows)]
-    return Vec::new();
+    return RunningAgents(None);
 
     #[cfg(not(windows))]
     {
@@ -257,29 +304,109 @@ fn detect_running_agents() -> Vec<Agent> {
                 .output()
                 .is_ok()
         }) {
-            return Vec::new();
+            return RunningAgents(None);
         }
-        let mut running = Vec::new();
-        for agent in crate::config::installed_agents() {
-            match std::process::Command::new("pgrep")
+        probe_running_agents(&crate::config::installed_agents(), |agent| {
+            std::process::Command::new("pgrep")
                 .args(["-x", agent.cli_name()])
                 .output()
-            {
-                Ok(output) if output.status.success() => running.push(agent),
-                // Ran, found nothing.
-                Ok(_) => {}
-                // `pgrep` itself is missing (Windows, minimal containers). Retrying
-                // it once per agent, every refresh tick, only burns process spawns.
-                Err(_) => break,
-            }
-        }
-        running
+                .map(|output| output.status.code())
+        })
     }
+}
+
+#[cfg(any(test, not(windows)))]
+fn probe_running_agents(
+    agents: &[Agent],
+    mut probe: impl FnMut(Agent) -> std::io::Result<Option<i32>>,
+) -> RunningAgents {
+    let mut running = Vec::new();
+    for &agent in agents {
+        match probe(agent) {
+            Ok(Some(0)) => running.push(agent),
+            Ok(Some(1)) => {}
+            // Exit 1 means no matches; other exit codes, signals and spawn
+            // failures do not establish that no agents are running.
+            _ => return RunningAgents(None),
+        }
+    }
+    RunningAgents(Some(running))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn complete_fingerprint() -> crate::cache::SourceFingerprint {
+        let mut value = serde_json::to_value(crate::cache::SourceFingerprint::default()).unwrap();
+        value["complete"] = true.into();
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn process_probe_distinguishes_unknown_from_confirmed_empty() {
+        let agents = [Agent::Codex, Agent::ClaudeCode];
+        let empty = probe_running_agents(&agents, |_| Ok(Some(1)));
+        assert_eq!(empty.label(), "no agents running");
+        assert_eq!(empty.is_running(Agent::Codex), Some(false));
+        for status in [None, Some(2), Some(3)] {
+            assert_eq!(
+                probe_running_agents(&agents, |_| Ok(status)),
+                RunningAgents(None)
+            );
+        }
+        let mut probes = 0;
+        let missing = probe_running_agents(&agents, |_| {
+            probes += 1;
+            Err(std::io::ErrorKind::NotFound.into())
+        });
+        assert_eq!(probes, 1);
+        assert_eq!(missing.label(), "running status unknown");
+        assert_eq!(missing.is_running(Agent::Codex), None);
+        assert_eq!(
+            probe_running_agents(&agents, |_| Ok(Some(0))),
+            RunningAgents(Some(agents.to_vec()))
+        );
+    }
+
+    #[test]
+    fn watch_cache_snapshot_preserves_hidden_rows_and_requires_complete_fingerprints() {
+        let mut hidden = session(Agent::Codex, "hidden", 2);
+        hidden.interactive = false;
+        let batch = vec![
+            (
+                Agent::Codex,
+                Ok(crate::scanner::CompletedScan {
+                    sessions: vec![session(Agent::Codex, "visible", 1), hidden],
+                    fingerprint: Some(complete_fingerprint()),
+                }),
+            ),
+            (Agent::ClaudeCode, Err("scan failed".into())),
+            (
+                Agent::Pi,
+                Ok(crate::scanner::CompletedScan {
+                    sessions: vec![session(Agent::Pi, "changing", 3)],
+                    fingerprint: None,
+                }),
+            ),
+            (
+                Agent::OhMyPi,
+                Ok(crate::scanner::CompletedScan {
+                    sessions: vec![session(Agent::OhMyPi, "unreadable", 4)],
+                    fingerprint: Some(crate::cache::SourceFingerprint::default()),
+                }),
+            ),
+        ];
+        let (cached, fingerprints) = cacheable_scan_batch(&batch);
+        assert_eq!(cached.len(), 2);
+        assert!(cached.iter().any(|session| !session.interactive));
+        assert_eq!(fingerprints.len(), 1);
+        assert!(fingerprints.contains_key(&Agent::Codex));
+        let mut display = Vec::new();
+        merge_scan_batch(&mut display, batch, false);
+        assert!(!display.iter().any(|session| session.session_id == "hidden"));
+        assert!(cached.iter().any(|session| session.session_id == "hidden"));
+    }
 
     fn session(agent: Agent, id: &str, timestamp: i64) -> Session {
         Session {

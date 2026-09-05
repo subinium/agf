@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Receiver;
 
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::action;
@@ -185,7 +186,7 @@ impl App {
             let mut ta = slt::TextareaState::new();
             if !query.is_empty() {
                 ta.lines = vec![query.clone()];
-                ta.cursor_col = query.chars().count();
+                ta.cursor_col = query.graphemes(true).count();
             }
             ta
         };
@@ -344,7 +345,10 @@ impl App {
     }
 
     fn capture_active_session(&mut self) -> bool {
-        self.active_session = self.selected_session().map(Session::identity);
+        self.active_session = self
+            .selected_session()
+            .filter(|session| crate::model::valid_resume_id(&session.session_id))
+            .map(Session::identity);
         self.active_session.is_some()
     }
 
@@ -742,7 +746,7 @@ impl App {
             slt::RunConfig::default().title("agf").mouse(true),
             |ui: &mut slt::Context| {
                 app.ingest_scan_results();
-                app.viewport_height = (ui.height() as usize).saturating_sub(4).max(1);
+                app.viewport_height = list_viewport_height(ui.height() as usize, app.mode);
                 app.adjust_scroll();
                 match app.mode {
                     Mode::Browse => ui_browse(ui, app),
@@ -906,9 +910,14 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     }
 
     // Mouse: the blank top row, search row, and separator occupy y=0..=2.
-    if let Some((_x, y)) = ui.mouse_down()
-        && let Some(clicked_vi) =
-            browse_click_index(y as usize, app.scroll_offset, app.filtered_indices.len())
+    if let Some((x, y)) = ui.mouse_down()
+        && x < ui.width()
+        && let Some(clicked_vi) = browse_click_index(
+            y as usize,
+            app.scroll_offset,
+            app.filtered_indices.len(),
+            app.viewport_height,
+        )
     {
         app.selected = clicked_vi;
         app.adjust_scroll();
@@ -1017,12 +1026,28 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         let merged: String = app.search_textarea.lines.join("");
         app.search_textarea.lines = vec![merged.clone()];
         app.search_textarea.cursor_row = 0;
-        app.search_textarea.cursor_col = merged.chars().count();
+        app.search_textarea.cursor_col = merged.graphemes(true).count();
     }
 }
 
-fn browse_click_index(y: usize, scroll_offset: usize, session_count: usize) -> Option<usize> {
+fn list_viewport_height(height: usize, mode: Mode) -> usize {
+    let reserved = match mode {
+        Mode::GroupedBrowse | Mode::BulkDelete => 5,
+        _ => 6,
+    };
+    height.saturating_sub(reserved)
+}
+
+fn browse_click_index(
+    y: usize,
+    scroll_offset: usize,
+    session_count: usize,
+    visible: usize,
+) -> Option<usize> {
     let row = y.checked_sub(BROWSE_FIRST_SESSION_ROW)?;
+    if row >= visible {
+        return None;
+    }
     let index = scroll_offset.checked_add(row)?;
     (index < session_count).then_some(index)
 }
@@ -1144,7 +1169,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
             }
 
             let total_width = ui.width() as usize;
-            let end = (app.grouped_scroll + visible).min(total_rows);
+            let end = (app.grouped_scroll + app.viewport_height).min(total_rows);
             let mut row_idx = 0;
             for group in app.groups.iter() {
                 let expanded = app.group_expanded.contains(&group.project_path);
@@ -1329,20 +1354,22 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     });
 }
 
-fn available_actions(agent: Agent) -> Vec<Action> {
+fn available_actions(session: &Session) -> Vec<Action> {
     Action::MENU
         .into_iter()
-        .filter(|action| *action != Action::Delete || agent.supports_delete())
+        .filter(|action| {
+            (*action != Action::Delete || session.agent.supports_delete())
+                && (*action != Action::Cd || !session.project_path.is_empty())
+        })
         .collect()
 }
 
 fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
-    let Some(action_agent) = app.action_session().map(|session| session.agent) else {
+    let Some(actions) = app.action_session().map(available_actions) else {
         app.active_session = None;
         app.mode = Mode::Browse;
         return;
     };
-    let actions = available_actions(action_agent);
     let action_count = actions.len();
     app.action_index = app.action_index.min(action_count.saturating_sub(1));
 
@@ -1647,7 +1674,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
                 let indicator = format!(" {}) ", i + 1);
                 let preview = if let Some(s) = app.action_session() {
                     let shell = crate::shell::CommandShell::from_env();
-                    action::preview_cd_and(&shell, s, opt.agent.new_session_cmd())
+                    action::preview_cd_and(&shell, s, &opt.agent.new_session_command(&shell))
                 } else {
                     String::new()
                 };
@@ -2563,7 +2590,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
 
 fn help_line(ui: &mut slt::Context, key: &str, desc: &str) {
     let _ = ui.row(|ui| {
-        ui.styled(format!("  {:<16}", key), slt::Style::new().fg(GRAY_500));
+        ui.styled(format!("  {key:<16}"), slt::Style::new().fg(GRAY_500));
         ui.text(desc).fg(GRAY_400);
     });
 }
@@ -2578,7 +2605,7 @@ fn render_footer(ui: &mut slt::Context, hints: &[(&str, &str)]) {
 }
 
 fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
-    let visible = app.viewport_height.max(1);
+    let visible = app.viewport_height;
     let end = (app.scroll_offset + visible).min(app.filtered_indices.len());
     let total_width = ui.width() as usize;
     let right_margin = 1usize;
@@ -2694,7 +2721,7 @@ fn render_session_list(ui: &mut slt::Context, app: &App, bulk_mode: bool) {
 }
 
 fn render_session_list_compact(ui: &mut slt::Context, app: &App) {
-    let visible = app.viewport_height.max(1);
+    let visible = app.viewport_height;
     let end = (app.scroll_offset + visible).min(app.filtered_indices.len());
 
     for vi in app.scroll_offset..end {
@@ -2967,6 +2994,68 @@ mod scroll_margin_tests {
         app.adjust_scroll();
         // Margin would push offset to 8, but max_offset = 15 - 10 = 5.
         assert_eq!(app.scroll_offset, 5);
+    }
+
+    #[test]
+    fn browse_footer_and_separator_are_not_session_rows() {
+        let visible = list_viewport_height(24, Mode::Browse);
+        assert_eq!(visible, 18);
+        assert_eq!(browse_click_index(3, 7, 100, visible), Some(7));
+        assert_eq!(browse_click_index(20, 7, 100, visible), Some(24));
+        for y in [0, 1, 2, 21, 22, 23, usize::MAX] {
+            assert_eq!(browse_click_index(y, 7, 100, visible), None);
+        }
+        assert_eq!(browse_click_index(3, 0, 100, 0), None);
+    }
+
+    #[test]
+    fn actual_browse_footer_click_does_not_open_an_offscreen_session() {
+        let mut app = make_app(100);
+        let mut backend = slt::TestBackend::new(100, 24);
+        app.viewport_height = list_viewport_height(24, Mode::Browse);
+        backend.render(|ui| ui_browse(ui, &mut app));
+        for y in [21, 22, 23] {
+            backend.run_with_events(slt::EventBuilder::new().click(1, y).build(), |ui| {
+                ui_browse(ui, &mut app)
+            });
+            assert_eq!(app.mode, Mode::Browse);
+            assert_eq!(app.selected, 0);
+        }
+        backend.run_with_events(slt::EventBuilder::new().click(1, 4).build(), |ui| {
+            ui_browse(ui, &mut app)
+        });
+        assert_eq!(app.mode, Mode::ActionSelect);
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn tiny_and_resized_browse_frames_have_bounded_viewports() {
+        for width in [1, 8, 39, 80, 120] {
+            for height in [1, 5, 6, 7, 24] {
+                let mut app = make_app(100);
+                let mut backend = slt::TestBackend::new(width, height);
+                app.viewport_height = list_viewport_height(height as usize, Mode::Browse);
+                backend.render(|ui| ui_browse(ui, &mut app));
+                assert_eq!(app.viewport_height, (height as usize).saturating_sub(6));
+                assert_eq!(app.mode, Mode::Browse);
+            }
+        }
+    }
+
+    #[test]
+    fn initial_search_caret_uses_graphemes() {
+        let app = App::new(
+            vec![],
+            Some("e\u{301}한👩‍💻".into()),
+            5,
+            false,
+            None,
+            vec![],
+            crate::settings::Settings::default(),
+            None,
+            HashSet::new(),
+        );
+        assert_eq!(app.search_textarea.cursor_col, 3);
     }
 }
 
@@ -3256,11 +3345,38 @@ mod bulk_selection_tests {
 
     #[test]
     fn native_managed_sessions_hide_single_delete_action() {
-        assert!(!available_actions(Agent::Grok).contains(&Action::Delete));
-        assert!(!available_actions(Agent::Kimi).contains(&Action::Delete));
-        assert!(!available_actions(Agent::Qwen).contains(&Action::Delete));
-        assert!(!available_actions(Agent::PrimeAgent).contains(&Action::Delete));
-        assert!(available_actions(Agent::Codex).contains(&Action::Delete));
+        for agent in [
+            Agent::Grok,
+            Agent::Kimi,
+            Agent::Qwen,
+            Agent::PrimeAgent,
+            Agent::Gemini,
+        ] {
+            assert!(!available_actions(&session(agent, "id", 1)).contains(&Action::Delete));
+        }
+        assert!(available_actions(&session(Agent::Codex, "id", 1)).contains(&Action::Delete));
+    }
+
+    #[test]
+    fn cwd_independent_session_does_not_offer_cd() {
+        let mut hermes = session(Agent::Hermes, "id", 1);
+        hermes.project_path.clear();
+        assert!(!available_actions(&hermes).contains(&Action::Cd));
+        assert!(available_actions(&hermes).contains(&Action::Resume));
+    }
+
+    #[test]
+    fn cached_option_like_identity_cannot_become_an_active_session() {
+        let mut app = app_with(
+            vec![session(
+                Agent::Codex,
+                "--dangerously-bypass-approvals-and-sandbox",
+                1,
+            )],
+            crate::settings::Settings::default(),
+        );
+        assert!(!app.capture_active_session());
+        assert!(app.action_session().is_none());
     }
 
     #[test]

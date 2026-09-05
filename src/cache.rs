@@ -56,7 +56,9 @@ use crate::model::{Agent, Session};
 // - Yolop timestamps are now clamped to a plausible window, so persisted
 //   far-future values must not survive the upgrade and keep pinning sessions
 //   to the top of the time sort.
-const CACHE_VERSION: u32 = 9;
+// Bumped to 10 in v0.15.0: fingerprints include followed file-symlink targets
+// and explicitly reject incomplete filesystem observations as fresh state.
+const CACHE_VERSION: u32 = 10;
 
 /// The binary version stamped into every cache write; any mismatch on read
 /// invalidates the whole cache (see `parse_cache`).
@@ -91,6 +93,14 @@ pub(crate) struct SourceFingerprint {
     /// maxima/totals alone miss a same-size edit to an older file whenever a
     /// different file still owns the newest mtime.
     digest: String,
+    #[serde(default)]
+    complete: bool,
+}
+
+impl SourceFingerprint {
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -197,59 +207,110 @@ fn source_fingerprint(paths: &[PathBuf]) -> SourceFingerprint {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
+        complete: true,
         ..SourceFingerprint::default()
     };
     fingerprint.sources.sort();
     let mut entry_fingerprints = Vec::new();
     for p in paths {
-        if !p.exists() {
-            continue;
+        match fs::symlink_metadata(p) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                fingerprint.complete = false;
+                continue;
+            }
         }
-        for entry in WalkDir::new(p)
-            .max_depth(8)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if let Ok(m) = entry.metadata() {
-                let mtime_ns = m
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                    .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
-                    .unwrap_or(0);
-                fingerprint.newest_mtime_ns = fingerprint.newest_mtime_ns.max(mtime_ns);
-                fingerprint.total_size = fingerprint.total_size.saturating_add(m.len());
-                fingerprint.entries = fingerprint.entries.saturating_add(1);
-                let file_type = if m.is_dir() {
-                    1
-                } else if m.is_file() {
-                    2
-                } else if m.file_type().is_symlink() {
-                    3
-                } else {
-                    4
-                };
-                entry_fingerprints.push((
-                    entry.path().to_string_lossy().into_owned(),
-                    file_type,
-                    mtime_ns,
-                    m.len(),
-                ));
+        for entry in WalkDir::new(p).max_depth(8).follow_links(false).into_iter() {
+            let Ok(entry) = entry else {
+                fingerprint.complete = false;
+                continue;
+            };
+            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                fingerprint.complete = false;
+                continue;
+            };
+            record_entry(
+                entry.path().to_path_buf(),
+                &metadata,
+                &mut fingerprint,
+                &mut entry_fingerprints,
+            );
+            if metadata.file_type().is_symlink() {
+                match fs::metadata(entry.path()) {
+                    Ok(target) if target.is_file() => {
+                        // Pi/Oh My Pi read file symlinks without walking linked
+                        // directories. Hash both the link and its actual target.
+                        match fs::canonicalize(entry.path()) {
+                            Ok(path) => record_entry(
+                                path,
+                                &target,
+                                &mut fingerprint,
+                                &mut entry_fingerprints,
+                            ),
+                            Err(_) => fingerprint.complete = false,
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => fingerprint.complete = false,
+                }
             }
         }
     }
     entry_fingerprints.sort_unstable();
     let mut hasher = Sha256::new();
-    for (path, file_type, mtime_ns, size) in entry_fingerprints {
+    for (path, file_type, mtime_ns, size, device, inode) in entry_fingerprints {
+        let path = path.as_os_str().as_encoded_bytes();
         hasher.update((path.len() as u64).to_le_bytes());
-        hasher.update(path.as_bytes());
+        hasher.update(path);
         hasher.update([file_type]);
         hasher.update(mtime_ns.to_le_bytes());
         hasher.update(size.to_le_bytes());
+        hasher.update(device.to_le_bytes());
+        hasher.update(inode.to_le_bytes());
     }
     fingerprint.digest = format!("{:x}", hasher.finalize());
     fingerprint
+}
+
+type EntryFingerprint = (PathBuf, u8, u64, u64, u64, u64);
+
+fn record_entry(
+    path: PathBuf,
+    metadata: &fs::Metadata,
+    fingerprint: &mut SourceFingerprint,
+    entries: &mut Vec<EntryFingerprint>,
+) {
+    let mtime_ns = match metadata.modified() {
+        Ok(time) => time
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
+            .unwrap_or(0),
+        Err(_) => {
+            fingerprint.complete = false;
+            0
+        }
+    };
+    fingerprint.newest_mtime_ns = fingerprint.newest_mtime_ns.max(mtime_ns);
+    fingerprint.total_size = fingerprint.total_size.saturating_add(metadata.len());
+    fingerprint.entries = fingerprint.entries.saturating_add(1);
+    let file_type = if metadata.is_dir() {
+        1
+    } else if metadata.is_file() {
+        2
+    } else if metadata.file_type().is_symlink() {
+        3
+    } else {
+        4
+    };
+    #[cfg(unix)]
+    let (device, inode) = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let (device, inode) = (0, 0);
+    entries.push((path, file_type, mtime_ns, metadata.len(), device, inode));
 }
 
 pub(crate) fn agent_fingerprint(agent: Agent) -> SourceFingerprint {
@@ -312,8 +373,13 @@ pub fn load_cache() -> (Vec<Session>, Vec<Agent>) {
             Some(ac) => {
                 // Stale-while-revalidate: cached payload remains visible until
                 // a successful worker result replaces it.
-                sessions.extend(ac.sessions.iter().map(from_cached));
-                if ac.fingerprint != current_fingerprint {
+                sessions.extend(
+                    ac.sessions
+                        .iter()
+                        .filter(|cached| crate::model::valid_resume_id(&cached.session_id))
+                        .map(from_cached),
+                );
+                if !current_fingerprint.is_complete() || ac.fingerprint != current_fingerprint {
                     stale.push(agent);
                 }
             }
@@ -380,7 +446,7 @@ pub fn write_cache(
         // A source changed after the worker's final fingerprint and before
         // cache persistence. Preserve the prior stale entry; the next launch
         // will rescan instead of blessing pre-change payload as current.
-        if &agent_fingerprint(agent) != observed {
+        if !observed.is_complete() || &agent_fingerprint(agent) != observed {
             continue;
         }
         let agent_sessions: Vec<CachedSession> = sessions
@@ -482,9 +548,16 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     fn temp_source(label: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("agf-cache-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        path
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "agf-cache-{label}-{}-{stamp}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
     }
 
     fn cache_json(version: u32, agf_version: Option<&str>) -> String {
@@ -553,6 +626,7 @@ mod tests {
                     total_size: 7,
                     entries: 1,
                     digest: "fixture".to_string(),
+                    complete: true,
                 },
                 sessions: vec![CachedSession {
                     agent: Agent::ClaudeCode,
@@ -664,5 +738,77 @@ mod tests {
         assert_eq!(first.entries, second.entries);
         assert_ne!(first.digest, second.digest);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fingerprint_missing_sources_are_complete_but_read_errors_are_not() {
+        let path = temp_source("observation");
+        let missing = source_fingerprint(std::slice::from_ref(&path));
+        assert!(missing.is_complete());
+        // A NUL-containing lookup fails before touching the filesystem on
+        // every platform; a file-as-parent lookup may instead be NotFound.
+        let unreadable = source_fingerprint(&[path.join("\0")]);
+        assert!(!unreadable.is_complete());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fingerprint_follows_file_targets_but_not_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_source("symlinks");
+        fs::create_dir(&dir).unwrap();
+        let source = dir.join("sessions");
+        let external = dir.join("external");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&external).unwrap();
+        let target = external.join("session.jsonl");
+        fs::write(&target, b"old").unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(base)
+            .unwrap();
+        symlink(&target, source.join("session.jsonl")).unwrap();
+        symlink(&external, source.join("linked-directory")).unwrap();
+        symlink(&source, source.join("loop")).unwrap();
+        let first = source_fingerprint(std::slice::from_ref(&source));
+        assert!(first.is_complete());
+
+        fs::write(&target, b"new").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(1))
+            .unwrap();
+        let edited = source_fingerprint(std::slice::from_ref(&source));
+        assert!(edited.is_complete());
+        assert_eq!(first.entries, edited.entries);
+        assert_eq!(first.total_size, edited.total_size);
+        assert_ne!(first.digest, edited.digest);
+
+        // Replacing the target with identical size/mtime changes its inode.
+        let replacement = external.join("replacement");
+        fs::write(&replacement, b"two").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(1))
+            .unwrap();
+        fs::rename(&replacement, &target).unwrap();
+        let replaced = source_fingerprint(std::slice::from_ref(&source));
+        assert_ne!(edited.digest, replaced.digest);
+
+        // An unrelated file under the linked directory is not traversed.
+        fs::write(external.join("unscanned.jsonl"), b"not a source").unwrap();
+        assert_eq!(replaced, source_fingerprint(std::slice::from_ref(&source)));
+
+        fs::remove_file(&target).unwrap();
+        assert!(!source_fingerprint(std::slice::from_ref(&source)).is_complete());
+        let _ = fs::remove_dir_all(dir);
     }
 }

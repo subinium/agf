@@ -2,6 +2,11 @@ use std::fmt;
 
 use crate::shell::CommandShell;
 
+/// Reject native CLI option injection while preserving literal ID contents.
+pub fn valid_resume_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 1024 && !id.starts_with('-') && !id.chars().any(char::is_control)
+}
+
 // Serde derives are load-bearing for the session cache: unit variants
 // serialize as their exact variant names ("ClaudeCode", "Codex", ...), which
 // is the on-disk format of ~/.cache/agf/sessions.json.
@@ -113,23 +118,51 @@ impl Agent {
     /// guaranteed to be quote-free, so an unescaped id could break the
     /// generated command — or inject shell — once the wrapper `eval`s it.
     pub fn resume_cmd(&self, session_id: &str, shell: &CommandShell) -> String {
-        let id = shell.quote(session_id);
-        match self {
-            Agent::ClaudeCode => format!("claude --resume {id}"),
-            Agent::Codex => format!("codex resume {id}"),
-            Agent::Grok => format!("grok --resume {id}"),
-            Agent::Kimi => format!("kimi --session {id}"),
-            Agent::Qwen => format!("qwen --resume {id}"),
-            Agent::OpenCode => format!("opencode -s {id}"),
-            Agent::Pi => format!("pi --session {id}"),
-            Agent::OhMyPi => format!("omp --resume {id}"),
-            Agent::Kiro => format!("kiro-cli chat --resume-id {id}"),
-            Agent::CursorAgent => format!("cursor-agent --resume {id}"),
-            Agent::Gemini => format!("gemini --resume {id}"),
-            Agent::Hermes => format!("hermes --resume {id}"),
-            Agent::Yolop => format!("yolop --session {id}"),
-            Agent::PrimeAgent => format!("prime-agent --resume {id}"),
-        }
+        self.resume_cmd_with_program(session_id, shell, &crate::config::agent_program(*self))
+    }
+
+    fn resume_cmd_with_program(
+        &self,
+        session_id: &str,
+        shell: &CommandShell,
+        program: &str,
+    ) -> String {
+        let mut args = self.resume_args(session_id);
+        // Only the selected ID is data; the preceding words are static flags.
+        let id = args.pop().expect("resume arguments always include an ID");
+        format!(
+            "{} {} {}",
+            shell.program(program, self.cli_name()),
+            args.join(" "),
+            shell.quote(&id)
+        )
+    }
+
+    /// Exact argv shared by shell commands and structured resume plans.
+    pub fn resume_args(&self, session_id: &str) -> Vec<String> {
+        let prefix: &[&str] = match self {
+            Agent::Codex => &["resume"],
+            Agent::Kimi | Agent::Pi | Agent::Yolop => &["--session"],
+            Agent::OpenCode => &["-s"],
+            Agent::Kiro => &["chat", "--resume-id"],
+            _ => &["--resume"],
+        };
+        prefix
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .chain(std::iter::once(session_id.to_string()))
+            .collect()
+    }
+
+    /// Whitelist UI mode labels; never parse caller-provided flags as argv.
+    pub fn resume_mode_args(&self, mode: Option<&str>) -> Result<Vec<String>, String> {
+        let label = mode.unwrap_or("default");
+        let flags = self
+            .resume_mode_options()
+            .iter()
+            .find_map(|(name, flags)| (*name == label).then_some(*flags))
+            .ok_or_else(|| format!("unsupported mode {label:?} for {}", self.slug()))?;
+        Ok(flags.split_ascii_whitespace().map(str::to_string).collect())
     }
 
     /// Permission/approval mode options for resuming a session with extra flags.
@@ -167,24 +200,23 @@ impl Agent {
         }
     }
 
-    /// Shell command to start a new session (base, without flags).
+    /// Static command spelling, before executable resolution.
     pub fn new_session_cmd(&self) -> &'static str {
-        match self {
-            Agent::ClaudeCode => "claude",
-            Agent::Codex => "codex",
-            Agent::Grok => "grok",
-            Agent::Kimi => "kimi",
-            Agent::Qwen => "qwen",
-            Agent::OpenCode => "opencode",
-            Agent::Pi => "pi",
-            Agent::OhMyPi => "omp",
-            Agent::Kiro => "kiro-cli chat",
-            Agent::CursorAgent => "cursor-agent",
-            Agent::Gemini => "gemini",
-            Agent::Hermes => "hermes",
-            Agent::Yolop => "yolop",
-            Agent::PrimeAgent => "prime-agent",
+        if *self == Agent::Kiro {
+            "kiro-cli chat"
+        } else {
+            self.cli_name()
         }
+    }
+
+    /// Freeze the selected executable before a shell command changes cwd.
+    pub fn new_session_command(&self, shell: &CommandShell) -> String {
+        let program = shell.program(&crate::config::agent_program(*self), self.cli_name());
+        let suffix = self
+            .new_session_cmd()
+            .strip_prefix(self.cli_name())
+            .expect("static executable prefix");
+        format!("{program}{suffix}")
     }
 
     /// Stable lowercase identifier used in settings and CLI filters.
@@ -231,7 +263,7 @@ impl Agent {
     pub fn supports_delete(self) -> bool {
         !matches!(
             self,
-            Agent::Grok | Agent::Kimi | Agent::Qwen | Agent::PrimeAgent
+            Agent::Grok | Agent::Kimi | Agent::Qwen | Agent::Gemini | Agent::PrimeAgent
         )
     }
 }
@@ -474,11 +506,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn valid_resume_id_rejects_options_and_unicode_controls() {
+        for id in [
+            "",
+            "-",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-skip-permissions",
+            "id\0tail",
+            "id\ntail",
+            "id\rtail",
+            "id\ttail",
+            "id\u{7f}tail",
+            "id\u{85}tail",
+            "id\u{9f}tail",
+        ] {
+            assert!(!valid_resume_id(id), "accepted unsafe ID: {id:?}");
+        }
+    }
+
+    #[test]
+    fn valid_resume_id_preserves_quotes_spaces_and_metacharacters() {
+        for id in [
+            "a'b; $(echo nope)",
+            "session with spaces",
+            " -literal",
+            " ",
+            "\u{c138}\u{c158}-id",
+        ] {
+            assert!(valid_resume_id(id), "rejected literal ID: {id:?}");
+            assert_eq!(Agent::Codex.resume_args(id), ["resume", id]);
+        }
+    }
+
+    #[test]
+    fn valid_resume_id_limits_bytes_not_characters() {
+        assert!(valid_resume_id(&"a".repeat(1024)));
+        assert!(!valid_resume_id(&"a".repeat(1025)));
+        let multibyte = "\u{e9}".repeat(512);
+        assert!(valid_resume_id(&multibyte));
+        assert!(!valid_resume_id(&format!("{multibyte}a")));
+    }
+
+    #[test]
     fn pi_resume_command_uses_selected_session_id() {
         assert_eq!(
-            Agent::Pi.resume_cmd(
+            Agent::Pi.resume_cmd_with_program(
                 "019e14f4-c9a5-76dc-b7b6-0613e602a620",
-                &crate::shell::CommandShell::Posix
+                &crate::shell::CommandShell::Posix,
+                "pi"
             ),
             "pi --session '019e14f4-c9a5-76dc-b7b6-0613e602a620'"
         );
@@ -489,12 +564,20 @@ mod tests {
         // A session id containing a single quote must not break out of the
         // quoted argument (broken command) or inject shell.
         assert_eq!(
-            Agent::ClaudeCode.resume_cmd("a'b", &crate::shell::CommandShell::Posix),
+            Agent::ClaudeCode.resume_cmd_with_program(
+                "a'b",
+                &crate::shell::CommandShell::Posix,
+                "claude"
+            ),
             r#"claude --resume 'a'\''b'"#
         );
         // PowerShell doubles the embedded quote instead of `'\''`.
         assert_eq!(
-            Agent::ClaudeCode.resume_cmd("a'b", &crate::shell::CommandShell::PowerShell),
+            Agent::ClaudeCode.resume_cmd_with_program(
+                "a'b",
+                &crate::shell::CommandShell::PowerShell,
+                "claude"
+            ),
             "claude --resume 'a''b'"
         );
     }
@@ -502,9 +585,10 @@ mod tests {
     #[test]
     fn yolop_resume_command_uses_selected_session_id() {
         assert_eq!(
-            Agent::Yolop.resume_cmd(
+            Agent::Yolop.resume_cmd_with_program(
                 "session_019e3db018a17450aba5407af5777237",
-                &crate::shell::CommandShell::Posix
+                &crate::shell::CommandShell::Posix,
+                "yolop"
             ),
             "yolop --session 'session_019e3db018a17450aba5407af5777237'"
         );
@@ -514,11 +598,11 @@ mod tests {
     fn kiro_and_prime_resume_commands_keep_the_selected_id() {
         let shell = CommandShell::Posix;
         assert_eq!(
-            Agent::Kiro.resume_cmd("older-session", &shell),
+            Agent::Kiro.resume_cmd_with_program("older-session", &shell, "kiro-cli"),
             "kiro-cli chat --resume-id 'older-session'"
         );
         assert_eq!(
-            Agent::PrimeAgent.resume_cmd("prime-session", &shell),
+            Agent::PrimeAgent.resume_cmd_with_program("prime-session", &shell, "prime-agent"),
             "prime-agent --resume 'prime-session'"
         );
     }
@@ -527,15 +611,15 @@ mod tests {
     fn grok_kimi_and_qwen_resume_commands_keep_the_selected_id() {
         let shell = CommandShell::Posix;
         assert_eq!(
-            Agent::Grok.resume_cmd("grok-session", &shell),
+            Agent::Grok.resume_cmd_with_program("grok-session", &shell, "grok"),
             "grok --resume 'grok-session'"
         );
         assert_eq!(
-            Agent::Kimi.resume_cmd("kimi-session", &shell),
+            Agent::Kimi.resume_cmd_with_program("kimi-session", &shell, "kimi"),
             "kimi --session 'kimi-session'"
         );
         assert_eq!(
-            Agent::Qwen.resume_cmd("qwen-session", &shell),
+            Agent::Qwen.resume_cmd_with_program("qwen-session", &shell, "qwen"),
             "qwen --resume 'qwen-session'"
         );
         assert!(!Agent::Grok.supports_delete());
@@ -548,9 +632,10 @@ mod tests {
     #[test]
     fn oh_my_pi_resume_command_uses_selected_session_id() {
         assert_eq!(
-            Agent::OhMyPi.resume_cmd(
+            Agent::OhMyPi.resume_cmd_with_program(
                 "019e14f4-c9a5-76dc-b7b6-0613e602a620",
-                &crate::shell::CommandShell::Posix
+                &crate::shell::CommandShell::Posix,
+                "omp"
             ),
             "omp --resume '019e14f4-c9a5-76dc-b7b6-0613e602a620'"
         );
