@@ -269,7 +269,7 @@ fn source_fingerprint(paths: &[PathBuf]) -> SourceFingerprint {
         hasher.update(device.to_le_bytes());
         hasher.update(inode.to_le_bytes());
     }
-    fingerprint.digest = format!("{:x}", hasher.finalize());
+    fingerprint.digest = crate::text::hex_lower(&hasher.finalize());
     fingerprint
 }
 
@@ -544,6 +544,16 @@ pub fn start_stale_scan(stale: &[Agent]) -> std::sync::mpsc::Receiver<ScanResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_source_digest_preserves_legacy_cache_encoding() {
+        let fingerprint = source_fingerprint(&[]);
+        assert!(fingerprint.complete);
+        assert_eq!(
+            fingerprint.digest,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
     use std::io::Write;
     use std::time::{Duration, SystemTime};
 

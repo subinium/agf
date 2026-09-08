@@ -15,12 +15,33 @@ Search the sessions your terminal agents already keep locally, then resume the r
 ## Install
 
 ```bash
-cargo install agf
-agf setup
+cargo install agf --locked
 agf
 ```
 
-Requires a Rust toolchain (`rustup` recommended). Prebuilt binaries for macOS, Linux, and Windows are also available on the [Releases page](https://github.com/subinium/agf/releases).
+Building with Cargo requires Rust **1.88 or newer** and a C compiler for bundled
+SQLite. `--locked` uses the dependency versions tested with the release.
+Cargo's `Adding ... (available: ...)` lines are version-selection information,
+not build failures; a newer dependency may require an API or Rust-version change.
+
+Prebuilt binaries for macOS, Linux, and Windows need no Rust toolchain and are
+available on the [Releases page](https://github.com/subinium/agf/releases).
+On macOS or Linux, Homebrew is another option:
+
+```bash
+brew install subinium/tap/agf
+```
+
+For parent-shell directory changes, run `agf setup`, then restart your shell or
+follow its reload instruction. This optional step edits your shell profile; the
+TUI, JSON commands and MCP server also work without it.
+
+### Upgrade
+
+Run `cargo install agf --locked` again, or `brew upgrade subinium/tap/agf` for a
+Homebrew installation. Check `agf --version` afterwards. If it still reports an
+older version, use `type -a agf` (PowerShell: `Get-Command agf -All`) to find a
+shell wrapper or an earlier Cargo/Homebrew executable on PATH.
 
 ### Quick Resume (no TUI)
 
@@ -34,10 +55,11 @@ agf resume project-name   # fuzzy-matches and resumes the best match directly
 agf search parser --agent codex --limit 10
 agf show SESSION_ID --agent codex --include-summaries
 agf resume-plan SESSION_ID --agent codex
+agf capabilities
 agf mcp --agent codex --project /absolute/project/path
 ```
 
-The first three commands return versioned JSON. They do not launch agents or
+The first four commands return versioned JSON. They do not launch agents or
 modify their stores; `resume-plan` returns literal arguments, working directory
 and scoped storage environment for review. The stdio MCP server uses the same
 read-only API. See [agent integration](docs/AGENT_INTEGRATION.md) for schemas,
@@ -66,7 +88,7 @@ Then you either dig through history files or start over.
 | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `prime-agent --resume <id>` | `~/.prime/agent/sessions/<id>.jsonl` |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` or `.jsonl` |
 | [Cursor CLI](https://cursor.com/docs/cli/overview) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy) |
-| [OpenCode](https://github.com/opencode-ai/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
+| [OpenCode](https://github.com/anomalyco/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
 | [Kiro](https://kiro.dev) | `kiro-cli chat --resume-id <id>` | Kiro v2 SQLite + Kiro v3 `~/.kiro/sessions/cli/` |
 | [pi](https://github.com/badlogic/pi-mono) | `pi --session <id>` | `~/.pi/agent/sessions/<cwd>/*.jsonl` |
 | [Hermes](https://github.com/NousResearch/hermes-agent) | `hermes --resume <id>` *(cwd-independent — resumes in your current shell directory)* | `~/.hermes/state.db` |
@@ -117,7 +139,7 @@ Pi profile/XDG extensions are not emulated; use the documented roots explicitly.
 
 - **Cross-agent search** — see all supported agents in one list
 - **Fuzzy search** — find sessions by project name, path, branch, or summary
-- **One-key resume** — resume the selected session with the right agent command
+- **Resume actions** — choose a session and launch the right agent command
 - **Quick resume** — `agf resume <query>` skips the TUI entirely
 - **Bulk delete** — `Ctrl+D` to multi-select and clean up stale sessions
 - **Project awareness** — git branches and Claude Code `--worktree` sessions surface in the UI
@@ -177,7 +199,15 @@ Also supports Unicode/CJK search, mouse navigation, agent filters, permission/ap
 
 ## Configuration
 
-Optional. Create `~/.config/agf/config.toml`:
+Optional. AGF uses the platform configuration directory:
+
+| Platform | Configuration file |
+|:---|:---|
+| Linux | `$XDG_CONFIG_HOME/agf/config.toml`, or `~/.config/agf/config.toml` |
+| macOS | `~/Library/Application Support/agf/config.toml` |
+| Windows | `%APPDATA%\agf\config.toml` |
+
+Create the file at the matching location:
 
 ```toml
 sort_by = "time"            # "time" | "name" | "agent"
@@ -191,11 +221,23 @@ You can also edit `search_scope` and `summary_search_count` interactively by pre
 
 ## Shell integration
 
-`agf setup` auto-detects your shell and installs the wrapper. Use `agf setup --shell powershell` (or another supported shell) when auto-detection is ambiguous.
+`agf setup` uses `$SHELL` when available; pass `--shell zsh`, `bash`, `fish`,
+`powershell` (Windows PowerShell 5.1), or `pwsh` (PowerShell 7) explicitly when
+detection is ambiguous.
 
-- **zsh / bash** — appends to `~/.zshrc` or `~/.bashrc`
-- **fish** — writes to `~/.config/fish/config.fish`
-- **PowerShell** (Windows or cross-platform `pwsh`) — writes to `$PROFILE.CurrentUserAllHosts` (`Documents\PowerShell\profile.ps1` on Windows, `~/.config/powershell/profile.ps1` elsewhere)
+- **zsh** — appends to `~/.zshrc`.
+- **bash** — appends to `~/.bash_profile` on macOS, `~/.bashrc` elsewhere.
+- **fish** — uses the platform configuration directory above, with
+  `fish/config.fish` instead of `agf/config.toml`.
+- **PowerShell** — on Windows, uses the Documents known folder with
+  `WindowsPowerShell/profile.ps1` for `powershell` or `PowerShell/profile.ps1`
+  for `pwsh`. Elsewhere it uses the platform configuration directory with
+  `powershell/profile.ps1`.
+
+Setup infers these paths; it does not query the active PowerShell host's
+`$PROFILE` or resolve custom zsh/fish profile locations. For a custom profile,
+including PowerShell or fish on macOS, add the matching initialization line to
+the profile your shell actually loads instead.
 
 If auto-detection misses your shell, run the matching `agf init` form manually:
 
@@ -206,7 +248,8 @@ agf init fish | source                               # fish
 agf init powershell | Out-String | Invoke-Expression # PowerShell
 ```
 
-After upgrading, run `agf setup` again (or restart your shell) to apply the latest wrapper.
+After upgrading, restart your shell or re-evaluate the matching initialization
+line to load the latest wrapper. Setup leaves an existing AGF marker unchanged.
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Requirements
@@ -219,7 +262,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 ```bash
 git clone https://github.com/subinium/agf.git
 cd agf
-cargo install --path .
+cargo install --path . --locked
 agf setup
 ```
 
@@ -234,7 +277,8 @@ opt-in, and project scope limits returned records rather than providing an OS
 sandbox. CSV preserves source values, including spreadsheet formula prefixes;
 import it as text when opening untrusted session data in a spreadsheet.
 
-**Amp** is not supported yet because its sessions are stored remotely, which makes it hard to reliably resolve local project paths from session metadata. We are monitoring upstream changes and will add support when feasible.
+Providers outside the supported-agent table, including Amp and GitHub Copilot,
+do not currently have AGF scanners.
 
 ## Built with
 
