@@ -414,12 +414,32 @@ fn parse_iso8601_ms(s: &str) -> Option<i64> {
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    crate::text::hex_lower(&hasher.finalize())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_hash_remains_compatible_after_digest_upgrade() {
+        for (input, expected) in [
+            (
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                "/Users/example/\u{d55c}\u{ae00} project",
+                "68420a821cf8c1c26704898224b641ad6f46b38ecc0851e1e1eb22f66266378f",
+            ),
+        ] {
+            assert_eq!(sha256_hex(input.as_bytes()), expected);
+        }
+    }
 
     fn fixture_file(label: &str, extension: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(

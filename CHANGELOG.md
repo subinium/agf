@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-09-08
+
+### Changed
+
+- Upgrade `dirs` to 7.0.0, `rusqlite` to 0.40.2 and `sha2` to 0.11.0.
+  `libsqlite3-sys` 0.38.2 replaces the earlier incompatible build macro, allowing
+  the Rust 1.88 MSRV to remain unchanged. Refresh only the related lockfile graph.
+- Remove the transitive `generic-array` 0.14 dependency through the SHA-2 update;
+  disable unused SHA-2 allocation/OID features.
+
+### Fixed
+
+- Adapt cache/Gemini digest formatting to the new SHA-2 output type while
+  retaining identical lowercase, zero-padded SHA-256 identifiers. Add fixed
+  digest vectors, Unicode project-path coverage and exhaustive byte-hex tests.
+
+### Docs
+
+- Recommend `cargo install agf --locked`, explain dependency availability notices
+  and distinguish Rust/C build requirements from prebuilt binary installation.
+- Add Homebrew and upgrade/PATH troubleshooting, accurate OS-specific AGF config
+  locations, and explicit optional shell setup/reload behavior and limitations.
+- Correct the OpenCode upstream link and update the JSON envelope examples.
+
 ## [0.15.0] - 2026-09-06
 
 ### Added

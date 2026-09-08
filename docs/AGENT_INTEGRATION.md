@@ -84,7 +84,7 @@ and `content` includes one text item containing the same serialized JSON.
 ```json
 {
   "schema_version": 1,
-  "agf_version": "0.15.0",
+  "agf_version": "0.15.1",
   "ok": true,
   "data": {
     "sessions": [],
@@ -99,7 +99,7 @@ and `content` includes one text item containing the same serialized JSON.
 ```json
 {
   "schema_version": 1,
-  "agf_version": "0.15.0",
+  "agf_version": "0.15.1",
   "ok": false,
   "error": { "code": "not_found", "message": "session not found within the requested scope" }
 }

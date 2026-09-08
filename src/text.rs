@@ -1,4 +1,4 @@
-//! Display-width helpers shared by every renderer (TUI, `list`, `stats`, `watch`).
+//! Text encoding and display-width helpers shared by scanners and renderers.
 //!
 //! Rust's `{:<width$}` pads by `char` count, but a terminal lays text out in
 //! *display columns* — a Hangul syllable or CJK ideograph occupies two. Mixing
@@ -8,6 +8,17 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+/// Encode bytes as lowercase hex, including leading zeroes in each byte.
+pub fn hex_lower(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
+}
 
 /// Remove terminal control sequences from untrusted session metadata.
 ///
@@ -142,6 +153,15 @@ fn truncate_with(s: &str, max_width: usize, ellipsis: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_encoding_matches_byte_formatting() {
+        assert_eq!(hex_lower(&[]), "");
+        assert_eq!(hex_lower(&[0, 1, 15, 16, 128, 255]), "00010f1080ff");
+        let bytes: Vec<u8> = (0..=255).collect();
+        let expected: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(hex_lower(&bytes), expected);
+    }
 
     #[test]
     fn fit_produces_exact_columns_for_ascii_and_cjk() {

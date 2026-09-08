@@ -1,33 +1,23 @@
-# agf 0.15.0
+# agf 0.15.1
 
-## Agent Tools
+## Dependency Refresh
 
-- Versioned, read-only JSON search, exact session metadata, resume plans and
-  capabilities. No hidden TUI or native-agent execution.
-- Local stdio MCP using the official Rust SDK, with fixed scopes, bounded
-  requests, modern/legacy interoperability tests and a portable Skill.
-- Resume plans preserve literal arguments, the selected executable, cwd and
-  storage-root environment without modifying the parent shell environment.
+- Upgrade `dirs` 6 -> 7, `rusqlite` 0.39 -> 0.40.2 and `sha2` 0.10 -> 0.11.
+- Remove the old transitive `generic-array` dependency. SHA-256 cache and Gemini
+  project identifiers keep their existing encoding, verified with fixed vectors.
+- Keep Rust 1.88 support: `libsqlite3-sys` 0.38.2 fixes the build-macro issue that
+  previously prevented the SQLite upgrade. No unsafe MSRV override is used.
 
-## Compatibility And Safety
+## Installation And Documentation
 
-- SLT 0.24.0 and current/legacy Gemini session formats.
-- Verified provider root overrides, independent Codex SQLite storage, explicit
-  Cursor executable selection and readonly source scans.
-- Configuration preservation and secret-safe diagnostics, Unicode boundary
-  fixes, bounded SQLite title queries, cache recovery and stdout error handling.
-- Correct browse viewport/click boundaries, grapheme search cursors and explicit
-  unknown process state on unsupported backends.
+Use `cargo install agf --locked` to install the release-tested dependency graph,
+or use the prebuilt release archives / `brew install subinium/tap/agf`.
+Cargo's `(available: ...)` output is version-selection information, not an error.
 
-## Boundaries
+The README now documents OS-specific configuration paths, optional shell setup,
+profile selection limitations, wrapper reloads and Cargo/Homebrew PATH conflicts.
+The OpenCode link and JSON envelope examples are refreshed.
 
-The existing 14 scanner providers remain; no new Copilot scanner or web port.
-Gemini deletion uses its native workflow. Codex user configuration is supported,
-not its full project/profile/managed stack; Oh My Pi profile/XDG extensions are
-not emulated. Physical OS IME and real provider execution are distinct from
-fixture-based protocol and terminal tests.
-
-See [Agent Integration](https://github.com/subinium/agf/blob/v0.15.0/docs/AGENT_INTEGRATION.md)
-for contracts and setup, and [the changelog](https://github.com/subinium/agf/blob/v0.15.0/CHANGELOG.md)
-for details. The release workflow gates artifact publication on quality checks
-and an exact registry-installed JSON/MCP consumer.
+No providers, permission defaults or JSON schema fields change in this patch.
+See [the changelog](https://github.com/subinium/agf/blob/v0.15.1/CHANGELOG.md)
+and [agent integration](https://github.com/subinium/agf/blob/v0.15.1/docs/AGENT_INTEGRATION.md).
