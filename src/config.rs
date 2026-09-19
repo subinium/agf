@@ -5,7 +5,20 @@ use std::sync::OnceLock;
 use crate::error::AgfError;
 use crate::model::Agent;
 
+#[cfg(test)]
+static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+/// Only isolated unit-test subprocesses can replace the native home resolver.
+#[cfg(test)]
+pub(crate) fn set_home_dir_for_test(home: PathBuf) -> Result<(), PathBuf> {
+    TEST_HOME.set(home)
+}
+
 pub fn home_dir() -> Result<PathBuf, AgfError> {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.get() {
+        return Ok(home.clone());
+    }
     dirs::home_dir().ok_or(AgfError::NoHomeDir)
 }
 
@@ -225,6 +238,11 @@ pub fn gemini_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".gemini"))
 }
 
+pub fn antigravity_dir() -> Result<PathBuf, AgfError> {
+    // No verified CLI storage override: scanning and agy must use the same root.
+    Ok(home_dir()?.join(".gemini").join("antigravity-cli"))
+}
+
 pub fn cursor_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".cursor"))
 }
@@ -253,6 +271,10 @@ pub fn hermes_dir() -> Result<PathBuf, AgfError> {
 }
 
 pub fn yolop_sessions_dir() -> Result<PathBuf, AgfError> {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.get() {
+        return Ok(home.join("data").join("yolop").join("sessions"));
+    }
     dirs::data_dir()
         .map(|d| d.join("yolop").join("sessions"))
         .ok_or(AgfError::NoDataDir)
@@ -346,6 +368,10 @@ fn expand_tilde(path: PathBuf) -> Result<PathBuf, AgfError> {
 }
 
 pub fn kiro_data_dir() -> Result<PathBuf, AgfError> {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.get() {
+        return Ok(home.join("localappdata").join("kiro-cli"));
+    }
     // Kiro CLI stores data via dirs::data_local_dir()
     // macOS: ~/Library/Application Support/kiro-cli/
     // Linux: ~/.local/share/kiro-cli/
@@ -562,6 +588,15 @@ pub fn data_sources(agent: Agent) -> Vec<PathBuf> {
             }
             if let Ok(dir) = prime_sessions_dir() {
                 sources.push(dir);
+            }
+            sources
+        }
+        Agent::Antigravity => {
+            let mut sources = Vec::new();
+            if let Ok(dir) = antigravity_dir() {
+                sources.extend(sqlite_sources(dir.join("conversation_summaries.db")));
+                sources.push(dir.join("brain"));
+                sources.push(dir.join("conversations"));
             }
             sources
         }
@@ -1216,6 +1251,91 @@ mod tests {
     }
 
     #[test]
+    fn compat_antigravity_default_root_and_deletion_preserve_all_files() {
+        let fixture = CompatFixture::new();
+        run_child(
+            fixture
+                .child("antigravity")
+                .env("ANTIGRAVITY_CLI_HOME", "../unsupported-store")
+                .env("GEMINI_CLI_HOME", "../unrelated-gemini-home"),
+        );
+    }
+
+    fn assert_compat_antigravity(root: &std::path::Path) {
+        let store = root.join("home/.gemini/antigravity-cli");
+        let id = "c96a140c-d4c0-4996-9b9b-03a0468b1fcc";
+        let files = [
+            store.join("conversation_summaries.db"),
+            store.join("conversation_summaries.db-wal"),
+            store.join("conversations").join(format!("{id}.db")),
+            store
+                .join("brain")
+                .join(id)
+                .join(".system_generated/logs/transcript.jsonl"),
+        ];
+        for path in &files {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"synthetic provider data: never delete").unwrap();
+        }
+        // dirs uses FOLDERID_Profile on Windows, not HOME/USERPROFILE. Check
+        // native path construction without requiring or creating that store;
+        // all filesystem sentinels remain inside the temporary fixture.
+        #[cfg(windows)]
+        let expected_home = dirs::home_dir().unwrap();
+        #[cfg(not(windows))]
+        let expected_home = root.join("home");
+        let expected_store = expected_home.join(".gemini").join("antigravity-cli");
+        assert_eq!(antigravity_dir().unwrap(), expected_store);
+        let sources = data_sources(Agent::Antigravity);
+        assert_eq!(
+            sources,
+            vec![
+                expected_store.join("conversation_summaries.db"),
+                expected_store.join("conversation_summaries.db-wal"),
+                expected_store.join("brain"),
+                expected_store.join("conversations"),
+            ]
+        );
+        let session = crate::model::Session {
+            agent: Agent::Antigravity,
+            session_id: id.into(),
+            project_name: "fixture".into(),
+            project_path: root.join("cwd").to_string_lossy().into_owned(),
+            summaries: Vec::new(),
+            timestamp: 0,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+            interactive: true,
+        };
+        let before = files
+            .iter()
+            .map(|path| {
+                (
+                    std::fs::read(path).unwrap(),
+                    std::fs::metadata(path).unwrap().modified().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let error = crate::delete::delete_session(&session).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        let plan = crate::action::resume_plan(&session, None).unwrap();
+        assert_eq!(plan.args, ["--conversation", id]);
+        assert!(plan.env.is_empty());
+        let after = files
+            .iter()
+            .map(|path| {
+                (
+                    std::fs::read(path).unwrap(),
+                    std::fs::metadata(path).unwrap().modified().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(before, after);
+        assert!(!root.join("unsupported-store").exists());
+    }
+
+    #[test]
     fn compat_cursor_never_selects_an_unrelated_agent_implicitly() {
         let fixture = CompatFixture::new();
         let executable =
@@ -1634,6 +1754,7 @@ mod tests {
         };
         let root = PathBuf::from(std::env::var_os("AGF_COMPAT_ROOT").unwrap());
         match case.as_str() {
+            "antigravity" => assert_compat_antigravity(&root),
             "relative-executable" => assert_compat_relative_executable(&root),
             "scan-delete" => assert_compat_scan_delete(&root),
             "rebase" => assert_compat_rebase(&root),

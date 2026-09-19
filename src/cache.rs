@@ -58,7 +58,8 @@ use crate::model::{Agent, Session};
 //   to the top of the time sort.
 // Bumped to 10 in v0.15.0: fingerprints include followed file-symlink targets
 // and explicitly reject incomplete filesystem observations as fresh state.
-const CACHE_VERSION: u32 = 10;
+// Bumped to 11: Antigravity agent registered.
+const CACHE_VERSION: u32 = 11;
 
 /// The binary version stamped into every cache write; any mismatch on read
 /// invalidates the whole cache (see `parse_cache`).

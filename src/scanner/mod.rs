@@ -3,6 +3,7 @@ use std::thread;
 use crate::error::AgfError;
 use crate::model::{Agent, Session, compare_sessions, normalize_timestamp};
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod cursor_agent;
@@ -315,6 +316,7 @@ pub fn scan_agent(agent: Agent) -> Result<Vec<Session>, AgfError> {
         Agent::Hermes => hermes::scan(),
         Agent::Yolop => yolop::scan(),
         Agent::PrimeAgent => prime_agent::scan(),
+        Agent::Antigravity => antigravity::scan(),
     }
 }
 

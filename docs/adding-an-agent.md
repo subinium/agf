@@ -49,8 +49,11 @@ Say the new agent is `Foo`, CLI `foo`, sessions under `~/.foo/sessions/`.
    *shape* can change within a single released package version (a new agent key
    alone doesn't require it — the `agf_version` stamp forces a rescan on upgrade).
 
-5. **`src/delete.rs`** — add the `Agent::Foo` arm in `delete_agent_sessions()` and
-   implement `delete_foo_sessions(ids: &HashSet<&str>)`.
+5. **`src/delete.rs`** — add the `Agent::Foo` arm in `delete_agent_sessions()`.
+   Default to `Unsupported` and exclude Foo from `Agent::supports_delete()` when
+   the provider coordinates databases, sidecars or active sessions. Antigravity
+   and Gemini are examples. Only implement `delete_foo_sessions(ids: &HashSet<&str>)`
+   after validating the complete upstream deletion contract.
    - It receives a **batch**: bulk delete does one pass per agent, so do the walk
      or open the database once and act on every id in `ids`.
    - **Scope deletion to validated sessions** — match by id in file content or by a
@@ -60,6 +63,7 @@ Say the new agent is `Foo`, CLI `foo`, sessions under `~/.foo/sessions/`.
    - Bound what you read: the id lives in a header, so use `read_first_line` /
      `read_head_lines` rather than slurping transcripts.
    - Add a test proving a sibling session survives.
+   - Never turn database or file-removal errors into successful deletion.
 
 6. **Tests + docs** — unit-test the scanner against a fixture session, add a
    `resume_cmd` test, add a row to the *Supported agents* and storage tables in

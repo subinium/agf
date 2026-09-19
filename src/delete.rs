@@ -114,6 +114,10 @@ fn delete_agent_sessions(agent: Agent, ids: &HashSet<&str>) -> Result<HashSet<St
             io::ErrorKind::Unsupported,
             "Prime Agent deletion is disabled: use Prime Agent's /resume picker so active daemon sessions are protected",
         )),
+        Agent::Antigravity => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Antigravity deletion is disabled: use agy's /resume picker so conversation databases, artifacts, and active sessions stay consistent",
+        )),
     }
 }
 
@@ -623,6 +627,22 @@ mod tests {
 
     fn ids(list: &[&'static str]) -> HashSet<&'static str> {
         list.iter().copied().collect()
+    }
+
+    #[test]
+    fn antigravity_deletion_is_refused_without_inspecting_provider_storage() {
+        let error = delete_agent_sessions(
+            Agent::Antigravity,
+            &ids(&["c96a140c-d4c0-4996-9b9b-03a0468b1fcc"]),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("/resume"));
+        let selection = HashMap::from([(
+            Agent::Antigravity,
+            HashSet::from(["c96a140c-d4c0-4996-9b9b-03a0468b1fcc".to_owned()]),
+        )]);
+        assert!(delete_selection(&selection).is_empty());
     }
 
     fn make_dir(_name: &str) -> std::path::PathBuf {

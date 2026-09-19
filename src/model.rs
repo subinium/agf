@@ -29,6 +29,7 @@ pub enum Agent {
     Hermes,
     Yolop,
     PrimeAgent,
+    Antigravity,
 }
 
 impl fmt::Display for Agent {
@@ -48,6 +49,7 @@ impl fmt::Display for Agent {
             Agent::Hermes => write!(f, "Hermes"),
             Agent::Yolop => write!(f, "Yolop"),
             Agent::PrimeAgent => write!(f, "Prime Agent"),
+            Agent::Antigravity => write!(f, "Antigravity"),
         }
     }
 }
@@ -69,6 +71,7 @@ impl Agent {
             Agent::Hermes => (168, 85, 247),     // #A855F7 purple (Nous Research)
             Agent::Yolop => (34, 197, 94),       // #22C55E green
             Agent::PrimeAgent => (99, 102, 241), // #6366F1 indigo
+            Agent::Antigravity => (142, 68, 173), // #8E44AD purple (Antigravity)
         }
     }
 
@@ -88,6 +91,7 @@ impl Agent {
             Agent::Hermes,
             Agent::Yolop,
             Agent::PrimeAgent,
+            Agent::Antigravity,
         ]
     }
 
@@ -108,6 +112,7 @@ impl Agent {
             Agent::Hermes => "hermes",
             Agent::Yolop => "yolop",
             Agent::PrimeAgent => "prime-agent",
+            Agent::Antigravity => "agy",
         }
     }
 
@@ -145,6 +150,7 @@ impl Agent {
             Agent::Kimi | Agent::Pi | Agent::Yolop => &["--session"],
             Agent::OpenCode => &["-s"],
             Agent::Kiro => &["chat", "--resume-id"],
+            Agent::Antigravity => &["--conversation"],
             _ => &["--resume"],
         };
         prefix
@@ -196,6 +202,13 @@ impl Agent {
                 ("plan (read-only)", " --plan"),
                 ("yolo (no approval)", " --yolo"),
             ],
+            Agent::Antigravity => &[
+                ("default", ""),
+                ("accept-edits", " --mode accept-edits"),
+                ("plan (read-only)", " --mode plan"),
+                ("bypass permissions", " --dangerously-skip-permissions"),
+                ("sandbox", " --sandbox"),
+            ],
             _ => &[("default", "")],
         }
     }
@@ -236,6 +249,7 @@ impl Agent {
             Agent::Hermes => "hermes",
             Agent::Yolop => "yolop",
             Agent::PrimeAgent => "prime-agent",
+            Agent::Antigravity => "antigravity",
         }
     }
 
@@ -256,6 +270,7 @@ impl Agent {
             "hermes" => Some(Agent::Hermes),
             "yolop" => Some(Agent::Yolop),
             "prime" | "prime-agent" | "prime-intellect" => Some(Agent::PrimeAgent),
+            "antigravity" | "agy" => Some(Agent::Antigravity),
             _ => None,
         }
     }
@@ -263,7 +278,12 @@ impl Agent {
     pub fn supports_delete(self) -> bool {
         !matches!(
             self,
-            Agent::Grok | Agent::Kimi | Agent::Qwen | Agent::Gemini | Agent::PrimeAgent
+            Agent::Grok
+                | Agent::Kimi
+                | Agent::Qwen
+                | Agent::Gemini
+                | Agent::PrimeAgent
+                | Agent::Antigravity
         )
     }
 }
@@ -473,7 +493,6 @@ pub enum Action {
     Cd,
     Pin,
     Delete,
-    Back,
 }
 
 impl Action {
@@ -496,7 +515,6 @@ impl fmt::Display for Action {
             Action::Cd => write!(f, "Go to Directory"),
             Action::Pin => write!(f, "Pin Session"),
             Action::Delete => write!(f, "Delete Session"),
-            Action::Back => write!(f, "← Back"),
         }
     }
 }
@@ -626,6 +644,7 @@ mod tests {
         assert!(!Agent::Kimi.supports_delete());
         assert!(!Agent::Qwen.supports_delete());
         assert!(!Agent::PrimeAgent.supports_delete());
+        assert!(!Agent::Antigravity.supports_delete());
         assert!(Agent::Codex.supports_delete());
     }
 
@@ -639,6 +658,22 @@ mod tests {
             ),
             "omp --resume '019e14f4-c9a5-76dc-b7b6-0613e602a620'"
         );
+    }
+
+    #[test]
+    fn antigravity_resume_command_uses_conversation_flag() {
+        assert_eq!(
+            Agent::Antigravity.resume_cmd_with_program(
+                "c96a140c-d4c0-4996-9b9b-03a0468b1fcc",
+                &crate::shell::CommandShell::Posix,
+                "agy"
+            ),
+            "agy --conversation 'c96a140c-d4c0-4996-9b9b-03a0468b1fcc'"
+        );
+        assert_eq!(Agent::parse("agy"), Some(Agent::Antigravity));
+        assert_eq!(Agent::parse("antigravity"), Some(Agent::Antigravity));
+        assert_eq!(Agent::Antigravity.slug(), "antigravity");
+        assert_eq!(Agent::Antigravity.cli_name(), "agy");
     }
 
     #[test]

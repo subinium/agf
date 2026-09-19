@@ -1,23 +1,49 @@
-# agf 0.15.1
+# agf 0.16.0
 
-## Dependency Refresh
+## Antigravity And Terminal Runtime
 
-- Upgrade `dirs` 6 -> 7, `rusqlite` 0.39 -> 0.40.2 and `sha2` 0.10 -> 0.11.
-- Remove the old transitive `generic-array` dependency. SHA-256 cache and Gemini
-  project identifiers keep their existing encoding, verified with fixed vectors.
-- Keep Rust 1.88 support: `libsqlite3-sys` 0.38.2 fixes the build-macro issue that
-  previously prevented the SQLite upgrade. No unsafe MSRV override is used.
+- Add Google Antigravity CLI discovery and exact `agy --conversation <id>`
+  resume, building on @VirtoTran's contribution in #95. Thank you for the
+  initial integration.
+- Read bounded SQLite/transcript metadata without modifying agent stores.
+  Preserve read failures, non-interactive filtering and exact session identity.
+- Leave Antigravity direct deletion disabled because native cleanup also
+  coordinates conversation artifacts and active-session state.
+- Upgrade SuperLightTUI from 0.24.0 to 0.25.0 while retaining Rust 1.88 support.
 
-## Installation And Documentation
+## UI And Navigation
 
-Use `cargo install agf --locked` to install the release-tested dependency graph,
-or use the prebuilt release archives / `brew install subinium/tap/agf`.
-Cargo's `(available: ...)` output is version-selection information, not an error.
+- Align headers, menu columns and responsive footer keys. Keep Help, Settings
+  and session details usable in compact terminals, including 20x8 views.
+- Use F1 for Help, F2 for search scope, F3/F4 for summaries and Ctrl+L for
+  details. Literal `?`, `[` and `]`, plus Left/Right, remain search input.
+- Preserve input order around action transitions, reset user searches to the
+  best match and prevent Escape from triggering a simultaneous confirmation.
+- Agent-menu digits and Enter both open the permission picker. Native
+  permission defaults and explicit confirmation requirements are unchanged.
+- Distinguish scanning, empty results and provider failures; keep urgent action
+  errors visible even in narrow views or during a concurrent refresh failure.
 
-The README now documents OS-specific configuration paths, optional shell setup,
-profile selection limitations, wrapper reloads and Cargo/Homebrew PATH conflicts.
-The OpenCode link and JSON envelope examples are refreshed.
+## Appearance And Color Roles
 
-No providers, permission defaults or JSON schema fields change in this patch.
-See [the changelog](https://github.com/subinium/agf/blob/v0.15.1/CHANGELOG.md)
-and [agent integration](https://github.com/subinium/agf/blob/v0.15.1/docs/AGENT_INTEGRATION.md).
+- Add persistent Auto, Dark and Light settings. Auto uses the startup
+  `COLORFGBG` hint when available and otherwise selects Dark.
+- Keep pointers, menu numbers, pins and selection surfaces neutral. Use agent
+  colors only for agent names, cyan for search matches/footer keys, and
+  semantic colors only for status messages and destructive actions.
+- Maintain readable truecolor/256-color text and a conservative neutral
+  fallback for 16-color terminals. NO_COLOR retains structural selection and
+  status cues without emitting color codes.
+- Apply the same policy to `agf watch`, separating selection from process status.
+
+## Validation And Compatibility
+
+- Keep the existing JSON/MCP schema and read-only provider-storage boundaries.
+- Add regression coverage for color roles, Unicode, resizing, input order,
+  read-only storage, exact native handoff and terminal cleanup.
+- Validate debug/release behavior with isolated synthetic fixtures. Actual
+  provider accounts and physical OS IME composition are not covered by these
+  automated tests.
+
+Install a published release with `cargo install agf --locked`, use the release
+archives, or use `brew install subinium/tap/agf` once its formula is updated.

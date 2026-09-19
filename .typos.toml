@@ -1,0 +1,6 @@
+# Rust crate names and the plural SQL statement identifier are intentional.
+[default.extend-words]
+ratatui = "ratatui"
+
+[default.extend-identifiers]
+DELETEs = "DELETEs"

@@ -83,7 +83,7 @@ pub fn generate_command(
         }
         Action::Cd if session.project_path.is_empty() => None,
         Action::Cd => Some(shell.cd_only(&quoted_path)),
-        Action::Delete | Action::Back | Action::Pin => None,
+        Action::Delete | Action::Pin => None,
     }
 }
 
@@ -97,7 +97,6 @@ pub fn action_preview(session: &Session, action: Action) -> String {
         Action::Cd => shell.cd_only(&shell.quote(&session.display_path())),
         Action::Pin => "toggle pin".to_string(),
         Action::Delete => "remove session data".to_string(),
-        Action::Back => "return to session list".to_string(),
     }
 }
 
@@ -236,6 +235,25 @@ mod tests {
         s.agent = Agent::PrimeAgent;
         assert_eq!(resume_launch_path(&s), "");
         assert_eq!(s.agent.resume_args(&s.session_id), ["--resume", "sid"]);
+    }
+
+    #[test]
+    fn antigravity_resume_plan_uses_conversation_and_mode_flags() {
+        let mut s = session("/tmp/agf-project");
+        s.agent = Agent::Antigravity;
+        s.session_id = "c96a140c-d4c0-4996-9b9b-03a0468b1fcc".to_string();
+        let plan = test_plan(&s, Some("accept-edits")).unwrap();
+        assert_eq!(plan.agent, "antigravity");
+        assert_eq!(
+            plan.args,
+            [
+                "--conversation",
+                "c96a140c-d4c0-4996-9b9b-03a0468b1fcc",
+                "--mode",
+                "accept-edits"
+            ]
+        );
+        assert_eq!(plan.cwd.as_deref(), Some("/tmp/agf-project"));
     }
 
     #[test]

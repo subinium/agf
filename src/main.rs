@@ -18,6 +18,10 @@ mod text;
 mod tui;
 mod watch;
 
+#[cfg(test)]
+#[path = "../tests/support/antigravity_cli.rs"]
+mod antigravity_cli_tests;
+
 use std::io::IsTerminal;
 use std::io::Write;
 
@@ -163,7 +167,11 @@ enum Commands {
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> anyhow::Result<()> {
-    let cli = match Cli::try_parse() {
+    run_with_args(std::env::args_os())
+}
+
+fn run_with_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> anyhow::Result<()> {
+    let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(error) if !error.use_stderr() => return write_stdout(error.to_string().as_bytes()),
         Err(error) => error.exit(),

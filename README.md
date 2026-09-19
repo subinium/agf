@@ -87,6 +87,7 @@ Then you either dig through history files or start over.
 | [Qwen Code](https://github.com/QwenLM/qwen-code) | `qwen --resume <id>` | `$QWEN_RUNTIME_DIR/projects/` or `~/.qwen/projects/` |
 | [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `prime-agent --resume <id>` | `~/.prime/agent/sessions/<id>.jsonl` |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini --resume <id>` | `~/.gemini/tmp/<project>/chats/session-*.json` or `.jsonl` |
+| [Antigravity CLI](https://antigravity.google/docs/cli/conversations/) | `agy --conversation <id>` | `~/.gemini/antigravity-cli/conversation_summaries.db` + `brain/<id>/.system_generated/logs/transcript.jsonl` |
 | [Cursor CLI](https://cursor.com/docs/cli/overview) | `cursor-agent --resume <id>` | `~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy) |
 | [OpenCode](https://github.com/anomalyco/opencode) | `opencode -s <id>` | `~/.local/share/opencode/opencode.db` |
 | [Kiro](https://kiro.dev) | `kiro-cli chat --resume-id <id>` | Kiro v2 SQLite + Kiro v3 `~/.kiro/sessions/cli/` |
@@ -112,6 +113,7 @@ Then you either dig through history files or start over.
 | Kiro | SQLite + JSON/JSONL | v2: macOS `~/Library/Application Support/kiro-cli/data.sqlite3`, Linux `~/.local/share/kiro-cli/data.sqlite3`<br>v3: `$KIRO_HOME/sessions/cli/` or `~/.kiro/sessions/cli/` |
 | Cursor CLI | SQLite + JSONL/TXT | `~/.cursor/chats/<workspace>/<id>/store.db` (metadata; required for `.jsonl` to be resumable)<br>`~/.cursor/projects/*/agent-transcripts/<id>/<id>.jsonl` (Composer 2+ transcript)<br>`~/.cursor/projects/*/agent-transcripts/<id>.txt` (legacy transcript) |
 | Gemini | JSON + JSONL | `~/.gemini/tmp/<project>/chats/session-*.json` or `.jsonl`<br>`<project>` is a named dir or SHA-256 hash of the project path<br>Project paths resolved via `~/.gemini/projects.json` |
+| Antigravity | SQLite + JSONL | `~/.gemini/antigravity-cli/conversation_summaries.db` (metadata)<br>`brain/<id>/.system_generated/logs/transcript.jsonl` (bounded prompt preview) |
 | Hermes | SQLite | `~/.hermes/state.db` (sessions + messages)<br>JSON dumps in `~/.hermes/sessions/session_<id>.json`<br>Hermes is cwd-independent — resume runs in your current shell directory |
 | Yolop | JSONL + JSON | macOS: `~/Library/Application Support/yolop/sessions/<id>/`<br>Linux: `$XDG_DATA_HOME/yolop/sessions/<id>/`<br>Windows: `%APPDATA%\yolop\sessions\<id>\` |
 
@@ -134,11 +136,19 @@ Resuming freezes the resolved executable and applicable storage roots before
 changing directory. A generic `agent` found on PATH is not automatically assumed
 to be Cursor. Codex project-trust/profile/managed configuration layers and Oh My
 Pi profile/XDG extensions are not emulated; use the documented roots explicitly.
+Antigravity currently uses its default `~/.gemini/antigravity-cli` storage only;
+`ANTIGRAVITY_CLI_HOME` is not a verified upstream override and is not supported.
+Its previews are bounded title/prompt excerpts, not a full conversation export.
+Unreadable or incompatible storage is reported as a scan error; AGF does not
+repair or rewrite the provider's files.
+Records missing from Antigravity's summary index require a matching conversation
+database or WAL, and are shown only with `--include-non-interactive` because
+their parent/subagent status is unknown.
 
 ## Features
 
 - **Cross-agent search** — see all supported agents in one list
-- **Fuzzy search** — find sessions by project name, path, branch, or summary
+- **Fuzzy search** — find sessions by project name, path, or branch; include summaries with `F2`
 - **Resume actions** — choose a session and launch the right agent command
 - **Quick resume** — `agf resume <query>` skips the TUI entirely
 - **Bulk delete** — `Ctrl+D` to multi-select and clean up stale sessions
@@ -150,14 +160,49 @@ Also supports Unicode/CJK search, mouse navigation, agent filters, permission/ap
 
 | Key | Action |
 |:---|:---|
-| Type anything | Fuzzy search |
+| Type text, including `?`, `[` and `]` | Edit fuzzy search |
+| `←` `→` | Move the search caret |
 | `↑` `↓` / `Ctrl+K` `Ctrl+J` | Navigate |
 | `Enter` | Open action menu |
 | `Tab` / `Shift+Tab` | Cycle agent filter |
-| `→` / `Ctrl+L` | Preview session |
+| `Ctrl+L` | Session details |
+| `F1` | Help / settings |
+| `F2` | Toggle summary search (off by default) |
+| `F3` / `F4` | Previous / next summary |
+| `Ctrl+S` / `Ctrl+G` | Cycle sort / toggle project grouping |
 | `Ctrl+D` | Bulk delete |
-| `?` | Help / settings |
+| `Ctrl+U` | Clear search |
 | `Esc` | Quit |
+
+The active search scope is shown in Browse. Editing the query or changing the
+agent filter selects the first match; background refreshes preserve the selected
+session when it is still present. `Enter` opens actions, not session details.
+
+### Appearance
+
+Dark and light palettes keep the selected row, search matches, and status text
+distinct. Selection also uses a `>` marker, and visible matches are underlined;
+neither depends on color alone. `NO_COLOR=1 agf` disables foreground/background
+colors while retaining these cues and the same keys.
+
+Navigation markers, menu numbers, pins, and selection backgrounds are neutral
+so they cannot be mistaken for an agent's identity color. Agent colors apply
+only to agent names; cyan marks search matches and footer keys. Success,
+warning, and danger colors apply to the relevant message or action, not to the
+surrounding counts or navigation markers.
+
+On 16-color terminals, AGF uses high-contrast neutral text instead of unreliable
+brand/status hue approximations. Selection markers, bold text, underlines, and
+status wording remain available.
+
+`agf watch` uses the same appearance and color roles. Its neutral selection
+pointer is separate from the running, stopped, or unknown process-status glyph.
+
+Appearance defaults to **Auto**, which uses the terminal's `COLORFGBG` background
+hint when available and otherwise uses **Dark**. Open `F1` -> Settings to choose
+**Auto**, **Dark**, or **Light**. Changes apply immediately; a `+` notice confirms
+saving to your configuration, while `!` reports a failed save. AGF does not query
+the terminal background or continuously track the terminal's theme.
 
 <details>
 <summary>Full keybindings</summary>
@@ -166,16 +211,53 @@ Also supports Unicode/CJK search, mouse navigation, agent filters, permission/ap
 
 | Key | Action |
 |:---|:---|
-| Type anything | Fuzzy search |
+| Type text, including `?`, `[` and `]` | Edit fuzzy search |
+| `←` `→` | Move the search caret without opening details |
 | `↑` `↓` / `Ctrl+K` `Ctrl+J` | Navigate |
-| `[` `]` | Cycle session summary |
+| Mouse wheel | Navigate sessions |
+| `F3` / `F4` | Previous / next session summary |
 | `Enter` | Open action menu |
-| `→` / `Ctrl+L` | Preview session details |
+| `Ctrl+L` | Open session details |
 | `Tab` / `Shift+Tab` | Cycle agent filter |
 | `Ctrl+S` | Cycle sort (time / name / agent) |
+| `Ctrl+G` | Toggle project grouping |
 | `Ctrl+D` | Enter bulk delete mode |
-| `?` | Help / settings |
+| `Ctrl+U` | Clear search |
+| `F1` | Open Help / settings |
+| `F2` | Toggle search scope: name/path/branch or include summaries |
 | `Esc` | Quit |
+
+### Help (`F1`)
+
+| Key | Action |
+|:---|:---|
+| `Tab` / `Shift+Tab` | Switch Keys / Settings tabs |
+| `PgUp` / `PgDn`, `Home` / `End`, mouse wheel | Scroll the Keys tab |
+| `↑` `↓` | Select a Settings field |
+| `Enter` / `Space` | Toggle the selected setting or cycle Appearance |
+| `+` / `-` | Increase / decrease the selected summary count |
+| `Esc` / `F1` | Return to the mode that opened Help |
+
+`F1` opens Help from any mode without activating the selected action.
+`Ctrl+C` exits the TUI from any mode.
+
+### Session Details (`Ctrl+L`)
+
+| Key | Action |
+|:---|:---|
+| `↑` `↓` | Previous / next session |
+| `PgUp` / `PgDn`, `Home` / `End`, mouse wheel | Scroll the current session's contents |
+| `Enter` | Open the current session's action menu |
+| `Esc` / `←` | Return to Browse |
+
+### Action Menu
+
+| Key | Action |
+|:---|:---|
+| `↑` `↓` / `Tab` / `Shift+Tab` | Select an action |
+| `Enter` | Activate the selected action |
+| `1`-`9` | Activate a numbered action |
+| `Esc` | Return to Browse |
 
 ### Bulk Delete (`Ctrl+D`)
 
@@ -186,14 +268,41 @@ Also supports Unicode/CJK search, mouse navigation, agent filters, permission/ap
 | `Enter` | Confirm deletion (when items selected) |
 | `Esc` | Cancel and return to browse |
 
+### Delete Confirmation
+
+| Key | Action |
+|:---|:---|
+| Arrow keys | Choose delete or cancel |
+| `Enter` | Confirm the selected choice |
+| `Esc` | Back without deleting |
+
+### Project Groups (`Ctrl+G`)
+
+| Key | Action |
+|:---|:---|
+| `↑` `↓` | Navigate groups and sessions |
+| `Enter` / `Space` on a group | Expand / collapse the group |
+| `Enter` on a session | Open action menu |
+| `Ctrl+L` on a session | Open session details |
+| `Esc` / `Ctrl+G` | Return to Browse |
+
 ### New Session (Agent Select)
 
 | Key | Action |
 |:---|:---|
-| `1`-`9` | Quick select agent |
-| `Tab` | Open permission/approval mode picker |
-| `Enter` | Launch with default mode |
-| `Esc` | Back |
+| `↑` `↓` / `Tab` / `Shift+Tab` | Select an agent; wraps through the full list |
+| `1`-`9` | Open the numbered agent's permission/approval mode picker |
+| `Enter` | Open the selected agent's permission/approval mode picker |
+| `Esc` | Return to the action menu |
+
+### Permission / Resume Mode Picker
+
+| Key | Action |
+|:---|:---|
+| `↑` `↓` / `Tab` / `Shift+Tab` | Select a mode |
+| `Enter` | Launch or resume with the selected mode |
+| `1`-`9` | Launch or resume with the numbered mode |
+| `Esc` | Return to the agent picker or action menu |
 
 </details>
 
@@ -210,6 +319,7 @@ Optional. AGF uses the platform configuration directory:
 Create the file at the matching location:
 
 ```toml
+appearance = "auto"        # "auto" (default) | "dark" | "light"
 sort_by = "time"            # "time" | "name" | "agent"
 max_sessions = 200
 search_scope = "name_path"  # "name_path" (default) | "all" (include summaries)
@@ -217,7 +327,10 @@ summary_search_count = 5    # number of summaries included when search_scope = "
 include_non_interactive = false # show Codex subagent/exec threads
 ```
 
-You can also edit `search_scope` and `summary_search_count` interactively by pressing `?` in the TUI.
+Press `F1`, then `Tab` for Settings to edit `search_scope`,
+`summary_search_count`, `show_recap`, and `appearance`. An explicit `dark` or
+`light` choice takes precedence over `COLORFGBG`. In Browse, `F2` toggles summary
+search directly; summary contents are excluded from search by default.
 
 ## Shell integration
 
@@ -255,7 +368,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 ## Requirements
 
 - macOS, Linux, or Windows (PowerShell 5.1+ / PowerShell 7+)
-- One or more of: `claude`, `codex`, `grok`, `kimi`, `qwen`, `prime-agent`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `omp`, `yolop`
+- One or more of: `claude`, `codex`, `agy`, `grok`, `kimi`, `qwen`, `prime-agent`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `omp`, `yolop`
 
 ## Install from source
 
@@ -270,7 +383,7 @@ agf setup
 
 `agf` works best with agents that store resumable sessions locally.
 
-Direct deletion is intentionally disabled for Prime Agent, Grok Build, Kimi Code, Qwen Code, and Gemini. Their native pickers coordinate active sessions, secondary indexes, or session sidecar/subagent artifacts; deleting only the visible file from AGF could leave corrupted or stale upstream state. Use the provider's native deletion workflow instead.
+Direct deletion is intentionally disabled for Prime Agent, Grok Build, Kimi Code, Qwen Code, Gemini, and Antigravity. Their native pickers coordinate active sessions, secondary indexes, or session sidecar/subagent artifacts; deleting only the visible file from AGF could leave corrupted or stale upstream state. For Antigravity, use the deletion action in `agy`'s `/resume` picker.
 
 JSON API and MCP metadata can contain private or untrusted text. Summaries are
 opt-in, and project scope limits returned records rather than providing an OS
@@ -282,7 +395,7 @@ do not currently have AGF scanners.
 
 ## Built with
 
-`agf` uses Rust 2024 (MSRV 1.88), [SuperLightTUI 0.24](https://github.com/subinium/SuperLightTUI),
+`agf` uses Rust 2024 (MSRV 1.88), [SuperLightTUI 0.25](https://github.com/subinium/SuperLightTUI),
 and the official [Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk).
 The default `mcp` feature can be omitted with `--no-default-features`; the TUI and
 JSON CLI remain available.
@@ -292,7 +405,13 @@ JSON CLI remain available.
 Issues and PRs are welcome. Adding support for another agent/harness is a self-contained change — see [docs/adding-an-agent.md](docs/adding-an-agent.md) for the wiring checklist.
 
 Unix PTY tests use Python 3 and `requirements-test.txt` to reconstruct terminal
-screens, including incremental redraws. Install these test dependencies in a
+screens, including incremental redraws, literal search/caret editing, scrollable
+Help and Details, and whole footer key labels at 20/39/40/80/120 columns. Theme
+cases cover dark/light selection contrast, the background hint, live Appearance
+changes, and non-color selection cues with `NO_COLOR`. The fixtures use isolated
+provider stores and synthetic executables, and verify
+storage bytes, native-handoff arguments/cwd/environment, terminal modes, termios,
+and stdin/stdout file flags. Install these test dependencies in a
 virtual environment and set `AGF_TEST_PYTHON` to its Python executable when
 running `cargo test`. They are not AGF runtime dependencies.
 

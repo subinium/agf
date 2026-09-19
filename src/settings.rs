@@ -3,8 +3,37 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
+impl Appearance {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Dark,
+            Self::Dark => Self::Light,
+            Self::Light => Self::Auto,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub appearance: Appearance,
     #[serde(default)]
     pub sort_by: Option<String>, // "time", "name", "agent"
     #[serde(default)]
@@ -34,6 +63,7 @@ fn default_search_scope() -> String {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            appearance: Appearance::default(),
             sort_by: None,
             max_sessions: None,
             summary_search_count: default_summary_search_count(),
@@ -75,11 +105,10 @@ impl Settings {
     }
 
     /// Persist settings to config.toml.
-    pub fn save_editable(&self) {
+    pub fn save_editable(&self) -> io::Result<()> {
         let path = config_path();
-        if let Err(error) = self.save_editable_to(&path) {
-            eprintln!("{}", save_error_diagnostic(&path, &error));
-        }
+        self.save_editable_to(&path)
+            .map_err(|error| io::Error::new(error.kind(), save_error_diagnostic(&path, &error)))
     }
 
     fn save_editable_to(&self, path: &Path) -> io::Result<()> {
@@ -93,6 +122,14 @@ impl Settings {
             Err(error) => return Err(error),
         };
 
+        if self.appearance == Appearance::Auto {
+            existing.remove("appearance");
+        } else {
+            existing.insert(
+                "appearance".into(),
+                toml::Value::String(self.appearance.label().to_ascii_lowercase()),
+            );
+        }
         existing.insert(
             "search_scope".to_string(),
             toml::Value::String(self.search_scope.clone()),
@@ -177,6 +214,39 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn appearance_round_trip_preserves_unrelated_configuration() {
+        let dir = TempDir::new();
+        let path = dir.0.join("config.toml");
+        fs::write(&path, "editor = 'code'\n[sources]\ncodex = '/custom'\n").unwrap();
+        for appearance in [Appearance::Dark, Appearance::Light, Appearance::Auto] {
+            Settings {
+                appearance,
+                ..Settings::default()
+            }
+            .save_editable_to(&path)
+            .unwrap();
+            let loaded = Settings::load_from(&path, |_| panic!("valid appearance rejected"));
+            assert_eq!(loaded.appearance, appearance);
+            let saved: toml::Table = fs::read_to_string(&path).unwrap().parse().unwrap();
+            assert_eq!(saved["editor"].as_str(), Some("code"));
+            assert_eq!(saved["sources"]["codex"].as_str(), Some("/custom"));
+        }
+        assert!(!fs::read_to_string(&path).unwrap().contains("appearance"));
+    }
+
+    #[test]
+    fn appearance_defaults_and_cycle_are_explicit() {
+        assert_eq!(
+            toml::from_str::<Settings>("").unwrap().appearance,
+            Appearance::Auto
+        );
+        assert!(toml::from_str::<Settings>("appearance = 'invalid'").is_err());
+        assert_eq!(Appearance::Auto.next(), Appearance::Dark);
+        assert_eq!(Appearance::Dark.next(), Appearance::Light);
+        assert_eq!(Appearance::Light.next(), Appearance::Auto);
     }
 
     #[test]
