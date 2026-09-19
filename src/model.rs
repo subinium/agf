@@ -278,7 +278,12 @@ impl Agent {
     pub fn supports_delete(self) -> bool {
         !matches!(
             self,
-            Agent::Grok | Agent::Kimi | Agent::Qwen | Agent::Gemini | Agent::PrimeAgent
+            Agent::Grok
+                | Agent::Kimi
+                | Agent::Qwen
+                | Agent::Gemini
+                | Agent::PrimeAgent
+                | Agent::Antigravity
         )
     }
 }
@@ -488,7 +493,6 @@ pub enum Action {
     Cd,
     Pin,
     Delete,
-    Back,
 }
 
 impl Action {
@@ -511,7 +515,6 @@ impl fmt::Display for Action {
             Action::Cd => write!(f, "Go to Directory"),
             Action::Pin => write!(f, "Pin Session"),
             Action::Delete => write!(f, "Delete Session"),
-            Action::Back => write!(f, "← Back"),
         }
     }
 }
@@ -641,6 +644,7 @@ mod tests {
         assert!(!Agent::Kimi.supports_delete());
         assert!(!Agent::Qwen.supports_delete());
         assert!(!Agent::PrimeAgent.supports_delete());
+        assert!(!Agent::Antigravity.supports_delete());
         assert!(Agent::Codex.supports_delete());
     }
 

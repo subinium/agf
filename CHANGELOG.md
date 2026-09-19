@@ -2,6 +2,58 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-19
+
+### Added
+
+- Antigravity CLI discovery and exact `agy --conversation <id>` resume, based on
+  the contribution in #95. Read SQLite metadata and bounded transcript previews;
+  preserve non-interactive session filtering and structured resume plans.
+- Auto, Dark and Light appearance settings, editable in Help & Settings. Auto
+  uses the terminal's `COLORFGBG` hint when available and otherwise starts dark.
+
+### Changed
+
+- Upgrade SuperLightTUI from 0.24.0 to 0.25.0 while keeping Rust 1.88 support.
+- Keep Antigravity deletion disabled; its native `/resume` picker coordinates
+  conversation databases, artifacts and active-session state.
+- Align terminal headers, menu columns and width-aware footer hints. Keep
+  complete key names visible before optional labels and version branding.
+- Use F1 for Help & Settings, F2 for search scope, F3/F4 for summaries, and
+  Ctrl+L for details. Right-arrow and literal `?`, `[` and `]` now edit search.
+- Split Help into scrollable Keys/Settings pages; wrap and scroll existing
+  session details without loading additional provider transcripts.
+- Agent-menu digits and Enter both open the permission-mode picker. Default
+  modes and explicit confirmation for privileged modes remain unchanged.
+- Use a shared high-contrast palette, restrained agent colors and cyan search
+  highlights. Keep selected metadata readable and distinguish notices with
+  both semantic colors and plain-text markers.
+- Separate color roles: keep pointers, menu numbers, pins and selection
+  surfaces neutral; restrict agent colors to names and status colors to the
+  relevant message or destructive action.
+- Keep urgent notices visible in narrow views and use a high-contrast neutral
+  fallback on 16-color terminals.
+- Apply the shared appearance and color roles to `agf watch`, keeping selection
+  separate from process status and bounding rows in narrow terminals.
+
+### Fixed
+
+- Propagate Antigravity storage read failures instead of caching empty success.
+- Convert local workspace file URIs using a structured, platform-aware parser.
+  Add read-only API, SQLite/WAL and terminal workflow regression coverage.
+- Do not treat the unverified `ANTIGRAVITY_CLI_HOME` variable as a native storage
+  override; scan and resume use Antigravity's documented default store.
+- Keep the selected action, provider and permission mode visible in short
+  terminals, and map action-menu mouse clicks to the visible item range.
+- Do not apply trailing pasted text to the search field after leaving Browse.
+- Give Escape priority over simultaneous confirmation keys in launch/delete
+  menus; resolve mixed keyboard/mouse input against the previously painted rows.
+- Select the best result on user query/provider changes without changing
+  background-refresh identity preservation; apply Paste + Enter in that order.
+- Preserve grapheme clusters in match highlights and narrow-screen columns.
+- Distinguish scanning, empty, filtered and failed-provider states, and display
+  settings-save and deletion outcomes instead of hiding failures.
+
 ## [0.15.1] - 2026-09-08
 
 ### Changed

@@ -114,7 +114,10 @@ fn delete_agent_sessions(agent: Agent, ids: &HashSet<&str>) -> Result<HashSet<St
             io::ErrorKind::Unsupported,
             "Prime Agent deletion is disabled: use Prime Agent's /resume picker so active daemon sessions are protected",
         )),
-        Agent::Antigravity => delete_antigravity_sessions(ids),
+        Agent::Antigravity => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Antigravity deletion is disabled: use agy's /resume picker so conversation databases, artifacts, and active sessions stay consistent",
+        )),
     }
 }
 
@@ -578,51 +581,6 @@ fn delete_hermes_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Er
 }
 
 // ---------------------------------------------------------------------------
-// Antigravity
-// ---------------------------------------------------------------------------
-
-fn delete_antigravity_sessions(ids: &HashSet<&str>) -> Result<HashSet<String>, io::Error> {
-    let mut deleted = HashSet::new();
-    let antigravity_dir = config::antigravity_dir().map_err(io::Error::other)?;
-    let brain_dir = antigravity_dir.join("brain");
-    let conv_dir = antigravity_dir.join("conversations");
-    let db_path = antigravity_dir.join("conversation_summaries.db");
-
-    // Remove SQLite summary rows if database exists
-    if db_path.exists()
-        && let Ok(mut conn) = rusqlite::Connection::open(&db_path)
-        && let Ok(tx) = conn.transaction()
-    {
-        for id in ids {
-            let _ = tx.execute(
-                "DELETE FROM conversation_summaries WHERE conversation_id = ?1",
-                [*id],
-            );
-        }
-        let _ = tx.commit();
-    }
-
-    for id in ids {
-        let mut removed = false;
-        let session_folder = brain_dir.join(id);
-        if session_folder.is_dir() && fs::remove_dir_all(&session_folder).is_ok() {
-            removed = true;
-        }
-
-        let conv_db = conv_dir.join(format!("{id}.db"));
-        if conv_db.exists() && fs::remove_file(&conv_db).is_ok() {
-            removed = true;
-        }
-
-        if removed {
-            deleted.insert((*id).to_string());
-        }
-    }
-
-    Ok(deleted)
-}
-
-// ---------------------------------------------------------------------------
 // Yolop
 // ---------------------------------------------------------------------------
 
@@ -669,6 +627,22 @@ mod tests {
 
     fn ids(list: &[&'static str]) -> HashSet<&'static str> {
         list.iter().copied().collect()
+    }
+
+    #[test]
+    fn antigravity_deletion_is_refused_without_inspecting_provider_storage() {
+        let error = delete_agent_sessions(
+            Agent::Antigravity,
+            &ids(&["c96a140c-d4c0-4996-9b9b-03a0468b1fcc"]),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("/resume"));
+        let selection = HashMap::from([(
+            Agent::Antigravity,
+            HashSet::from(["c96a140c-d4c0-4996-9b9b-03a0468b1fcc".to_owned()]),
+        )]);
+        assert!(delete_selection(&selection).is_empty());
     }
 
     fn make_dir(_name: &str) -> std::path::PathBuf {

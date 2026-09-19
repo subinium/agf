@@ -83,7 +83,7 @@ pub fn generate_command(
         }
         Action::Cd if session.project_path.is_empty() => None,
         Action::Cd => Some(shell.cd_only(&quoted_path)),
-        Action::Delete | Action::Back | Action::Pin => None,
+        Action::Delete | Action::Pin => None,
     }
 }
 
@@ -97,7 +97,6 @@ pub fn action_preview(session: &Session, action: Action) -> String {
         Action::Cd => shell.cd_only(&shell.quote(&session.display_path())),
         Action::Pin => "toggle pin".to_string(),
         Action::Delete => "remove session data".to_string(),
-        Action::Back => "return to session list".to_string(),
     }
 }
 

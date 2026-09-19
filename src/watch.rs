@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crate::model::{Agent, Session};
 use crate::scanner;
 use crate::text;
+use crate::tui::palette::Palette;
 
 struct WatchState {
     sessions: Vec<Session>,
@@ -108,8 +109,8 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
     }
     // Paint stale cache immediately; filesystem/SQLite scans and process
     // probes run off the render thread even on the first frame.
-    let include_non_interactive =
-        include_non_interactive || crate::settings::Settings::load().include_non_interactive;
+    let settings = crate::settings::Settings::load();
+    let include_non_interactive = include_non_interactive || settings.include_non_interactive;
     let (mut sessions, _) = crate::cache::load_cache();
     if !include_non_interactive {
         sessions.retain(|session| session.interactive);
@@ -134,8 +135,17 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
         });
     }
 
+    let depth = slt::ColorDepth::detect();
+    let theme = watch_theme(
+        settings.appearance,
+        std::env::var("COLORFGBG").ok().as_deref(),
+    );
     slt::run_with(
-        slt::RunConfig::default().title("agf watch").mouse(true),
+        slt::RunConfig::default()
+            .title("agf watch")
+            .mouse(true)
+            .color_depth(depth)
+            .theme(theme),
         |ui: &mut slt::Context| {
             // Check for background refresh results
             if let Ok((new_sessions, new_running)) = rx.try_recv() {
@@ -186,7 +196,7 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
             }
 
             // Scroll
-            let viewport = (ui.height() as usize).saturating_sub(6).max(1);
+            let viewport = watch_viewport(ui.height()).max(1) as usize;
             let margin = 3usize.min(viewport.saturating_sub(1));
             if state.selected < state.scroll_offset {
                 state.scroll_offset = state.selected;
@@ -200,88 +210,211 @@ pub fn run_watch(interval_secs: u64, include_non_interactive: bool) -> anyhow::R
 
             // Render
             let elapsed = state.last_refresh.elapsed().as_secs();
-
-            let _ = ui.col(|ui| {
-                ui.text("");
-                let _ = ui.container().pl(2).pr(1).row(|ui| {
-                    ui.text("agf watch")
-                        .fg(slt::Color::Rgb(229, 229, 229))
-                        .bold();
-                    ui.spacer();
-                    let running_color = match &state.running_agents.0 {
-                        Some(agents) if !agents.is_empty() => slt::Color::Rgb(52, 211, 153),
-                        _ => slt::Color::Rgb(107, 114, 128),
-                    };
-                    ui.text(state.running_agents.label()).fg(running_color);
-                    ui.text(format!("  {elapsed}s ago"))
-                        .fg(slt::Color::Rgb(107, 114, 128));
-                });
-                let _ = ui.separator_colored(slt::Color::Rgb(64, 64, 64));
-
-                let _ = ui.container().grow(1).pr(1).col(|ui| {
-                    if state.sessions.is_empty() {
-                        let _ = ui.container().pl(2).col(|ui| {
-                            let _ = ui.empty_state("No sessions", "Waiting for agent sessions...");
-                        });
-                        return;
-                    }
-
-                    let end = (state.scroll_offset + viewport).min(state.sessions.len());
-                    for vi in state.scroll_offset..end {
-                        let s = &state.sessions[vi];
-                        let is_selected = vi == state.selected;
-                        let bg = if is_selected {
-                            slt::Color::Rgb(59, 59, 59)
-                        } else {
-                            slt::Color::Reset
-                        };
-
-                        let status = match state.running_agents.is_running(s.agent) {
-                            Some(true) => ("\u{25cf} ", slt::Color::Rgb(52, 211, 153)),
-                            Some(false) => ("\u{25cb} ", slt::Color::Rgb(107, 114, 128)),
-                            None => ("? ", slt::Color::Rgb(107, 114, 128)),
-                        };
-
-                        let (r, g, b) = s.agent.color();
-                        let agent_color = slt::Color::Rgb(r, g, b);
-
-                        let _ = ui.row(|ui| {
-                            ui.styled(status.0.to_string(), slt::Style::new().fg(status.1).bg(bg));
-                            ui.styled(
-                                text::fit(&s.agent.to_string(), 14),
-                                slt::Style::new().fg(agent_color).bold().bg(bg),
-                            );
-                            ui.styled(
-                                text::fit(&text::sanitize_terminal(&s.project_name), 20),
-                                slt::Style::new().fg(slt::Color::Rgb(229, 229, 229)).bg(bg),
-                            );
-                            if let Some(branch) = &s.git_branch {
-                                ui.styled(
-                                    format!("  {}", text::sanitize_terminal(branch)),
-                                    slt::Style::new().fg(slt::Color::Rgb(52, 211, 153)).bg(bg),
-                                );
-                            }
-                            ui.styled(
-                                format!("  {}", s.time_display()),
-                                slt::Style::new().fg(slt::Color::Rgb(107, 114, 128)).bg(bg),
-                            );
-                        });
-                    }
-                });
-
-                let _ = ui.separator_colored(slt::Color::Rgb(64, 64, 64));
-                let _ = ui.container().pr(1).row(|ui| {
-                    ui.spacer();
-                    let _ = ui.help_colored(
-                        &[("↑↓", "nav"), ("q/Esc", "quit")],
-                        slt::Color::Rgb(107, 114, 128),
-                        slt::Color::Rgb(64, 64, 64),
-                    );
-                });
-            });
+            if depth == slt::ColorDepth::Basic {
+                ui.provide(depth, |ui| render_watch(ui, &state, elapsed));
+            } else {
+                render_watch(ui, &state, elapsed);
+            }
         },
     )?;
     Ok(())
+}
+
+fn watch_theme(appearance: crate::settings::Appearance, colorfgbg: Option<&str>) -> slt::Theme {
+    match appearance {
+        crate::settings::Appearance::Auto => crate::tui::terminal_theme(colorfgbg),
+        crate::settings::Appearance::Dark => slt::Theme::dark(),
+        crate::settings::Appearance::Light => slt::Theme::light(),
+    }
+}
+
+fn watch_viewport(height: u32) -> u32 {
+    height.saturating_sub(if height >= 4 { 4 } else { 2 })
+}
+
+fn render_watch(ui: &mut slt::Context, state: &WatchState, elapsed: u64) {
+    let palette = Palette::from_ui(ui);
+    let (width, height) = (ui.width(), ui.height());
+    if width == 0 || height == 0 {
+        return;
+    }
+    let viewport = watch_viewport(height);
+    let _ = ui
+        .container()
+        .w(width)
+        .h(height)
+        .text_color(palette.text)
+        .bg(palette.background)
+        .col(|ui| {
+            if height >= 2 {
+                render_watch_header(ui, state.running_agents.label(), elapsed, palette);
+            }
+            if height >= 4 {
+                let _ = ui.separator_colored(palette.border);
+            }
+            if viewport > 0 {
+                let _ = ui.container().h(viewport).min_h(viewport).col(|ui| {
+                    if state.sessions.is_empty() {
+                        ui.text(text::truncate("No sessions", width as usize))
+                            .fg(palette.text);
+                        if viewport > 1 {
+                            ui.text(text::truncate(
+                                "Waiting for agent sessions...",
+                                width as usize,
+                            ))
+                            .fg(palette.muted);
+                        }
+                        return;
+                    }
+                    let end = (state.scroll_offset + viewport as usize).min(state.sessions.len());
+                    for vi in state.scroll_offset..end {
+                        let session = &state.sessions[vi];
+                        render_watch_row(
+                            ui,
+                            session,
+                            state.running_agents.is_running(session.agent),
+                            vi == state.selected,
+                            palette,
+                        );
+                    }
+                });
+            }
+            if height >= 4 {
+                let _ = ui.separator_colored(palette.border);
+            }
+            crate::tui::render_footer(ui, &[("Up/Down", "Move"), ("q", "Quit"), ("Esc", "Quit")]);
+        });
+}
+
+fn render_watch_header(ui: &mut slt::Context, running: String, elapsed: u64, palette: Palette) {
+    ui.container().h(1).min_h(1).draw(move |buffer, rect| {
+        if rect.height == 0 {
+            return;
+        }
+        let width = rect.width as usize;
+        let title = text::truncate("agf watch", width);
+        let style = slt::Style::new().bg(palette.background);
+        buffer.set_string(rect.x, rect.y, &title, style.fg(palette.text).bold());
+        let title_width = text::width(&title);
+        let remaining = width.saturating_sub(title_width + 2);
+        let time = format!("  {elapsed}s ago");
+        let time_width = if text::width(&time) <= remaining {
+            text::width(&time)
+        } else {
+            0
+        };
+        let status = text::truncate(&running, remaining.saturating_sub(time_width));
+        if !status.is_empty() {
+            buffer.set_string(
+                rect.x + title_width as u32 + 2,
+                rect.y,
+                &status,
+                style.fg(palette.secondary),
+            );
+        }
+        if time_width > 0 {
+            buffer.set_string(
+                rect.x + (width - time_width) as u32,
+                rect.y,
+                &time,
+                style.fg(palette.muted),
+            );
+        }
+    });
+}
+
+fn render_watch_row(
+    ui: &mut slt::Context,
+    session: &Session,
+    running: Option<bool>,
+    selected: bool,
+    palette: Palette,
+) {
+    let agent = session.agent;
+    let label = agent.to_string();
+    let project = text::sanitize_terminal(&session.project_name);
+    let branch = session
+        .git_branch
+        .as_deref()
+        .map(text::sanitize_terminal)
+        .unwrap_or_default();
+    let time = format!("  {}", session.time_display());
+    ui.container().h(1).min_h(1).draw(move |buffer, rect| {
+        if rect.height == 0 {
+            return;
+        }
+        let width = rect.width as usize;
+        let background = if selected {
+            palette.selection_bg
+        } else {
+            palette.background
+        };
+        let style = slt::Style::new()
+            .fg(palette.row_text(selected))
+            .bg(background);
+        let metadata = style.fg(palette.row_muted(selected));
+        buffer.set_string(rect.x, rect.y, &" ".repeat(width), style);
+        let marker_width = width.min(2);
+        buffer.set_string(
+            rect.x,
+            rect.y,
+            &text::fit(if selected { ">" } else { "" }, marker_width),
+            style.fg(palette.marker(selected)).bold(),
+        );
+        let status_width = width.saturating_sub(marker_width).min(2);
+        let (status, color) = match running {
+            Some(true) => ("\u{25cf}", palette.success),
+            Some(false) => ("\u{25cb}", palette.row_muted(selected)),
+            None => ("?", palette.row_muted(selected)),
+        };
+        buffer.set_string(
+            rect.x + marker_width as u32,
+            rect.y,
+            &text::truncate(status, status_width),
+            style.fg(color),
+        );
+        let agent_x = marker_width + status_width;
+        let agent_width = ((width - agent_x) / 2).min(14);
+        // Only the brand name carries its hue, never padding or metadata.
+        buffer.set_string(
+            rect.x + agent_x as u32,
+            rect.y,
+            &text::truncate(&label, agent_width.saturating_sub(1)),
+            style.fg(palette.agent(agent)),
+        );
+        let project_x = agent_x + agent_width;
+        let remaining = width - project_x;
+        let time_width = if remaining >= text::width(&time) + 8 {
+            text::width(&time)
+        } else {
+            0
+        };
+        let project_width = (remaining - time_width).min(20);
+        buffer.set_string(
+            rect.x + project_x as u32,
+            rect.y,
+            &text::fit(&project, project_width),
+            style,
+        );
+        let branch_x = project_x + project_width;
+        let branch_width = width - branch_x - time_width;
+        if !branch.is_empty() && branch_width > 2 {
+            buffer.set_string(
+                rect.x + branch_x as u32 + 2,
+                rect.y,
+                &text::truncate(&branch, branch_width - 2),
+                metadata,
+            );
+        }
+        if time_width > 0 {
+            buffer.set_string(
+                rect.x + (width - time_width) as u32,
+                rect.y,
+                &time,
+                metadata,
+            );
+        }
+    });
 }
 
 /// Which agent CLIs currently have a running process.
@@ -336,6 +469,212 @@ fn probe_running_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_fixture(
+        width: u32,
+        height: u32,
+        theme: slt::Theme,
+        depth: slt::ColorDepth,
+        state: &WatchState,
+    ) -> (slt::TestBackend, Palette) {
+        let mut backend = slt::TestBackend::new(width, height);
+        let mut palette = Palette::dark();
+        backend.render(|ui| {
+            ui.set_theme(theme);
+            let mut render = |ui: &mut slt::Context| {
+                palette = Palette::from_ui(ui);
+                render_watch(ui, state, 7);
+            };
+            if depth == slt::ColorDepth::Basic {
+                ui.provide(depth, render);
+            } else {
+                render(ui);
+            }
+        });
+        (backend, palette)
+    }
+
+    fn render_state() -> WatchState {
+        let mut first = session(Agent::Codex, "first", 1);
+        first.git_branch = Some("main".into());
+        let mut second = session(Agent::ClaudeCode, "second", 1);
+        second.git_branch = Some("feature".into());
+        WatchState {
+            sessions: vec![first, second],
+            running_agents: RunningAgents(Some(vec![Agent::Codex])),
+            last_refresh: Instant::now(),
+            selected: 0,
+            scroll_offset: 0,
+        }
+    }
+
+    #[test]
+    fn watch_appearance_honors_settings_and_terminal_hint() {
+        use crate::settings::Appearance;
+        for hint in [None, Some("invalid"), Some("15;0")] {
+            assert!(watch_theme(Appearance::Auto, hint).is_dark);
+        }
+        assert!(!watch_theme(Appearance::Auto, Some("0;15")).is_dark);
+        assert!(watch_theme(Appearance::Dark, Some("0;15")).is_dark);
+        assert!(!watch_theme(Appearance::Light, Some("15;0")).is_dark);
+    }
+
+    #[test]
+    fn watch_body_uses_readable_palette_roles_at_every_color_depth() {
+        let state = render_state();
+        for theme in [slt::Theme::dark(), slt::Theme::light()] {
+            for depth in [
+                slt::ColorDepth::TrueColor,
+                slt::ColorDepth::EightBit,
+                slt::ColorDepth::Basic,
+                slt::ColorDepth::NoColor,
+            ] {
+                let (backend, palette) = render_fixture(80, 10, theme, depth, &state);
+                backend.assert_line_contains(2, "> \u{25cf} Codex");
+                backend.assert_line_contains(3, "  \u{25cb} Claude Code");
+                for (index, session) in state.sessions.iter().enumerate() {
+                    let y = index as u32 + 2;
+                    let selected = index == state.selected;
+                    let style_at = |x| backend.buffer().get(x, y).style;
+                    assert_eq!(style_at(0).fg, Some(palette.marker(selected)));
+                    assert!(style_at(0).modifiers.contains(slt::Modifiers::BOLD));
+                    assert_eq!(style_at(4).fg, Some(palette.agent(session.agent)));
+                    assert!(!style_at(4).modifiers.contains(slt::Modifiers::BOLD));
+                    assert_eq!(style_at(17).fg, Some(palette.row_text(selected)));
+                    assert_eq!(style_at(18).fg, Some(palette.row_text(selected)));
+                    assert_eq!(style_at(40).fg, Some(palette.row_muted(selected)));
+                    assert_eq!(style_at(79).fg, Some(palette.row_muted(selected)));
+                    assert_eq!(
+                        style_at(2).fg,
+                        Some(if selected {
+                            palette.success
+                        } else {
+                            palette.row_muted(false)
+                        })
+                    );
+                    for x in [0, 2, 4, 18, 40, 79] {
+                        let style = style_at(x);
+                        let foreground = style.fg.unwrap().downsampled(depth);
+                        let background = style.bg.unwrap().downsampled(depth);
+                        if depth == slt::ColorDepth::NoColor {
+                            assert_eq!(foreground, slt::Color::Reset);
+                            assert_eq!(background, slt::Color::Reset);
+                        } else {
+                            assert!(
+                                slt::Color::contrast_ratio_f64(foreground, background) >= 4.5,
+                                "{depth:?}: {foreground:?} on {background:?} at ({x}, {y})"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(backend.buffer().get(0, 0).style.fg, Some(palette.text));
+                assert_eq!(
+                    backend.buffer().get(11, 0).style.fg,
+                    Some(palette.secondary)
+                );
+                assert_eq!(backend.buffer().get(79, 0).style.fg, Some(palette.muted));
+                for y in 0..10 {
+                    for x in 0..80 {
+                        assert_eq!(
+                            backend.buffer().get(x, y).style.bg,
+                            Some(if y == 2 {
+                                palette.selection_bg
+                            } else {
+                                palette.background
+                            }),
+                            "background at ({x}, {y})"
+                        );
+                    }
+                }
+                if depth == slt::ColorDepth::Basic {
+                    let (foreground, background) = if theme.is_dark {
+                        (slt::Color::White, slt::Color::Black)
+                    } else {
+                        (slt::Color::Black, slt::Color::White)
+                    };
+                    assert_eq!(palette.text, foreground);
+                    assert_eq!(palette.background, background);
+                    for y in 0..10 {
+                        for x in 0..80 {
+                            if let Some(color) = backend.buffer().get(x, y).style.fg {
+                                assert_eq!(color, foreground);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn watch_selection_is_independent_of_running_status_and_color() {
+        for depth in [slt::ColorDepth::Basic, slt::ColorDepth::NoColor] {
+            for running in [
+                None,
+                Some(vec![]),
+                Some(vec![Agent::Codex, Agent::ClaudeCode]),
+            ] {
+                let mut state = render_state();
+                state.running_agents = RunningAgents(running);
+                for selected in 0..2 {
+                    state.selected = selected;
+                    let (backend, _) = render_fixture(20, 8, slt::Theme::dark(), depth, &state);
+                    assert_eq!(backend.line(2).starts_with('>'), selected == 0);
+                    assert_eq!(backend.line(3).starts_with('>'), selected == 1);
+                    let symbol = match state.running_agents.is_running(Agent::Codex) {
+                        Some(true) => '\u{25cf}',
+                        Some(false) => '\u{25cb}',
+                        None => '?',
+                    };
+                    assert_eq!(backend.line(2).chars().nth(2), Some(symbol));
+                    assert_eq!(backend.line(3).chars().nth(2), Some(symbol));
+                    backend.assert_line_contains(7, "Esc");
+                    backend.assert_line_contains(2, "project");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn watch_frame_stays_bounded_with_long_metadata_and_tiny_viewports() {
+        let mut state = render_state();
+        state.sessions[0].project_name = "\u{d504}\u{b85c}\u{c81d}\u{d2b8}\n\tlong".repeat(20);
+        state.sessions[0].git_branch = Some("feature/very-long-branch".repeat(20));
+        for width in [1, 3, 5, 10, 20, 40, 80, 120] {
+            for height in 1..=8 {
+                for theme in [slt::Theme::dark(), slt::Theme::light()] {
+                    let (backend, _) =
+                        render_fixture(width, height, theme, slt::ColorDepth::Basic, &state);
+                    for y in 0..height {
+                        assert!(text::width(&backend.line(y)) <= width as usize);
+                    }
+                    if width >= 5 {
+                        backend.assert_line_contains(height - 1, "Esc");
+                    }
+                    if width >= 20 && height >= 5 {
+                        backend.assert_line_contains(2, "> \u{25cf} Codex");
+                        backend.assert_line_not_contains(height - 1, "feature/");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn watch_empty_state_uses_body_roles_and_keeps_footer_visible() {
+        let mut state = render_state();
+        state.sessions.clear();
+        for theme in [slt::Theme::dark(), slt::Theme::light()] {
+            for depth in [slt::ColorDepth::TrueColor, slt::ColorDepth::Basic] {
+                let (backend, palette) = render_fixture(20, 8, theme, depth, &state);
+                backend.assert_line_contains(2, "No sessions");
+                backend.assert_line_contains(3, "Waiting for");
+                backend.assert_line_contains(7, "Esc");
+                assert_eq!(backend.buffer().get(0, 2).style.fg, Some(palette.text));
+                assert_eq!(backend.buffer().get(0, 3).style.fg, Some(palette.muted));
+            }
+        }
+    }
 
     fn complete_fingerprint() -> crate::cache::SourceFingerprint {
         let mut value = serde_json::to_value(crate::cache::SourceFingerprint::default()).unwrap();

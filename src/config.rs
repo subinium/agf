@@ -226,9 +226,7 @@ pub fn gemini_dir() -> Result<PathBuf, AgfError> {
 }
 
 pub fn antigravity_dir() -> Result<PathBuf, AgfError> {
-    if let Some(path) = std::env::var_os("ANTIGRAVITY_CLI_HOME").filter(|path| !path.is_empty()) {
-        return Ok(absolute_env_path(PathBuf::from(path), &std::env::current_dir()?));
-    }
+    // No verified CLI storage override: scanning and agy must use the same root.
     Ok(home_dir()?.join(".gemini").join("antigravity-cli"))
 }
 
@@ -577,6 +575,7 @@ pub fn data_sources(agent: Agent) -> Vec<PathBuf> {
             if let Ok(dir) = antigravity_dir() {
                 sources.extend(sqlite_sources(dir.join("conversation_summaries.db")));
                 sources.push(dir.join("brain"));
+                sources.push(dir.join("conversations"));
             }
             sources
         }
@@ -805,9 +804,6 @@ pub fn resume_environment(agent: Agent) -> Result<BTreeMap<String, String>, Stri
                 insert("PRIME_AGENT_CODING_AGENT_DIR", prime_agent_dir())?;
             }
             insert("PRIME_AGENT_SESSION_DIR", prime_sessions_dir())?;
-        }
-        Agent::Antigravity if configured("ANTIGRAVITY_CLI_HOME") => {
-            insert("ANTIGRAVITY_CLI_HOME", antigravity_dir())?;
         }
         _ => {}
     }
@@ -1234,6 +1230,82 @@ mod tests {
     }
 
     #[test]
+    fn compat_antigravity_default_root_and_deletion_preserve_all_files() {
+        let fixture = CompatFixture::new();
+        run_child(
+            fixture
+                .child("antigravity")
+                .env("ANTIGRAVITY_CLI_HOME", "../unsupported-store")
+                .env("GEMINI_CLI_HOME", "../unrelated-gemini-home"),
+        );
+    }
+
+    fn assert_compat_antigravity(root: &std::path::Path) {
+        let store = root.join("home/.gemini/antigravity-cli");
+        let id = "c96a140c-d4c0-4996-9b9b-03a0468b1fcc";
+        let files = [
+            store.join("conversation_summaries.db"),
+            store.join("conversation_summaries.db-wal"),
+            store.join("conversations").join(format!("{id}.db")),
+            store
+                .join("brain")
+                .join(id)
+                .join(".system_generated/logs/transcript.jsonl"),
+        ];
+        for path in &files {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"synthetic provider data: never delete").unwrap();
+        }
+        assert_same_existing_path(antigravity_dir().unwrap(), &store);
+        let sources = data_sources(Agent::Antigravity);
+        for source in [
+            &files[0],
+            &files[1],
+            &store.join("brain"),
+            &store.join("conversations"),
+        ] {
+            assert!(sources.contains(source));
+        }
+        let session = crate::model::Session {
+            agent: Agent::Antigravity,
+            session_id: id.into(),
+            project_name: "fixture".into(),
+            project_path: root.join("cwd").to_string_lossy().into_owned(),
+            summaries: Vec::new(),
+            timestamp: 0,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+            interactive: true,
+        };
+        let before = files
+            .iter()
+            .map(|path| {
+                (
+                    std::fs::read(path).unwrap(),
+                    std::fs::metadata(path).unwrap().modified().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let error = crate::delete::delete_session(&session).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        let plan = crate::action::resume_plan(&session, None).unwrap();
+        assert_eq!(plan.args, ["--conversation", id]);
+        assert!(plan.env.is_empty());
+        let after = files
+            .iter()
+            .map(|path| {
+                (
+                    std::fs::read(path).unwrap(),
+                    std::fs::metadata(path).unwrap().modified().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(before, after);
+        assert!(!root.join("unsupported-store").exists());
+    }
+
+    #[test]
     fn compat_cursor_never_selects_an_unrelated_agent_implicitly() {
         let fixture = CompatFixture::new();
         let executable =
@@ -1652,6 +1724,7 @@ mod tests {
         };
         let root = PathBuf::from(std::env::var_os("AGF_COMPAT_ROOT").unwrap());
         match case.as_str() {
+            "antigravity" => assert_compat_antigravity(&root),
             "relative-executable" => assert_compat_relative_executable(&root),
             "scan-delete" => assert_compat_scan_delete(&root),
             "rebase" => assert_compat_rebase(&root),

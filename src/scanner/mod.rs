@@ -3,6 +3,7 @@ use std::thread;
 use crate::error::AgfError;
 use crate::model::{Agent, Session, compare_sessions, normalize_timestamp};
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod cursor_agent;
@@ -17,7 +18,6 @@ pub mod pi;
 pub mod prime_agent;
 pub mod qwen;
 pub mod yolop;
-pub mod antigravity;
 
 /// Truncate a string to `max` chars, appending "..." if truncated.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
