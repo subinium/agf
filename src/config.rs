@@ -5,7 +5,20 @@ use std::sync::OnceLock;
 use crate::error::AgfError;
 use crate::model::Agent;
 
+#[cfg(test)]
+static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+/// Only isolated unit-test subprocesses can replace the native home resolver.
+#[cfg(test)]
+pub(crate) fn set_home_dir_for_test(home: PathBuf) -> Result<(), PathBuf> {
+    TEST_HOME.set(home)
+}
+
 pub fn home_dir() -> Result<PathBuf, AgfError> {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.get() {
+        return Ok(home.clone());
+    }
     dirs::home_dir().ok_or(AgfError::NoHomeDir)
 }
 
@@ -258,6 +271,10 @@ pub fn hermes_dir() -> Result<PathBuf, AgfError> {
 }
 
 pub fn yolop_sessions_dir() -> Result<PathBuf, AgfError> {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.get() {
+        return Ok(home.join("data").join("yolop").join("sessions"));
+    }
     dirs::data_dir()
         .map(|d| d.join("yolop").join("sessions"))
         .ok_or(AgfError::NoDataDir)
@@ -351,6 +368,10 @@ fn expand_tilde(path: PathBuf) -> Result<PathBuf, AgfError> {
 }
 
 pub fn kiro_data_dir() -> Result<PathBuf, AgfError> {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.get() {
+        return Ok(home.join("localappdata").join("kiro-cli"));
+    }
     // Kiro CLI stores data via dirs::data_local_dir()
     // macOS: ~/Library/Application Support/kiro-cli/
     // Linux: ~/.local/share/kiro-cli/
@@ -1256,16 +1277,25 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"synthetic provider data: never delete").unwrap();
         }
-        assert_same_existing_path(antigravity_dir().unwrap(), &store);
+        // dirs uses FOLDERID_Profile on Windows, not HOME/USERPROFILE. Check
+        // native path construction without requiring or creating that store;
+        // all filesystem sentinels remain inside the temporary fixture.
+        #[cfg(windows)]
+        let expected_home = dirs::home_dir().unwrap();
+        #[cfg(not(windows))]
+        let expected_home = root.join("home");
+        let expected_store = expected_home.join(".gemini").join("antigravity-cli");
+        assert_eq!(antigravity_dir().unwrap(), expected_store);
         let sources = data_sources(Agent::Antigravity);
-        for source in [
-            &files[0],
-            &files[1],
-            &store.join("brain"),
-            &store.join("conversations"),
-        ] {
-            assert!(sources.contains(source));
-        }
+        assert_eq!(
+            sources,
+            vec![
+                expected_store.join("conversation_summaries.db"),
+                expected_store.join("conversation_summaries.db-wal"),
+                expected_store.join("brain"),
+                expected_store.join("conversations"),
+            ]
+        );
         let session = crate::model::Session {
             agent: Agent::Antigravity,
             session_id: id.into(),
