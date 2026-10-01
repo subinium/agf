@@ -213,6 +213,14 @@ pub fn opencode_data_dir() -> Result<PathBuf, AgfError> {
     Ok(home_dir()?.join(".local/share/opencode"))
 }
 
+/// Muse uses the XDG layout even on macOS, not Library/Application Support.
+pub fn muse_data_dir() -> Result<PathBuf, AgfError> {
+    if let Some(path) = std::env::var_os("XDG_DATA_HOME").filter(|path| !path.is_empty()) {
+        return Ok(absolute_env_path(PathBuf::from(path), &std::env::current_dir()?).join("muse"));
+    }
+    Ok(home_dir()?.join(".local/share/muse"))
+}
+
 pub fn pi_sessions_dir() -> Result<PathBuf, AgfError> {
     if let Some(path) =
         std::env::var_os("PI_CODING_AGENT_SESSION_DIR").filter(|path| !path.is_empty())
@@ -557,6 +565,9 @@ pub fn data_sources(agent: Agent) -> Vec<PathBuf> {
         Agent::OpenCode => opencode_data_dir()
             .map(|d| sqlite_sources(d.join("opencode.db")))
             .unwrap_or_default(),
+        Agent::Muse => muse_data_dir()
+            .map(|d| vec![d.join("sessions")])
+            .unwrap_or_default(),
         Agent::Pi => pi_sessions_dir().map(|d| vec![d]).unwrap_or_default(),
         Agent::OhMyPi => oh_my_pi_sessions_dir().map(|d| vec![d]).unwrap_or_default(),
         Agent::Kiro => {
@@ -789,6 +800,10 @@ pub fn resume_environment(agent: Agent) -> Result<BTreeMap<String, String>, Stri
         Agent::OpenCode if configured("XDG_DATA_HOME") => insert(
             "XDG_DATA_HOME",
             opencode_data_dir().map(|path| path.parent().expect("opencode suffix").to_path_buf()),
+        )?,
+        Agent::Muse if configured("XDG_DATA_HOME") => insert(
+            "XDG_DATA_HOME",
+            muse_data_dir().map(|path| path.parent().expect("muse suffix").to_path_buf()),
         )?,
         Agent::Pi => {
             if configured("PI_CODING_AGENT_DIR") {

@@ -12,6 +12,7 @@ pub mod grok;
 pub mod hermes;
 pub mod kimi;
 pub mod kiro;
+pub mod muse;
 pub mod oh_my_pi;
 pub mod opencode;
 pub mod pi;
@@ -317,6 +318,7 @@ pub fn scan_agent(agent: Agent) -> Result<Vec<Session>, AgfError> {
         Agent::Yolop => yolop::scan(),
         Agent::PrimeAgent => prime_agent::scan(),
         Agent::Antigravity => antigravity::scan(),
+        Agent::Muse => muse::scan(),
     }
 }
 

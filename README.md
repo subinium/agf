@@ -80,6 +80,7 @@ Then you either dig through history files or start over.
 
 | Agent | Resume command | Local session source |
 |:---|:---|:---|
+| [Muse Code](https://dev.meta.ai/docs/muse-code/interactive) | `muse resume <id>` | `$XDG_DATA_HOME/muse/sessions/` or `~/.local/share/muse/sessions/` |
 | [Claude Code](https://github.com/anthropics/claude-code) | `claude --resume <id>` | `~/.claude/history.jsonl` + `~/.claude/projects/` |
 | [Codex](https://github.com/openai/codex) | `codex resume <id>` | `~/.codex/sessions/**/*.jsonl` |
 | [Grok Build](https://github.com/xai-org/grok-build) | `grok --resume <id>` | `$GROK_HOME/sessions/` or `~/.grok/sessions/` |
@@ -101,6 +102,7 @@ Then you either dig through history files or start over.
 
 | Agent | Format | Default Path |
 |:---|:---|:---|
+| Muse Code | JSONL | `${XDG_DATA_HOME:-~/.local/share}/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` |
 | Claude Code | JSONL | `~/.claude/history.jsonl` (sessions)<br>`~/.claude/projects/*/` (worktree detection) |
 | Codex | JSONL | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 | Grok Build | JSON + JSONL | `$GROK_HOME/sessions/<encoded-cwd>/<id>/summary.json` (default `~/.grok`)<br>Activity, title, recap, branch, and worktree metadata come from the bounded summary document |
@@ -128,6 +130,7 @@ Then you either dig through history files or start over.
 | Gemini | `GEMINI_CLI_HOME` selects the parent of `.gemini` |
 | Cursor | `AGF_CURSOR_CLI` explicitly selects one executable path/name, including installations named `agent` |
 | OpenCode | `XDG_DATA_HOME` |
+| Muse Code | `XDG_DATA_HOME` (including macOS); relative roots are resolved before changing directory |
 | pi | `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR` |
 | Hermes | `HERMES_HOME`; native Windows defaults to `%APPDATA%/hermes` |
 
@@ -368,7 +371,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 ## Requirements
 
 - macOS, Linux, or Windows (PowerShell 5.1+ / PowerShell 7+)
-- One or more of: `claude`, `codex`, `agy`, `grok`, `kimi`, `qwen`, `prime-agent`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `omp`, `yolop`
+- One or more of: `claude`, `codex`, `agy`, `grok`, `kimi`, `qwen`, `prime-agent`, `opencode`, `pi`, `kiro-cli`, `cursor-agent`, `gemini`, `hermes`, `omp`, `yolop`, `muse`
 
 ## Install from source
 
@@ -383,12 +386,18 @@ agf setup
 
 `agf` works best with agents that store resumable sessions locally.
 
-Direct deletion is intentionally disabled for Prime Agent, Grok Build, Kimi Code, Qwen Code, Gemini, and Antigravity. Their native pickers coordinate active sessions, secondary indexes, or session sidecar/subagent artifacts; deleting only the visible file from AGF could leave corrupted or stale upstream state. For Antigravity, use the deletion action in `agy`'s `/resume` picker.
+Direct deletion is intentionally disabled for Prime Agent, Grok Build, Kimi Code, Qwen Code, Gemini, Antigravity, and Muse Code. Their native pickers coordinate active sessions, secondary indexes, or session sidecar/subagent artifacts; deleting only the visible file from AGF could leave corrupted or stale upstream state. For Antigravity, use the deletion action in `agy`'s `/resume` picker.
 
 JSON API and MCP metadata can contain private or untrusted text. Summaries are
 opt-in, and project scope limits returned records rather than providing an OS
 sandbox. CSV preserves source values, including spreadsheet formula prefixes;
 import it as text when opening untrusted session data in a spreadsheet.
+
+Muse Code reads bounded prompt and last-response previews from retained root logs,
+including sessions created by `exec` and `serve`. Nested subagent/observer logs
+are excluded because they are not standalone resume targets. Its session index,
+writer leases and subagent artifacts are never modified. See
+[Muse compatibility notes](docs/muse-code.md) for the verified format and limits.
 
 Providers outside the supported-agent table, including Amp and GitHub Copilot,
 do not currently have AGF scanners.

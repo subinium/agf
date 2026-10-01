@@ -30,6 +30,7 @@ pub enum Agent {
     Yolop,
     PrimeAgent,
     Antigravity,
+    Muse,
 }
 
 impl fmt::Display for Agent {
@@ -50,6 +51,7 @@ impl fmt::Display for Agent {
             Agent::Yolop => write!(f, "Yolop"),
             Agent::PrimeAgent => write!(f, "Prime Agent"),
             Agent::Antigravity => write!(f, "Antigravity"),
+            Agent::Muse => write!(f, "Muse Code"),
         }
     }
 }
@@ -72,6 +74,7 @@ impl Agent {
             Agent::Yolop => (34, 197, 94),       // #22C55E green
             Agent::PrimeAgent => (99, 102, 241), // #6366F1 indigo
             Agent::Antigravity => (142, 68, 173), // #8E44AD purple (Antigravity)
+            Agent::Muse => (8, 102, 255),        // #0866FF Meta blue
         }
     }
 
@@ -92,6 +95,7 @@ impl Agent {
             Agent::Yolop,
             Agent::PrimeAgent,
             Agent::Antigravity,
+            Agent::Muse,
         ]
     }
 
@@ -113,6 +117,7 @@ impl Agent {
             Agent::Yolop => "yolop",
             Agent::PrimeAgent => "prime-agent",
             Agent::Antigravity => "agy",
+            Agent::Muse => "muse",
         }
     }
 
@@ -146,7 +151,7 @@ impl Agent {
     /// Exact argv shared by shell commands and structured resume plans.
     pub fn resume_args(&self, session_id: &str) -> Vec<String> {
         let prefix: &[&str] = match self {
-            Agent::Codex => &["resume"],
+            Agent::Codex | Agent::Muse => &["resume"],
             Agent::Kimi | Agent::Pi | Agent::Yolop => &["--session"],
             Agent::OpenCode => &["-s"],
             Agent::Kiro => &["chat", "--resume-id"],
@@ -195,6 +200,11 @@ impl Agent {
                 ("yolo (no approval)", " -y"),
                 ("plan (read-only)", " --approval-mode plan"),
                 ("sandbox", " -s"),
+            ],
+            Agent::Muse => &[
+                ("default", ""),
+                ("no approval (sandbox on)", " --disable-approval"),
+                ("yolo (no sandbox)", " --yolo"),
             ],
             Agent::Kimi => &[
                 ("default", ""),
@@ -250,6 +260,7 @@ impl Agent {
             Agent::Yolop => "yolop",
             Agent::PrimeAgent => "prime-agent",
             Agent::Antigravity => "antigravity",
+            Agent::Muse => "muse",
         }
     }
 
@@ -271,6 +282,7 @@ impl Agent {
             "yolop" => Some(Agent::Yolop),
             "prime" | "prime-agent" | "prime-intellect" => Some(Agent::PrimeAgent),
             "antigravity" | "agy" => Some(Agent::Antigravity),
+            "muse" | "muse-code" => Some(Agent::Muse),
             _ => None,
         }
     }
@@ -284,6 +296,7 @@ impl Agent {
                 | Agent::Gemini
                 | Agent::PrimeAgent
                 | Agent::Antigravity
+                | Agent::Muse
         )
     }
 }
@@ -657,6 +670,29 @@ mod tests {
                 "omp"
             ),
             "omp --resume '019e14f4-c9a5-76dc-b7b6-0613e602a620'"
+        );
+    }
+
+    #[test]
+    fn muse_resume_uses_subcommand_and_native_modes() {
+        assert_eq!(
+            Agent::Muse.resume_cmd_with_program("session'quoted", &CommandShell::Posix, "muse"),
+            "muse resume 'session'\\''quoted'"
+        );
+        assert_eq!(
+            Agent::Muse.resume_args("session-id"),
+            ["resume", "session-id"]
+        );
+        assert_eq!(Agent::parse("Muse Code"), Some(Agent::Muse));
+        assert_eq!(Agent::parse("muse"), Some(Agent::Muse));
+        assert!(Agent::all().contains(&Agent::Muse));
+        assert_eq!(Agent::Muse.new_session_cmd(), "muse");
+        assert!(!Agent::Muse.supports_delete());
+        assert_eq!(
+            Agent::Muse
+                .resume_mode_args(Some("no approval (sandbox on)"))
+                .unwrap(),
+            ["--disable-approval"]
         );
     }
 

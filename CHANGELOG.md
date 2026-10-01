@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Muse Code session discovery, bounded prompt/response previews, and exact
+  `muse resume <id>` handoff with native approval modes and XDG storage overrides.
+  Register `muse` / `muse-code` in the TUI, JSON CLI and MCP provider catalog;
+  exclude child logs and keep direct deletion disabled.
+
 ## [0.16.0] - 2026-09-19
 
 ### Added
