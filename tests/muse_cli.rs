@@ -113,10 +113,11 @@ fn search_show_and_resume_use_native_identity_and_preserve_storage() {
         assert_eq!(plan["program"], "muse");
         assert_eq!(plan["args"], json!(args));
         assert_eq!(plan["cwd"], json!(fixture.project));
-        assert_eq!(
-            plan["env"],
-            json!({"XDG_DATA_HOME": fixture.root.join("data")})
-        );
+        assert_eq!(plan["env"].as_object().unwrap().len(), 1);
+        let storage = PathBuf::from(plan["env"]["XDG_DATA_HOME"].as_str().unwrap());
+        assert!(storage.is_absolute());
+        // Windows current_dir may omit canonicalize's verbatim path prefix.
+        assert_eq!(storage.canonicalize().unwrap(), fixture.root.join("data"));
         assert_eq!(plan["executable_found"], false);
         assert_eq!(result["data"]["executed"], false);
         assert!(!result.to_string().contains("must-not-leak"));
