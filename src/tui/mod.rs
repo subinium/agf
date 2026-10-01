@@ -2949,9 +2949,8 @@ mod slt_upgrade_tests {
     }
 
     #[test]
-    fn all_fifteen_provider_filters_cycle_in_both_directions() {
+    fn all_provider_filters_cycle_in_both_directions() {
         let mut app = app();
-        assert_eq!(Agent::all().len(), 15);
         let mut backend = TestBackend::new(40, 12);
         step(&mut backend, &mut app, EventBuilder::new());
         for &agent in Agent::all() {
@@ -2964,7 +2963,7 @@ mod slt_upgrade_tests {
             assert_eq!(app.filtered_indices.len(), 1);
             assert_eq!(app.selected_session().unwrap().agent, agent);
             backend.assert_contains(&format!("{agent} (1)"));
-            backend.assert_contains("1/15");
+            backend.assert_contains(&format!("1/{}", Agent::all().len()));
         }
         step(
             &mut backend,
@@ -2997,7 +2996,7 @@ mod slt_upgrade_tests {
             assert!(app.capture_active_session());
             app.mode = Mode::AgentSelect;
             let mut backend = TestBackend::new(width, height);
-            for i in 0..15 {
+            for i in 0..Agent::all().len() {
                 step(&mut backend, &mut app, EventBuilder::new());
                 assert_eq!(app.agent_index, i);
                 backend.assert_contains(&format!("{}) {}", i + 1, Agent::all()[i]));
@@ -3016,8 +3015,8 @@ mod slt_upgrade_tests {
                 &mut app,
                 EventBuilder::new().key_code(KeyCode::BackTab),
             );
-            assert_eq!(app.agent_index, 14);
-            backend.assert_contains("15) Antigravity");
+            assert_eq!(app.agent_index, Agent::all().len() - 1);
+            backend.assert_contains("16) Muse Code");
             assert!(
                 step(
                     &mut backend,
@@ -3027,7 +3026,7 @@ mod slt_upgrade_tests {
                 .is_none()
             );
             assert_eq!(app.mode, Mode::PermissionSelect);
-            assert_eq!(app.mode_options, Agent::Antigravity.resume_mode_options());
+            assert_eq!(app.mode_options, Agent::Muse.resume_mode_options());
         }
     }
 
@@ -3127,7 +3126,10 @@ mod slt_upgrade_tests {
             .is_none()
         );
         assert_eq!(app.mode, Mode::ActionSelect);
-        assert_eq!(app.action_session().unwrap().agent, Agent::Antigravity);
+        assert_eq!(
+            app.action_session().unwrap().agent,
+            *Agent::all().last().unwrap()
+        );
         assert!(
             step(
                 &mut backend,
@@ -3293,7 +3295,7 @@ mod slt_upgrade_tests {
             );
             assert_eq!(app.selected_set.len(), usize::from(bulk));
             assert!(app.deleted_tombstones.is_empty());
-            assert_eq!(app.sessions.len(), 15);
+            assert_eq!(app.sessions.len(), Agent::all().len());
         }
     }
 
@@ -3349,7 +3351,7 @@ mod slt_upgrade_tests {
                 backend.assert_line_contains(height - 1, key);
             }
             backend.assert_line_contains(height - 2, "─");
-            backend.assert_line_contains(height - 3, "15/15");
+            backend.assert_line_contains(height - 3, &format!("{0}/{0}", Agent::all().len()));
             assert!(text::width(&backend.line(3)) <= width as usize);
             assert!(text::width(&backend.line(height - 1)) <= width as usize);
         }
@@ -3817,40 +3819,40 @@ mod slt_upgrade_tests {
     }
 
     #[test]
-    fn antigravity_delete_is_absent_and_bulk_selection_is_disabled() {
-        let mut app = app();
-        let mut backend = TestBackend::new(80, 24);
-        step(
-            &mut backend,
-            &mut app,
-            EventBuilder::new().key_code(KeyCode::BackTab),
-        );
-        step(
-            &mut backend,
-            &mut app,
-            EventBuilder::new().key_code(KeyCode::Enter),
-        );
-        backend.assert_not_contains("Delete Session");
-        assert!(!available_actions(app.action_session().unwrap()).contains(&Action::Delete));
-        step(
-            &mut backend,
-            &mut app,
-            EventBuilder::new().key_code(KeyCode::Esc),
-        );
-        step(
-            &mut backend,
-            &mut app,
-            EventBuilder::new().key_with(KeyCode::Char('d'), KeyModifiers::CONTROL),
-        );
-        step(
-            &mut backend,
-            &mut app,
-            EventBuilder::new().key(' ').key_code(KeyCode::Enter),
-        );
-        assert_eq!(app.mode, Mode::BulkDelete);
-        assert_eq!(app.selection_count(), 0);
-        assert_eq!(app.sessions.len(), 15);
-        backend.assert_contains("0 selected");
+    fn retained_store_deletion_is_absent_and_bulk_selection_is_disabled() {
+        for agent in [Agent::Antigravity, Agent::Muse] {
+            let mut app = app();
+            app.agent_filter = Some(agent);
+            app.update_filter();
+            let mut backend = TestBackend::new(80, 24);
+            step(&mut backend, &mut app, EventBuilder::new());
+            step(
+                &mut backend,
+                &mut app,
+                EventBuilder::new().key_code(KeyCode::Enter),
+            );
+            backend.assert_not_contains("Delete Session");
+            assert!(!available_actions(app.action_session().unwrap()).contains(&Action::Delete));
+            step(
+                &mut backend,
+                &mut app,
+                EventBuilder::new().key_code(KeyCode::Esc),
+            );
+            step(
+                &mut backend,
+                &mut app,
+                EventBuilder::new().key_with(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            );
+            step(
+                &mut backend,
+                &mut app,
+                EventBuilder::new().key(' ').key_code(KeyCode::Enter),
+            );
+            assert_eq!(app.mode, Mode::BulkDelete);
+            assert_eq!(app.selection_count(), 0);
+            assert_eq!(app.sessions.len(), Agent::all().len());
+            backend.assert_contains("0 selected");
+        }
     }
 }
 
@@ -4275,6 +4277,7 @@ mod bulk_selection_tests {
             Agent::Qwen,
             Agent::PrimeAgent,
             Agent::Gemini,
+            Agent::Muse,
         ] {
             assert!(!available_actions(&session(agent, "id", 1)).contains(&Action::Delete));
         }

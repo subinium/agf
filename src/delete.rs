@@ -80,6 +80,10 @@ fn delete_agent_sessions(agent: Agent, ids: &HashSet<&str>) -> Result<HashSet<St
         ));
     }
     match agent {
+        Agent::Muse => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Muse Code deletion is disabled: retained sessions coordinate an index, writer leases, and subagent logs",
+        )),
         Agent::ClaudeCode => delete_claude_sessions(ids),
         Agent::Codex => delete_codex_sessions(ids),
         Agent::Grok => Err(io::Error::new(
@@ -627,6 +631,14 @@ mod tests {
 
     fn ids(list: &[&'static str]) -> HashSet<&'static str> {
         list.iter().copied().collect()
+    }
+
+    #[test]
+    fn muse_deletion_is_refused_without_opening_the_store() {
+        let error =
+            delete_agent_sessions(Agent::Muse, &ids(&["0198f0aa-1111-7000-8000-0000000000aa"]))
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
 
     #[test]

@@ -58,7 +58,7 @@ COLOR_ROLES = {
 SESSION_ID = "pty-id ' ; printf UNEXPECTED_EXECUTION ; $HOME"
 CONVERSATION_ID = "c96a140c-d4c0-4996-9b9b-03a0468b1fcc"
 PROVIDERS = ("claude", "codex", "grok", "kimi", "qwen", "opencode", "pi", "omp",
-             "kiro-cli", "cursor-agent", "gemini", "hermes", "yolop", "prime-agent", "agy")
+             "kiro-cli", "cursor-agent", "gemini", "hermes", "yolop", "prime-agent", "agy", "muse")
 TYPED = "\ud55c\uae00"
 PASTED = "\ubd99\uc5ec\ub123\uae30"
 F1 = b"\x1bOP"
@@ -1371,18 +1371,18 @@ def run_tui_case(case, executable, fixture, binary_hash, baseline, capture_cells
             target = re.search(r"PTY_ROW_\d+", top_row).group()
             run.input_frame(b"\x1b[<0;2;4M\x1b[<0;2;4m", ["Resume Session", target], "click resolves current resized row")
             run.selected_input(b"\t", "2) New Session", "Tab selects new session action")
-            run.input_frame(b"\r", ["New session in", "1) Claude Code"], "open fifteen-provider menu")
+            run.input_frame(b"\r", ["New session in", "1) Claude Code"], "open provider menu")
             run.input_frame(b"1", ["Select mode for Claude Code"], "agent digit opens modes without launching")
             assert not fixture.capture.exists(), "agent digit skipped the mode picker"
             run.input_frame(b"\x1b", ["New session in", "1) Claude Code"], "return from digit-selected modes")
             for index, label in enumerate(("Codex", "Grok Build", "Kimi Code", "Qwen Code", "OpenCode", "pi", "Oh My Pi",
-                                           "Kiro", "Cursor CLI", "Gemini", "Hermes", "Yolop", "Prime Agent", "Antigravity"), 2):
+                                           "Kiro", "Cursor CLI", "Gemini", "Hermes", "Yolop", "Prime Agent", "Antigravity", "Muse Code"), 2):
                 run.selected_input(b"\t", "{}) {}".format(index, label), "navigate long provider menu")
-            run.resize(110, 28, ["15) Antigravity", "New session in"])
+            run.resize(110, 28, ["16) Muse Code", "New session in"])
             run.selected_input(b"\t", "1) Claude Code", "provider menu wraps forward")
-            run.selected_input(b"\x1b[Z", "15) Antigravity", "provider menu wraps backward")
-            run.input_frame(b"\r", ["Select mode for Antigravity", "accept-edits"], "new Antigravity mode picker")
-            run.input_frame(b"\x1b[200~inactive\x1b[201~", ["Select mode for Antigravity"], "inactive search ignores paste")
+            run.selected_input(b"\x1b[Z", "16) Muse Code", "provider menu wraps backward")
+            run.input_frame(b"\r", ["Select mode for Muse Code", "default"], "new Muse Code mode picker")
+            run.input_frame(b"\x1b[200~inactive\x1b[201~", ["Select mode for Muse Code"], "inactive search ignores paste")
             for anchors in (["New session in"], ["Resume Session"], ["All (20)", "20/20"]):
                 run.input_frame(b"\x1b", anchors, "Escape restores previous mode")
             run.input_frame(b"\tPTY_ROW_", ["Claude Code (20)", "PTY_ROW_", "19/20"], "Tab plus typing after returning to browse")
