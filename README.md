@@ -9,6 +9,8 @@
 
 `agf` is a local-first fuzzy finder for AI coding-agent sessions.
 Search the sessions your terminal agents already keep locally, then resume the right one in a keystroke.
+Browse sessions from **16 agents**, including **Muse Code**, Claude Code, Codex,
+Antigravity, Grok Build, Kimi Code, Qwen Code, Gemini, and Cursor CLI.
 
 ![agf demo](./assets/demo.gif)
 
@@ -48,6 +50,19 @@ shell wrapper or an earlier Cargo/Homebrew executable on PATH.
 ```bash
 agf resume project-name   # fuzzy-matches and resumes the best match directly
 ```
+
+Filter to Muse Code when you want to find or resume one of its sessions:
+
+```bash
+agf list --agent muse
+agf resume --agent muse project-name
+agf search parser --agent muse --include-summaries
+```
+
+`muse-code` is also accepted as the agent name. AGF reads Muse's retained local
+logs and hands the selected session to `muse resume <id>`; install the `muse`
+CLI to launch it. See [Muse Code compatibility](docs/muse-code.md) for storage
+paths, preview limits, and supported launch modes.
 
 ### Scripts and agent tools
 
