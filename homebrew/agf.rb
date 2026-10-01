@@ -1,5 +1,5 @@
 class Agf < Formula
-  desc "AI Agent Session Finder TUI — find, resume, and manage AI coding agent sessions"
+  desc "Find, search, and resume local AI coding-agent sessions"
   homepage "https://github.com/subinium/agf"
   version "0.15.1"
   license "MIT"

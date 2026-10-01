@@ -1,10 +1,10 @@
 [package]
 name = "agf"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 # 1.88 = let-chains (edition 2024); also covers usize::is_multiple_of (1.87).
 rust-version = "1.88"
-description = "Find and resume local AI coding-agent sessions across Claude Code, Codex, Antigravity, Grok, Kimi, Qwen, Prime Agent, Gemini, Cursor CLI, OpenCode, Kiro, pi, Hermes, Oh My Pi, Yolop, and Muse Code"
+description = "Find, search, and resume local AI coding-agent sessions across Muse Code, Claude Code, Codex, Antigravity, Grok, Kimi, Qwen, Gemini, Cursor, and more"
 license = "MIT"
 repository = "https://github.com/subinium/agf"
 keywords = ["tui", "cli", "agent", "session", "claude"]

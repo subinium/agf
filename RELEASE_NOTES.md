@@ -1,4 +1,29 @@
-# agf 0.16.0
+# agf 0.17.0
+
+Find and resume sessions across 16 local coding agents, now including Muse Code.
+This release also includes the Antigravity and terminal improvements prepared
+for 0.16.0, which was not published as a tagged release.
+
+## Muse Code
+
+- Discover retained Muse Code sessions with `--agent muse` or `--agent muse-code`
+  in the TUI, JSON CLI, and MCP server.
+- Search bounded prompt previews, inspect the last response, and resume the
+  exact session with `muse resume <id>`. Muse is also in the new-session menu.
+- Honor `XDG_DATA_HOME`, including relative storage paths, when handing off to
+  Muse from the recorded workspace. Offer native default, no-approval, and
+  yolo launch modes through the existing picker.
+- Read root session logs without modifying Muse's index or writer leases.
+  Exclude nested subagent logs and keep direct deletion disabled.
+- Verify the retained-log format against the official Muse Code 1.4.2 binary
+  with an offline echo fixture. See [compatibility notes](docs/muse-code.md).
+
+## Security Audit
+
+- Fix main-branch audit reporting with job-scoped `checks: write` permission.
+  The failing run found no vulnerabilities, but could not report its warning
+  because its GitHub token lacked permission to create a check run.
+- Replace the yanked transitive dependency `yoke-derive` 0.8.3 with 0.8.4.
 
 ## Antigravity And Terminal Runtime
 

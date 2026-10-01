@@ -2,12 +2,26 @@
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-01
+
 ### Added
 
 - Muse Code session discovery, bounded prompt/response previews, and exact
   `muse resume <id>` handoff with native approval modes and XDG storage overrides.
   Register `muse` / `muse-code` in the TUI, JSON CLI and MCP provider catalog;
   exclude child logs and keep direct deletion disabled.
+
+### Fixed
+
+- Grant the CI security-audit job permission to publish check results, fixing
+  `Resource not accessible by integration` on main-branch builds with audit
+  warnings. Keep repository contents read-only for that job.
+- Replace the yanked `yoke-derive` 0.8.3 dependency with 0.8.4.
+
+### Docs
+
+- Add Muse Code to the project introduction, command examples, package
+  description, and release notes. Align package and API example versions.
 
 ## [0.16.0] - 2026-09-19
 
